@@ -1,0 +1,148 @@
+{
+  "drivers": [
+    {
+      "driverId": "R-1001",
+      "name": "D. M. Perera",
+      "phone": "077 123 4567",
+      "nic": "198512345678",
+      "plate": "WP 4567",
+      "vehicleType": "Maxi",
+      "route": "Colombo – Island-wide",
+      "active": true,
+      "createdAt": 1794154317785
+    }
+  ],
+  "lorries": [
+    {
+      "id": "lorry-wplb4521",
+      "plate": "WP LB-4521",
+      "route": "Deniyaya → Anuradhapura",
+      "driverName": "D. M. Perera",
+      "driverPhone": "077 123 4567",
+      "driverId": "R-1001",
+      "vehicleType": "Maxi",
+      "capacity": "3,000 Kg",
+      "maxWeight": "",
+      "imageUrl": "",
+      "images": [],
+      "description": "",
+      "startLocation": "Deniyaya",
+      "endLocation": "Anuradhapura",
+      "travelRoute": "via Avissawella → Kandy",
+      "viaWaypoints": [
+        {
+          "name": "Avissawella",
+          "lat": 6.9535,
+          "lng": 80.2104
+        },
+        {
+          "name": "Kandy",
+          "lat": 7.2906,
+          "lng": 80.6337
+        }
+      ],
+      "startLat": 6.3409,
+      "startLng": 80.5595,
+      "endLat": 8.3114,
+      "endLng": 80.4037,
+      "finalDestination": "",
+      "emptyTime": "",
+      "returnRoute": "",
+      "availableSpace": "Full (100%)",
+      "availableCapacityKg": "3,000 Kg",
+      "hasFreezer": true,
+      "hasHelper": true,
+      "isOnline": true,
+      "isLive": true,
+      "lat": 6.3409863,
+      "lng": 80.5695066,
+      "heading": 281,
+      "speedKmH": 1,
+      "status": "empty",
+      "lastUpdated": "Just now",
+      "updatedAt": 1794222739797
+    }
+  ],
+  "customers": [
+    {
+      "id": "CUST-0779998877",
+      "name": "UXAudit Cash Customer",
+      "phone": "0779998877",
+      "email": "",
+      "city": "",
+      "createdAt": 1794204321337,
+      "lastLoginAt": 1794207229544
+    },
+    {
+      "id": "CUST-0776091697",
+      "name": "kavindu",
+      "phone": "0776091697",
+      "email": "",
+      "city": "",
+      "createdAt": 1794155880065,
+      "lastLoginAt": 1794208233529
+    }
+  ],
+  "bookings": [
+    {
+      "id": "ST-BK-2691",
+      "customerName": "kavindu",
+      "customerPhone": "0776091697",
+      "pickupCity": "matara",
+      "deliveryCity": "galle",
+      "date": "2026-11-19",
+      "dates": [
+        "2026-11-19",
+        "2026-11-20"
+      ],
+      "vehicleType": "Maxi",
+      "packageDetails": "abc",
+      "status": "delivered",
+      "assignedPlate": "WP 4567",
+      "assignedLorryId": "lorry-wp4567",
+      "bookingType": "individual_vehicle",
+      "cargoNature": "ගෘහ භාණ්ඩ / ලී බඩු (Furniture & Household Goods)",
+      "daysNeeded": "2",
+      "cargoWeight": "3400kg",
+      "helpersCount": "0",
+      "paymentSlipStatus": "approved",
+      "createdAt": 1794202334735,
+      "updatedAt": 1794208450066,
+      "quotedAmount": 2500,
+      "quotedAt": 1794202424807,
+      "quoteNote": "50%  advance",
+      "paymentRejectReason": "",
+      "paymentApprovedAt": 1794202537128,
+      "assignedDriverName": "D. M. Perera",
+      "assignedDriverPhone": "077 123 4567"
+    },
+    {
+      "id": "ST-BK-6602",
+      "customerName": "kavindu",
+      "customerPhone": "0776091697",
+      "pickupCity": "maradana",
+      "deliveryCity": "kandy",
+      "date": "2026-11-08",
+      "vehicleType": "Maxi",
+      "packageDetails": "abcdghskygu",
+      "status": "cancelled",
+      "assignedPlate": "WP 4567",
+      "assignedLorryId": "lorry-wp4567",
+      "bookingType": "individual_vehicle",
+      "cargoNature": "ගෘහ භාණ්ඩ (Furniture & Household)",
+      "daysNeeded": "2",
+      "cargoWeight": "1500kg",
+      "helpersCount": "1",
+      "createdAt": 1794155880064,
+      "updatedAt": 1794203330161,
+      "dates": [
+        "2026-11-08"
+      ],
+      "assignedDriverName": "D. M. Perera",
+      "assignedDriverPhone": "077 123 4567"
+    }
+  ],
+  "registrations": [],
+  "inquiries": [],
+  "reviews": []
+}

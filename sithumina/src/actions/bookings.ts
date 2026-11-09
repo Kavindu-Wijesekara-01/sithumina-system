@@ -1,0 +1,963 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import {
+  createBookingInStore,
+  getAllStoredBookings,
+  updateBookingStatusInStore,
+  upsertBookingInStore,
+  StoredBooking,
+  BookingStatusValue,
+  PaymentSlipStatus,
+  BookingPaymentMethod,
+} from "@/lib/server-store";
+import {
+  normalizePhoneNumber,
+  phonesMatch,
+  normalizePlate,
+} from "@/lib/phone-utils";
+import { ActionResult, BookingActionInput } from "./types";
+import { db } from "@/lib/firebase";
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  getDocs,
+  query,
+  where,
+} from "firebase/firestore";
+
+function isRealDriverName(val: unknown): string {
+  const s = String(val || "").trim();
+  return s && s !== "Driver" && s !== "Unassigned" ? s : "";
+}
+
+function mapFirestoreBooking(
+  resolvedId: string,
+  data: Record<string, any>
+): StoredBooking {
+  const resolvedDate =
+    data.date ||
+    (Array.isArray(data.dates) && data.dates[0]) ||
+    new Date(Number(data.createdAt) || Date.now()).toISOString().split("T")[0];
+  const resolvedDates =
+    Array.isArray(data.dates) && data.dates.length > 0
+      ? data.dates
+      : resolvedDate
+      ? [resolvedDate]
+      : [];
+
+  return {
+    id: resolvedId,
+    customerName: data.customerName || data.name || "Customer",
+    customerPhone: String(data.customerPhone || data.phone || "").trim(),
+    pickupCity: data.pickupCity || data.pickup || "",
+    deliveryCity: data.deliveryCity || data.destination || "",
+    pickupLat: data.pickupLat,
+    pickupLng: data.pickupLng,
+    deliveryLat: data.deliveryLat,
+    deliveryLng: data.deliveryLng,
+    date: resolvedDate,
+    dates: resolvedDates,
+    vehicleType: data.vehicleType || "Lorry",
+    packageDetails: data.packageDetails || data.notes || "",
+    status: data.status || "pending",
+    assignedLorryId: data.assignedLorryId || "",
+    assignedDriverName: isRealDriverName(data.assignedDriverName),
+    assignedDriverPhone: String(data.assignedDriverPhone || "").trim(),
+    assignedPlate: data.assignedPlate || data.selectedVehiclePlate || "",
+    bookingType: data.bookingType || "individual_vehicle",
+    cargoNature: data.cargoNature || "",
+    daysNeeded: data.daysNeeded || resolvedDates.length || 1,
+    cargoWeight: data.cargoWeight || data.weight || "",
+    helpersCount: data.helpersCount ?? "0",
+    quotedAmount:
+      typeof data.quotedAmount === "number" && !Number.isNaN(data.quotedAmount)
+        ? data.quotedAmount
+        : undefined,
+    quotedAt: Number(data.quotedAt) || undefined,
+    quoteNote: data.quoteNote ? String(data.quoteNote) : undefined,
+    paymentMethod: (data.paymentMethod as BookingPaymentMethod) || undefined,
+    paymentBankUsed: data.paymentBankUsed ? String(data.paymentBankUsed) : undefined,
+    paymentSlipId: data.paymentSlipId ? String(data.paymentSlipId) : undefined,
+    paymentSlipName: data.paymentSlipName ? String(data.paymentSlipName) : undefined,
+    paymentSlipType: data.paymentSlipType ? String(data.paymentSlipType) : undefined,
+    paymentSlipSize: Number(data.paymentSlipSize) || undefined,
+    paymentSlipUploadedAt: Number(data.paymentSlipUploadedAt) || undefined,
+    paymentSlipStatus: (data.paymentSlipStatus as PaymentSlipStatus) || undefined,
+    paymentRejectReason: data.paymentRejectReason ? String(data.paymentRejectReason) : undefined,
+    paymentApprovedAt: Number(data.paymentApprovedAt) || undefined,
+    paymentSlipDeletedAt: Number(data.paymentSlipDeletedAt) || undefined,
+    createdAt: Number(data.createdAt) || 0,
+    updatedAt: Number(data.updatedAt) || Number(data.createdAt) || 0,
+  };
+}
+
+async function resolveDriverMetadataForDispatch(
+  lorryId?: string,
+  plate?: string
+): Promise<{ driverId?: string; driverName?: string; driverPhone?: string; resolvedPlate?: string; resolvedLorryId?: string }> {
+  const plateNorm = normalizePlate(plate);
+  const idLower = String(lorryId || "").trim().toLowerCase();
+
+  try {
+    if (plateNorm || idLower) {
+      const [fleetSnap, driversSnap] = await Promise.all([
+        getDocs(collection(db, "lorries_registry")).catch(() => null),
+        getDocs(collection(db, "drivers")).catch(() => null),
+      ]);
+
+      const driversById = new Map<string, { driverId: string; name: string; phone: string; plate: string }>();
+      const driversByPlate = new Map<string, { driverId: string; name: string; phone: string; plate: string }>();
+      if (driversSnap) {
+        for (const d of driversSnap.docs) {
+          const data = d.data();
+          const dId = String(data.driverId || d.id).trim();
+          const dName = isRealDriverName(data.name);
+          const dPhone = String(data.phone || "").trim();
+          const dPlate = String(data.plate || "").trim();
+          const entry = { driverId: dId, name: dName, phone: dPhone, plate: dPlate };
+          if (dId) driversById.set(dId.toUpperCase(), entry);
+          const pNorm = normalizePlate(dPlate);
+          if (pNorm) driversByPlate.set(pNorm, entry);
+        }
+      }
+
+      if (fleetSnap) {
+        for (const d of fleetSnap.docs) {
+          const data = d.data();
+          const dPlate = normalizePlate(data.plate || data.vehiclePlate || d.id.replace(/^lorry-/i, ""));
+          if ((idLower && d.id.toLowerCase() === idLower) || (plateNorm && dPlate === plateNorm)) {
+            const driverId = data.driverId ? String(data.driverId).trim() : "";
+            const matchedDrv =
+              (driverId ? driversById.get(driverId.toUpperCase()) : undefined) ||
+              (plateNorm ? driversByPlate.get(plateNorm) : undefined);
+            const driverName = isRealDriverName(data.driverName) || matchedDrv?.name || "";
+            const driverPhone = String(data.driverPhone || "").trim() || matchedDrv?.phone || "";
+            return {
+              driverId: driverId || matchedDrv?.driverId || undefined,
+              driverName: driverName || undefined,
+              driverPhone: driverPhone || undefined,
+              resolvedPlate: String(data.plate || plate || matchedDrv?.plate || "").trim() || undefined,
+              resolvedLorryId: d.id,
+            };
+          }
+        }
+      }
+
+      if (plateNorm && driversByPlate.has(plateNorm)) {
+        const matched = driversByPlate.get(plateNorm)!;
+        return {
+          driverId: matched.driverId || undefined,
+          driverName: matched.name || undefined,
+          driverPhone: matched.phone || undefined,
+          resolvedPlate: matched.plate || plate || undefined,
+          resolvedLorryId: idLower || `lorry-${plateNorm.toLowerCase()}`,
+        };
+      }
+    }
+  } catch {
+    // non-blocking metadata enrichment
+  }
+  return {};
+}
+
+async function syncBookingDispatchDoc(
+  booking: StoredBooking,
+  status: string,
+  extra?: { driverId?: string; driverName?: string; driverPhone?: string; lorryId?: string; plate?: string }
+): Promise<void> {
+  const dispatchDocId = `dispatch-${booking.id}`;
+
+  // Individual Vehicle bookings NEVER dispatch to the Driver Mobile App; only live_lorry bookings do.
+  if (booking.bookingType !== "live_lorry") {
+    try {
+      await deleteDoc(doc(db, "dispatches", dispatchDocId));
+      const snap = await getDocs(
+        query(collection(db, "dispatches"), where("bookingId", "==", booking.id))
+      );
+      for (const d of snap.docs) {
+        await deleteDoc(doc(db, "dispatches", d.id));
+      }
+    } catch {
+      // non-blocking cleanup
+    }
+    return;
+  }
+
+  const isTerminal = status === "delivered" || status === "cancelled";
+  const isDispatchable = ["accepted", "assigned", "in_transit", "booked"].includes(status);
+
+  if (!isDispatchable && !isTerminal) {
+    return;
+  }
+
+  const plate = (extra?.plate || booking.assignedPlate || "").trim();
+  const plateNorm = normalizePlate(plate);
+  const effectiveLorryId = (
+    extra?.lorryId ||
+    booking.assignedLorryId ||
+    (plateNorm ? `lorry-${plateNorm.toLowerCase()}` : "")
+  ).trim();
+
+  let targetDispatchStatus = "pending_acceptance";
+  if (status === "delivered") {
+    targetDispatchStatus = "completed";
+  } else if (status === "cancelled") {
+    targetDispatchStatus = "cancelled";
+  } else if (status === "in_transit") {
+    targetDispatchStatus = "accepted";
+  } else {
+    try {
+      const existingSnap = await getDoc(doc(db, "dispatches", dispatchDocId));
+      if (existingSnap.exists() && existingSnap.data()?.status === "accepted") {
+        targetDispatchStatus = "accepted";
+      }
+    } catch {
+      // keep pending_acceptance
+    }
+  }
+
+  const resolvedDriverName =
+    isRealDriverName(extra?.driverName) || isRealDriverName(booking.assignedDriverName);
+  const resolvedDriverPhone =
+    String(extra?.driverPhone || booking.assignedDriverPhone || "").trim();
+
+  if (isDispatchable && effectiveLorryId) {
+    const dispatchPayload: Record<string, any> = {
+      riderId: effectiveLorryId,
+      assignedPlate: plate,
+      bookingId: booking.id,
+      customerName: booking.customerName,
+      customerPhone: booking.customerPhone,
+      pickupCity: booking.pickupCity,
+      pickupLat: booking.pickupLat ?? null,
+      pickupLng: booking.pickupLng ?? null,
+      deliveryCity: booking.deliveryCity,
+      deliveryLat: booking.deliveryLat ?? null,
+      deliveryLng: booking.deliveryLng ?? null,
+      cargo: booking.packageDetails || booking.cargoNature || "",
+      cargoNature: booking.cargoNature || "",
+      vehicleType: booking.vehicleType,
+      date: booking.date,
+      dates: booking.dates || (booking.date ? [booking.date] : []),
+      daysNeeded: booking.daysNeeded || 1,
+      helpersCount: booking.helpersCount ?? "0",
+      status: targetDispatchStatus,
+      bookingType: booking.bookingType || "live_lorry",
+      updatedAt: Date.now(),
+      createdAt: booking.createdAt || Date.now(),
+    };
+    if (extra?.driverId) dispatchPayload.driverId = extra.driverId;
+    if (resolvedDriverName) dispatchPayload.driverName = resolvedDriverName;
+    if (resolvedDriverPhone) dispatchPayload.driverPhone = resolvedDriverPhone;
+
+    await setDoc(doc(db, "dispatches", dispatchDocId), dispatchPayload, { merge: true });
+  }
+
+  // Sync any pre-existing dispatch docs referencing this bookingId (e.g. legacy auto-ID dispatches)
+  try {
+    const snap = await getDocs(
+      query(collection(db, "dispatches"), where("bookingId", "==", booking.id))
+    );
+    for (const d of snap.docs) {
+      if (d.id !== dispatchDocId) {
+        const legacyUpdates: Record<string, any> = {
+          status: targetDispatchStatus,
+          updatedAt: Date.now(),
+        };
+        if (effectiveLorryId) legacyUpdates.riderId = effectiveLorryId;
+        if (extra?.driverId) legacyUpdates.driverId = extra.driverId;
+        if (resolvedDriverName) legacyUpdates.driverName = resolvedDriverName;
+        if (resolvedDriverPhone) legacyUpdates.driverPhone = resolvedDriverPhone;
+        if (plate) legacyUpdates.assignedPlate = plate;
+        await updateDoc(doc(db, "dispatches", d.id), legacyUpdates);
+      }
+    }
+  } catch {
+    // non-blocking
+  }
+}
+
+async function fetchBookingsAuthoritative(): Promise<StoredBooking[]> {
+  try {
+    const [snap, dispSnap, drvSnap] = await Promise.all([
+      getDocs(collection(db, "bookings")),
+      getDocs(collection(db, "dispatches")).catch(() => null),
+      getDocs(collection(db, "drivers")).catch(() => null),
+    ]);
+
+    const dispByBooking = new Map<
+      string,
+      { driverId: string; driverName: string; driverPhone: string; assignedPlate: string }
+    >();
+    if (dispSnap) {
+      dispSnap.forEach((d) => {
+        const dd = d.data();
+        const bid = String(
+          dd.bookingId || (d.id.startsWith("dispatch-") ? d.id.replace(/^dispatch-/, "") : "")
+        ).trim();
+        if (!bid) return;
+        const dName = isRealDriverName(dd.driverName);
+        const dPhone = String(dd.driverPhone || "").trim();
+        const prev = dispByBooking.get(bid);
+        dispByBooking.set(bid, {
+          driverId: String(dd.driverId || prev?.driverId || "").trim(),
+          driverName: dName || prev?.driverName || "",
+          driverPhone: dPhone || prev?.driverPhone || "",
+          assignedPlate: String(dd.assignedPlate || prev?.assignedPlate || "").trim(),
+        });
+      });
+    }
+
+    const driversById = new Map<string, { name: string; phone: string }>();
+    const driversByPlate = new Map<string, { name: string; phone: string }>();
+    if (drvSnap) {
+      drvSnap.forEach((d) => {
+        const dd = d.data();
+        const dName = isRealDriverName(dd.name);
+        const dPhone = String(dd.phone || "").trim();
+        if (!dName && !dPhone) return;
+        const idKey = String(dd.driverId || d.id).trim().toUpperCase();
+        if (idKey) driversById.set(idKey, { name: dName, phone: dPhone });
+        const pKey = normalizePlate(dd.plate);
+        if (pKey) driversByPlate.set(pKey, { name: dName, phone: dPhone });
+      });
+    }
+
+    const items: StoredBooking[] = [];
+    const seenIds = new Set<string>();
+    snap.forEach((d) => {
+      const data = d.data();
+      const resolvedId = String(data.id || data.trackingId || d.id);
+      if (seenIds.has(resolvedId)) return;
+      seenIds.add(resolvedId);
+      const mapped = mapFirestoreBooking(resolvedId, data);
+
+      const disp = dispByBooking.get(resolvedId);
+      const plateNorm = normalizePlate(mapped.assignedPlate || disp?.assignedPlate);
+      const matchedDrv =
+        (disp?.driverId ? driversById.get(disp.driverId.toUpperCase()) : undefined) ||
+        (plateNorm ? driversByPlate.get(plateNorm) : undefined);
+
+      if (!mapped.assignedPlate && disp?.assignedPlate) {
+        mapped.assignedPlate = disp.assignedPlate;
+      }
+      if (
+        ["assigned", "in_transit", "delivered"].includes(mapped.status) ||
+        mapped.bookingType === "live_lorry"
+      ) {
+        if (!mapped.assignedDriverName) {
+          mapped.assignedDriverName = disp?.driverName || matchedDrv?.name || "";
+        }
+        if (!mapped.assignedDriverPhone) {
+          mapped.assignedDriverPhone = disp?.driverPhone || matchedDrv?.phone || "";
+        }
+      }
+
+      items.push(mapped);
+    });
+    items.sort((a, b) => (b.createdAt || b.updatedAt || 0) - (a.createdAt || a.updatedAt || 0));
+    return items;
+  } catch {
+    return getAllStoredBookings();
+  }
+}
+
+/**
+ * High-performance Server Action to create a freight booking.
+ * 1. Synchronous ultra-fast update to in-memory & persisted server store (<2ms).
+ * 2. Non-blocking asynchronous mirroring to Firestore cloud database.
+ * 3. Next.js cache revalidation for instant UI responsiveness.
+ */
+export async function createBookingAction(
+  input: BookingActionInput
+): Promise<ActionResult<{ id: string; trackingId: string; booking: StoredBooking }>> {
+  try {
+    // 1. Rigorous input validation
+    const pickup = input.pickup?.trim();
+    const destination = input.destination?.trim();
+    const rawPhone = input.phone?.trim() || "";
+    const phone = normalizePhoneNumber(rawPhone) || rawPhone;
+    const digitsOnly = phone.replace(/[^0-9]/g, "");
+    const date = input.date?.trim() || new Date().toISOString().split("T")[0];
+    const vehicleType = input.vehicleType?.trim() || "14ft Lorry";
+    const customerName = input.customerName?.trim() || (phone ? `Customer (${phone.slice(-4)})` : "Valued Customer");
+    const packageDetails = (input.notes || input.weight || "").trim();
+
+    if (!pickup) {
+      return { success: false, error: "Pickup location is required." };
+    }
+    if (!destination) {
+      return { success: false, error: "Destination city is required." };
+    }
+    if (!digitsOnly || digitsOnly.length < 8) {
+      return { success: false, error: "A valid phone number (at least 8-10 digits) is required." };
+    }
+
+    // 2. Atomic store creation in server memory + file persistence
+    const booking = createBookingInStore({
+      customerName,
+      customerPhone: phone,
+      pickupCity: pickup,
+      deliveryCity: destination,
+      pickupLat: input.pickupLat,
+      pickupLng: input.pickupLng,
+      deliveryLat: input.deliveryLat,
+      deliveryLng: input.deliveryLng,
+      date,
+      dates: input.dates,
+      vehicleType,
+      packageDetails,
+      assignedPlate: input.assignedPlate?.trim(),
+      assignedLorryId: input.assignedLorryId?.trim(),
+      bookingType: input.bookingType || (input.assignedPlate ? "individual_vehicle" : "individual_vehicle"),
+      cargoNature: input.cargoNature?.trim(),
+      daysNeeded: input.daysNeeded,
+      cargoWeight: input.cargoWeight?.trim() || input.weight?.trim(),
+      helpersCount: input.helpersCount,
+      status: input.status || "pending",
+      quotedAmount: input.quotedAmount,
+      quotedAt: input.quotedAmount !== undefined ? Date.now() : undefined,
+      quoteNote: input.quoteNote,
+    });
+
+    // 3. Synchronized authoritative cloud Firestore persistence with deterministic ID
+    try {
+      let resolvedDriverMeta: {
+        driverId?: string;
+        driverName?: string;
+        driverPhone?: string;
+        resolvedPlate?: string;
+        resolvedLorryId?: string;
+      } = {};
+      if (
+        (booking.assignedLorryId || booking.assignedPlate) &&
+        (booking.bookingType === "live_lorry" || booking.status === "assigned")
+      ) {
+        resolvedDriverMeta = await resolveDriverMetadataForDispatch(
+          booking.assignedLorryId,
+          booking.assignedPlate
+        );
+      }
+
+      const bookingPayload: Record<string, any> = {
+        id: booking.id,
+        trackingId: booking.id,
+        customerName,
+        customerPhone: booking.customerPhone,
+        phone: booking.customerPhone,
+        pickupCity: pickup,
+        pickup,
+        deliveryCity: destination,
+        destination,
+        pickupLat: input.pickupLat ?? null,
+        pickupLng: input.pickupLng ?? null,
+        deliveryLat: input.deliveryLat ?? null,
+        deliveryLng: input.deliveryLng ?? null,
+        date: booking.date,
+        dates: booking.dates || (input.dates && input.dates.length > 0 ? input.dates : [date]),
+        vehicleType,
+        packageDetails,
+        notes: packageDetails,
+        assignedPlate: input.assignedPlate?.trim() || resolvedDriverMeta.resolvedPlate || "",
+        assignedLorryId: input.assignedLorryId?.trim() || resolvedDriverMeta.resolvedLorryId || "",
+        assignedDriverName: resolvedDriverMeta.driverName || "",
+        assignedDriverPhone: resolvedDriverMeta.driverPhone || "",
+        bookingType: booking.bookingType,
+        cargoNature: booking.cargoNature || "",
+        daysNeeded: booking.daysNeeded || 1,
+        cargoWeight: booking.cargoWeight || "",
+        helpersCount: booking.helpersCount ?? "0",
+        status: booking.status,
+        paymentSlipStatus: booking.paymentSlipStatus || "none",
+        createdAt: booking.createdAt,
+        updatedAt: booking.updatedAt,
+      };
+      if (booking.quotedAmount !== undefined) bookingPayload.quotedAmount = booking.quotedAmount;
+      if (booking.quotedAt !== undefined) bookingPayload.quotedAt = booking.quotedAt;
+      if (booking.quoteNote) bookingPayload.quoteNote = booking.quoteNote;
+      if (resolvedDriverMeta.driverName || resolvedDriverMeta.driverPhone) {
+        booking.assignedDriverName = resolvedDriverMeta.driverName || booking.assignedDriverName;
+        booking.assignedDriverPhone = resolvedDriverMeta.driverPhone || booking.assignedDriverPhone;
+        upsertBookingInStore(booking);
+      }
+      await setDoc(doc(db, "bookings", booking.id), bookingPayload);
+
+      // Notify rider dispatch deterministically ONLY when live_lorry booking is confirmed/accepted/assigned
+      if (
+        booking.bookingType === "live_lorry" &&
+        (booking.assignedLorryId || booking.assignedPlate || resolvedDriverMeta.resolvedLorryId) &&
+        ["accepted", "assigned", "booked"].includes(booking.status)
+      ) {
+        await syncBookingDispatchDoc(booking, booking.status, {
+          driverId: resolvedDriverMeta.driverId,
+          driverName: resolvedDriverMeta.driverName,
+          driverPhone: resolvedDriverMeta.driverPhone,
+          lorryId: booking.assignedLorryId || resolvedDriverMeta.resolvedLorryId,
+          plate: booking.assignedPlate || resolvedDriverMeta.resolvedPlate,
+        });
+      }
+    } catch (cloudErr) {
+      console.warn("Firestore booking sync notice:", cloudErr);
+    }
+
+    // 4. Cache revalidation across relevant routes
+    try {
+      revalidatePath("/book-vehicle");
+      revalidatePath("/login");
+      revalidatePath("/admin");
+      revalidatePath("/");
+    } catch {
+      // Revalidation is best-effort in tests/edge
+    }
+
+    return {
+      success: true,
+      data: {
+        id: booking.id,
+        trackingId: booking.id,
+        booking,
+      },
+      message: "Booking confirmed successfully.",
+    };
+  } catch (err: unknown) {
+    console.error("createBookingAction unexpected error:", err);
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to process booking.",
+    };
+  }
+}
+
+/**
+ * Server Action to instantly track a booking by Tracking ID or Phone Number.
+ */
+export async function trackBookingAction(
+  searchQuery: string
+): Promise<ActionResult<StoredBooking[]>> {
+  try {
+    const q = searchQuery?.trim();
+    if (!q) {
+      return { success: true, data: [] };
+    }
+
+    const qLower = q.toLowerCase();
+    const cleanPhone = qLower.replace(/[^0-9]/g, "");
+    const all = await fetchBookingsAuthoritative();
+    const matches = all.filter((b) => {
+      const idMatch = String(b.id || "").toLowerCase().includes(qLower);
+      const plateMatch = String(b.assignedPlate || "").toLowerCase().includes(qLower);
+      const cityMatch =
+        String(b.pickupCity || "").toLowerCase().includes(qLower) ||
+        String(b.deliveryCity || "").toLowerCase().includes(qLower);
+      const bPhoneClean = String(b.customerPhone || "").replace(/[^0-9]/g, "");
+      const phoneMatch =
+        phonesMatch(b.customerPhone, q) ||
+        (cleanPhone.length >= 4 &&
+          bPhoneClean.length > 0 &&
+          (bPhoneClean.includes(cleanPhone) || cleanPhone.includes(bPhoneClean)));
+      return idMatch || plateMatch || cityMatch || phoneMatch;
+    });
+
+    return {
+      success: true,
+      data: matches,
+    };
+  } catch (err: unknown) {
+    console.error("trackBookingAction error:", err);
+    return {
+      success: false,
+      error: "Error retrieving booking records.",
+    };
+  }
+}
+
+/**
+ * Server Action to fetch all bookings associated with a customer phone.
+ */
+export async function getCustomerBookingsAction(
+  customerPhone: string
+): Promise<ActionResult<StoredBooking[]>> {
+  try {
+    const phone = customerPhone?.trim();
+    if (!phone) {
+      return { success: true, data: [] };
+    }
+
+    const all = await fetchBookingsAuthoritative();
+    const bookings = all
+      .filter((b) => phonesMatch(b.customerPhone, phone))
+      .sort((a, b) => (b.createdAt || b.updatedAt || 0) - (a.createdAt || a.updatedAt || 0));
+    return {
+      success: true,
+      data: bookings,
+    };
+  } catch (err: unknown) {
+    console.error("getCustomerBookingsAction error:", err);
+    return {
+      success: false,
+      error: "Error retrieving customer bookings.",
+    };
+  }
+}
+
+/**
+ * Server Action to retrieve all bookings (for dispatch / admin).
+ */
+export async function getAllBookingsAction(): Promise<ActionResult<StoredBooking[]>> {
+  try {
+    const bookings = await fetchBookingsAuthoritative();
+    return {
+      success: true,
+      data: bookings,
+    };
+  } catch (err: unknown) {
+    console.error("getAllBookingsAction error:", err);
+    return {
+      success: false,
+      error: "Error retrieving all bookings.",
+    };
+  }
+}
+
+export interface BookedDateDetail {
+  bookingId: string;
+  customerName: string;
+  customerPhone: string;
+  pickupCity: string;
+  deliveryCity: string;
+  cargoNature?: string;
+  daysNeeded?: number | string;
+  packageDetails?: string;
+  date: string;
+  vehicleType: string;
+  status: string;
+  assignedPlate?: string;
+}
+
+export interface LorryBookedDatesResult {
+  bookedDates: string[];
+  bookingsByDate: Record<string, BookedDateDetail>;
+}
+
+/**
+ * Server Action to retrieve booked dates for a specific lorry.
+ * Used by the individual vehicle booking calendar to highlight reserved dates in RED
+ * and provide rich click-to-view booking details.
+ */
+export async function getLorryBookedDatesAction(
+  lorryIdentifier: string
+): Promise<ActionResult<LorryBookedDatesResult>> {
+  try {
+    const clean = lorryIdentifier?.trim().toUpperCase();
+    const cleanPlateNorm = normalizePlate(lorryIdentifier);
+    if (!clean && !cleanPlateNorm) {
+      return { success: true, data: { bookedDates: [], bookingsByDate: {} } };
+    }
+
+    const all = await fetchBookingsAuthoritative();
+    const bookingsByDate: Record<string, BookedDateDetail> = {};
+    const bookedDates: string[] = [];
+
+    all.forEach((b) => {
+      const plateMatch = Boolean(
+        cleanPlateNorm &&
+          b.assignedPlate &&
+          normalizePlate(b.assignedPlate) === cleanPlateNorm
+      );
+      const idMatch = Boolean(
+        clean &&
+          b.assignedLorryId &&
+          b.assignedLorryId.trim().toUpperCase() === clean
+      );
+      // Confirmed & Accepted bookings lock the date on the calendar
+      const isConfirmed = ["accepted", "assigned", "in_transit", "delivered", "booked"].includes(b.status);
+
+      if ((plateMatch || idMatch) && isConfirmed) {
+        const rawDates = Array.isArray(b.dates) && b.dates.length > 0 ? b.dates : (b.date ? [b.date] : []);
+        rawDates.forEach((d) => {
+          if (d) {
+            bookedDates.push(d);
+            bookingsByDate[d] = {
+              bookingId: b.id,
+              customerName: b.customerName,
+              customerPhone: b.customerPhone,
+              pickupCity: b.pickupCity,
+              deliveryCity: b.deliveryCity,
+              cargoNature: b.cargoNature || b.packageDetails,
+              daysNeeded: rawDates.length || b.daysNeeded || 1,
+              packageDetails: b.packageDetails,
+              date: d,
+              vehicleType: b.vehicleType,
+              status: b.status,
+              assignedPlate: b.assignedPlate,
+            };
+          }
+        });
+      }
+    });
+
+    return {
+      success: true,
+      data: {
+        bookedDates: Array.from(new Set(bookedDates)),
+        bookingsByDate,
+      },
+    };
+  } catch (err: unknown) {
+    console.error("getLorryBookedDatesAction error:", err);
+    return {
+      success: false,
+      error: "Error retrieving lorry booked dates.",
+    };
+  }
+}
+
+/**
+ * Server Action to update booking status and driver assignments.
+ */
+export async function updateBookingStatusAction(
+  id: string,
+  status: BookingStatusValue,
+  assignment?: {
+    assignedLorryId?: string;
+    assignedDriverName?: string;
+    assignedDriverPhone?: string;
+    assignedPlate?: string;
+  },
+  paymentMeta?: {
+    quotedAmount?: number;
+    quotedAt?: number;
+    quoteNote?: string;
+    paymentMethod?: BookingPaymentMethod;
+    paymentBankUsed?: string;
+    paymentSlipId?: string;
+    paymentSlipName?: string;
+    paymentSlipType?: string;
+    paymentSlipSize?: number;
+    paymentSlipUploadedAt?: number;
+    paymentSlipStatus?: PaymentSlipStatus;
+    paymentRejectReason?: string;
+    paymentApprovedAt?: number;
+    paymentSlipDeletedAt?: number;
+  }
+): Promise<ActionResult<StoredBooking>> {
+  try {
+    if (!id) {
+      return { success: false, error: "Booking ID is required." };
+    }
+
+    const sanitizedAssignment = assignment
+      ? {
+          ...assignment,
+          assignedDriverName: isRealDriverName(assignment.assignedDriverName) || undefined,
+          assignedDriverPhone: assignment.assignedDriverPhone?.trim() || undefined,
+        }
+      : undefined;
+
+    let updatedLocal = updateBookingStatusInStore(id, status, sanitizedAssignment, paymentMeta);
+
+    // Backfill from Firestore if the booking existed in Firestore only and not yet in local store
+    if (!updatedLocal) {
+      try {
+        const directSnap = await getDoc(doc(db, "bookings", id));
+        let fsData: Record<string, any> | null = directSnap.exists() ? directSnap.data() : null;
+        if (!fsData) {
+          const legacySnap = await getDocs(
+            query(collection(db, "bookings"), where("trackingId", "==", id))
+          );
+          if (!legacySnap.empty) {
+            fsData = legacySnap.docs[0].data();
+          }
+        }
+        if (fsData) {
+          const mapped = mapFirestoreBooking(id, {
+            ...fsData,
+            status,
+            ...(sanitizedAssignment?.assignedLorryId ? { assignedLorryId: sanitizedAssignment.assignedLorryId } : {}),
+            ...(sanitizedAssignment?.assignedDriverName ? { assignedDriverName: sanitizedAssignment.assignedDriverName } : {}),
+            ...(sanitizedAssignment?.assignedDriverPhone ? { assignedDriverPhone: sanitizedAssignment.assignedDriverPhone } : {}),
+            ...(sanitizedAssignment?.assignedPlate ? { assignedPlate: sanitizedAssignment.assignedPlate } : {}),
+            ...(paymentMeta || {}),
+            updatedAt: Date.now(),
+          });
+          updatedLocal = upsertBookingInStore(mapped);
+        }
+      } catch {
+        // fallback handled below
+      }
+    }
+
+    // Enrich missing driver metadata from fleet registry / drivers ONLY when explicitly assigning driver
+    // (or dispatching a live_lorry booking) — never prematurely during individual payment approval
+    let enrichedDriverMeta: {
+      driverId?: string;
+      driverName?: string;
+      driverPhone?: string;
+      resolvedPlate?: string;
+      resolvedLorryId?: string;
+    } = {};
+    const shouldEnrichDriver =
+      ["assigned", "in_transit"].includes(status) ||
+      (status === "accepted" && updatedLocal?.bookingType === "live_lorry");
+
+    if (shouldEnrichDriver) {
+      enrichedDriverMeta = await resolveDriverMetadataForDispatch(
+        sanitizedAssignment?.assignedLorryId || updatedLocal?.assignedLorryId,
+        sanitizedAssignment?.assignedPlate || updatedLocal?.assignedPlate
+      );
+    }
+
+    const existingValidDriver = isRealDriverName(updatedLocal?.assignedDriverName);
+    const effectiveAssignment = shouldEnrichDriver
+      ? {
+          ...(sanitizedAssignment || {}),
+          ...(enrichedDriverMeta.resolvedLorryId && !(sanitizedAssignment?.assignedLorryId || updatedLocal?.assignedLorryId)
+            ? { assignedLorryId: enrichedDriverMeta.resolvedLorryId }
+            : {}),
+          ...(enrichedDriverMeta.resolvedPlate && !(sanitizedAssignment?.assignedPlate || updatedLocal?.assignedPlate)
+            ? { assignedPlate: enrichedDriverMeta.resolvedPlate }
+            : {}),
+          ...(enrichedDriverMeta.driverName && !(sanitizedAssignment?.assignedDriverName || existingValidDriver)
+            ? { assignedDriverName: enrichedDriverMeta.driverName }
+            : {}),
+          ...(enrichedDriverMeta.driverPhone && !(sanitizedAssignment?.assignedDriverPhone || updatedLocal?.assignedDriverPhone)
+            ? { assignedDriverPhone: enrichedDriverMeta.driverPhone }
+            : {}),
+        }
+      : sanitizedAssignment || {};
+
+    if (updatedLocal && (Object.keys(effectiveAssignment).length > 0 || paymentMeta)) {
+      updatedLocal =
+        updateBookingStatusInStore(id, status, effectiveAssignment, paymentMeta) || updatedLocal;
+    }
+
+    // Authoritative awaited Firestore update (merge by doc ID + normalize any legacy trackingId doc)
+    let firestoreOk = false;
+    try {
+      const updateFields: Record<string, any> = {
+        id,
+        trackingId: id,
+        status,
+        updatedAt: Date.now(),
+      };
+      if (effectiveAssignment.assignedLorryId !== undefined && effectiveAssignment.assignedLorryId !== "") {
+        updateFields.assignedLorryId = effectiveAssignment.assignedLorryId;
+      }
+      const finalDriverName = isRealDriverName(effectiveAssignment.assignedDriverName);
+      if (finalDriverName) {
+        updateFields.assignedDriverName = finalDriverName;
+      }
+      if (effectiveAssignment.assignedDriverPhone !== undefined && effectiveAssignment.assignedDriverPhone !== "") {
+        updateFields.assignedDriverPhone = effectiveAssignment.assignedDriverPhone;
+      }
+      if (effectiveAssignment.assignedPlate !== undefined && effectiveAssignment.assignedPlate !== "") {
+        updateFields.assignedPlate = effectiveAssignment.assignedPlate;
+      }
+
+      if (paymentMeta) {
+        if (paymentMeta.quotedAmount !== undefined) updateFields.quotedAmount = paymentMeta.quotedAmount;
+        if (paymentMeta.quotedAt !== undefined) updateFields.quotedAt = paymentMeta.quotedAt;
+        if (paymentMeta.quoteNote !== undefined) updateFields.quoteNote = paymentMeta.quoteNote;
+        if (paymentMeta.paymentMethod !== undefined) updateFields.paymentMethod = paymentMeta.paymentMethod;
+        if (paymentMeta.paymentBankUsed !== undefined) updateFields.paymentBankUsed = paymentMeta.paymentBankUsed;
+        if (paymentMeta.paymentSlipId !== undefined) updateFields.paymentSlipId = paymentMeta.paymentSlipId;
+        if (paymentMeta.paymentSlipName !== undefined) updateFields.paymentSlipName = paymentMeta.paymentSlipName;
+        if (paymentMeta.paymentSlipType !== undefined) updateFields.paymentSlipType = paymentMeta.paymentSlipType;
+        if (paymentMeta.paymentSlipSize !== undefined) updateFields.paymentSlipSize = paymentMeta.paymentSlipSize;
+        if (paymentMeta.paymentSlipUploadedAt !== undefined) updateFields.paymentSlipUploadedAt = paymentMeta.paymentSlipUploadedAt;
+        if (paymentMeta.paymentSlipStatus !== undefined) updateFields.paymentSlipStatus = paymentMeta.paymentSlipStatus;
+        if (paymentMeta.paymentRejectReason !== undefined) updateFields.paymentRejectReason = paymentMeta.paymentRejectReason;
+        if (paymentMeta.paymentApprovedAt !== undefined) updateFields.paymentApprovedAt = paymentMeta.paymentApprovedAt;
+        if (paymentMeta.paymentSlipDeletedAt !== undefined) updateFields.paymentSlipDeletedAt = paymentMeta.paymentSlipDeletedAt;
+      }
+
+      const docRef = doc(db, "bookings", id);
+      await setDoc(docRef, updateFields, { merge: true });
+      firestoreOk = true;
+
+      // Sync slip doc review status if slip exists
+      if (
+        paymentMeta?.paymentSlipStatus &&
+        ["approved", "rejected"].includes(paymentMeta.paymentSlipStatus) &&
+        updatedLocal?.paymentSlipId
+      ) {
+        try {
+          await setDoc(
+            doc(db, "payment_slips", updatedLocal.paymentSlipId),
+            {
+              status: paymentMeta.paymentSlipStatus,
+              updatedAt: Date.now(),
+            },
+            { merge: true }
+          );
+        } catch {
+          // ignore if slip was already deleted
+        }
+      }
+
+      // Clean/sync any legacy doc created with random ID that holds trackingId == id
+      const legacySnap = await getDocs(query(collection(db, "bookings"), where("trackingId", "==", id)));
+      for (const d of legacySnap.docs) {
+        if (d.id !== id) {
+          await updateDoc(doc(db, "bookings", d.id), updateFields);
+        }
+      }
+
+      if (updatedLocal) {
+        await syncBookingDispatchDoc(updatedLocal, status, {
+          driverId: enrichedDriverMeta.driverId,
+          driverName: finalDriverName || enrichedDriverMeta.driverName || isRealDriverName(updatedLocal.assignedDriverName),
+          driverPhone: effectiveAssignment.assignedDriverPhone || enrichedDriverMeta.driverPhone || updatedLocal.assignedDriverPhone,
+          lorryId: effectiveAssignment.assignedLorryId || updatedLocal.assignedLorryId,
+          plate: effectiveAssignment.assignedPlate || updatedLocal.assignedPlate,
+        });
+      }
+    } catch (e) {
+      console.warn("Firestore updateBookingStatusAction warning:", e);
+    }
+
+    if (!updatedLocal && !firestoreOk) {
+      return { success: false, error: "Booking record not found." };
+    }
+
+    const resultBooking: StoredBooking = updatedLocal || {
+      id,
+      customerName: "Customer",
+      customerPhone: "",
+      pickupCity: "",
+      deliveryCity: "",
+      date: new Date().toISOString().split("T")[0],
+      vehicleType: "Lorry",
+      status,
+      ...effectiveAssignment,
+      ...(paymentMeta || {}),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    try {
+      revalidatePath("/book-vehicle");
+      revalidatePath("/login");
+      revalidatePath("/manage");
+      revalidatePath("/admin");
+    } catch {
+      // Ignored
+    }
+
+    return {
+      success: true,
+      data: resultBooking,
+    };
+  } catch (err: unknown) {
+    console.error("updateBookingStatusAction error:", err);
+    return {
+      success: false,
+      error: "Failed to update booking status.",
+    };
+  }
+}

@@ -1,0 +1,69 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Public Read Access for Fleet & Live Tracking
+    // Required so website visitors and customers can see available lorries & live GPS routes
+    match /lorries/{lorryId} {
+      allow read: if true;
+      allow write: if true;
+    }
+    
+    match /lorries_live/{lorryId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    match /lorries_registry/{lorryId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    match /drivers/{driverId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    match /dispatches/{dispatchId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    match /bookings/{bookingId} {
+      allow read, write: if true;
+    }
+
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+
+    match /customers/{customerId} {
+      allow read, write: if true;
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    match /inquiries/{inquiryId} {
+      allow read, write: if true;
+    }
+
+    match /banners/{bannerId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    match /registrations/{regId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // Default fallback
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
+
