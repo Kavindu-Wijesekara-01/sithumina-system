@@ -51,7 +51,7 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileMenu }) => {
                   textShadow: "0 0 2px #ffffff, 0 1px 2px rgba(255,255,255,0.8)",
                 }}
               >
-                සිතුමිණ ට්‍රාන්ස්පෝර්ට්
+                SITHUMINA TRANSPORT
               </h1>
               <PhoneLinks
                 size="sm"
@@ -136,7 +136,7 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileMenu }) => {
                   textShadow: "0 0 1.5px rgba(255,255,255,0.9)",
                 }}
               >
-                සිතුමිණ ට්‍රාන්ස්පෝර්ට්
+                SITHUMINA TRANSPORT
               </h1>
             </Link>
             <PhoneLinks

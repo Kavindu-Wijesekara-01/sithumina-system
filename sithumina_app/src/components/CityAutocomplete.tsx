@@ -37,7 +37,7 @@ export default function CityAutocomplete({
   const [suggestions, setSuggestions] = useState<CityEntry[]>([]);
   const [showDropdown, setShowDropdown] = useState(false);
   const selectedNameRef = useRef<string | null>(null);
-  const inputRef = useRef<TextInput>(null);
+  const inputRef = useRef<React.ComponentRef<typeof TextInput>>(null);
 
   // Update suggestions when value changes
   useEffect(() => {

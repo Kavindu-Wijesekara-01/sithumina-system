@@ -4,13 +4,8 @@
     "slug": "sithumina-driver",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/app-icon.png",
     "userInterfaceStyle": "light",
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#FFC20E"
-    },
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
@@ -22,7 +17,7 @@
       "package": "com.sithumina.driver",
       "adaptiveIcon": {
         "backgroundColor": "#FFC20E",
-        "foregroundImage": "./assets/icon.png"
+        "foregroundImage": "./assets/android-icon-foreground.png"
       },
       "permissions": [
         "INTERNET",
@@ -37,6 +32,18 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-status-bar",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#FFC20E"
+        }
+      ]
+    ]
   }
 }
