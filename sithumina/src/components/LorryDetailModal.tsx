@@ -34,6 +34,7 @@ export const LorryDetailModal: React.FC<LorryDetailModalProps> = ({
 }) => {
   const { locale } = useLanguage();
   const [mounted, setMounted] = useState(false);
+  const [isMapFullscreen, setIsMapFullscreen] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -49,7 +50,11 @@ export const LorryDetailModal: React.FC<LorryDetailModalProps> = ({
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        onClose();
+        if (isMapFullscreen) {
+          setIsMapFullscreen(false);
+        } else {
+          onClose();
+        }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -58,7 +63,7 @@ export const LorryDetailModal: React.FC<LorryDetailModalProps> = ({
       document.body.style.overflow = originalOverflow;
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [lorry, onClose]);
+  }, [lorry, onClose, isMapFullscreen]);
 
   if (!mounted || !lorry) return null;
 
@@ -79,7 +84,36 @@ export const LorryDetailModal: React.FC<LorryDetailModalProps> = ({
       >
         {/* 1. TOP SECTION: INTERACTIVE LIVE ROUTE MAP */}
         <div className="relative w-full h-[240px] sm:h-[270px] flex-none bg-[#F7F5EE] overflow-hidden">
-          <DynamicDedicatedRouteMap lorry={lorry} height="100%" className="w-full h-full" />
+          <DynamicDedicatedRouteMap
+            lorry={lorry}
+            height="100%"
+            className="w-full h-full"
+            onToggleFullscreen={() => setIsMapFullscreen(true)}
+            isFullscreen={false}
+          />
+
+          {/* Floating Fullscreen Button on Top-Right next to Close Button */}
+          <button
+            type="button"
+            onClick={() => setIsMapFullscreen(true)}
+            className="absolute top-3.5 right-14 z-[1000] h-9 px-3 rounded-full bg-white/95 hover:bg-white text-[#26231B] shadow-md flex items-center gap-1.5 font-extrabold text-xs transition-all border border-[#E7E2D0] cursor-pointer active:scale-95 backdrop-blur-sm"
+            aria-label="View Fullscreen Map"
+            title="View Fullscreen Map"
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+            </svg>
+            <span className="text-[11px] font-bold">Fullscreen</span>
+          </button>
 
           {/* Floating Close Button on Top-Right */}
           <button
@@ -349,6 +383,82 @@ export const LorryDetailModal: React.FC<LorryDetailModalProps> = ({
           </div>
         </div>
       </div>
+
+      {/* 3. FULL SCREEN MAP OVERLAY VIEW */}
+      {isMapFullscreen && (
+        <div
+          className="fixed inset-0 z-[1000000] bg-[#26231B] flex flex-col w-screen h-screen animate-in fade-in duration-200 select-none"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Top Bar with Vehicle Plate, Status, Route Corridor & Exit Fullscreen Button */}
+          <div className="h-14 bg-[#26231B] border-b border-[#3B3727] px-4 sm:px-6 flex items-center justify-between z-[1001] flex-none shadow-md">
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#1E9E5A] animate-pulse flex-none" />
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-[#FFC20E] font-black text-base sm:text-lg tracking-wide truncate">
+                  {lorry.plate}
+                </span>
+                <span className="text-[#E7E2D0] text-xs font-bold hidden sm:inline truncate">
+                  {hasTripPath
+                    ? `${lorry.startLocation || "Start"} → ${lorry.endLocation || "Destination"}`
+                    : (lorry.route || "")}
+                </span>
+              </div>
+              <LorryStatusBadge status={lorry.status} />
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsMapFullscreen(false)}
+              className="px-3.5 py-1.5 rounded-xl bg-[#B3121F] hover:bg-[#c91826] text-white font-extrabold text-xs flex items-center gap-1.5 shadow-md active:scale-95 transition-all cursor-pointer flex-none"
+            >
+              ✕ Exit Fullscreen
+            </button>
+          </div>
+
+          {/* Fullscreen Map Canvas */}
+          <div className="relative flex-1 w-full h-full overflow-hidden">
+            <DynamicDedicatedRouteMap
+              lorry={lorry}
+              height="100%"
+              className="w-full h-full"
+              onToggleFullscreen={() => setIsMapFullscreen(false)}
+              isFullscreen={true}
+            />
+
+            {/* Floating Bottom Quick Info Card */}
+            <div className="absolute bottom-5 left-4 right-4 sm:left-6 sm:w-auto sm:max-w-md z-[1000] bg-[#26231B]/95 backdrop-blur-md border border-[#FFC20E]/40 rounded-2xl p-3 sm:p-4 shadow-2xl flex items-center justify-between gap-3 text-white">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-[#FFC20E] text-[#26231B] flex items-center justify-center font-black flex-none">
+                  {lorry.plate.slice(0, 2)}
+                </div>
+                <div className="flex flex-col min-w-0">
+                  <div className="font-extrabold text-xs sm:text-sm text-[#F6F1DF] truncate">
+                    {lorry.driverName ? `${lorry.driverName}` : "Driver On Duty"}
+                  </div>
+                  <div className="text-[11px] text-[#A8A28E] truncate">
+                    {lorry.startLocation && lorry.endLocation
+                      ? `${lorry.startLocation} → ${lorry.endLocation}`
+                      : (lorry.route || "Island-wide Fleet")}
+                  </div>
+                </div>
+              </div>
+
+              {lorry.driverPhone && (
+                <a
+                  href={`tel:${lorry.driverPhone}`}
+                  className="px-3.5 py-2 rounded-xl bg-[#1E9E5A] hover:bg-[#1b8c50] text-white font-black text-xs flex items-center gap-1.5 shadow-sm active:scale-95 transition-all no-underline flex-none"
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+                  </svg>
+                  <span>Call</span>
+                </a>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 

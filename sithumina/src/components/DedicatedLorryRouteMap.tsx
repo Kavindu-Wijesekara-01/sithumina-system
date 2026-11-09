@@ -11,6 +11,8 @@ interface DedicatedLorryRouteMapProps {
   lorry: Lorry;
   className?: string;
   height?: number | string;
+  onToggleFullscreen?: () => void;
+  isFullscreen?: boolean;
 }
 
 // Controller component to safely auto-fit bounds to the single lorry's route
@@ -47,7 +49,13 @@ function RouteBoundsController({
 }
 
 // Custom Map Zoom Controls placed safely below the close button
-function CustomMapZoomControls() {
+function CustomMapZoomControls({
+  onToggleFullscreen,
+  isFullscreen,
+}: {
+  onToggleFullscreen?: () => void;
+  isFullscreen?: boolean;
+}) {
   const map = useMap();
   const controlsRef = useRef<HTMLDivElement>(null);
 
@@ -89,6 +97,28 @@ function CustomMapZoomControls() {
       >
         −
       </button>
+      {onToggleFullscreen && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleFullscreen();
+          }}
+          className="w-8 h-8 rounded-xl bg-white/95 hover:bg-white text-[#26231B] border border-[#E7E2D0] flex items-center justify-center font-black text-xs shadow-sm cursor-pointer active:scale-95 transition-all select-none backdrop-blur-sm"
+          title={isFullscreen ? "Exit Fullscreen" : "Fullscreen Map"}
+          aria-label={isFullscreen ? "Exit Fullscreen" : "Fullscreen Map"}
+        >
+          {isFullscreen ? (
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+            </svg>
+          ) : (
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+            </svg>
+          )}
+        </button>
+      )}
     </div>
   );
 }
@@ -126,6 +156,8 @@ export const DedicatedLorryRouteMap: React.FC<DedicatedLorryRouteMapProps> = ({
   lorry,
   className = "",
   height = 240,
+  onToggleFullscreen,
+  isFullscreen = false,
 }) => {
   const currentCoords = useMemo<[number, number]>(() => {
     const lat = Number(lorry?.lat);
@@ -337,7 +369,7 @@ export const DedicatedLorryRouteMap: React.FC<DedicatedLorryRouteMapProps> = ({
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        <CustomMapZoomControls />
+        <CustomMapZoomControls onToggleFullscreen={onToggleFullscreen} isFullscreen={isFullscreen} />
         <RouteBoundsController bounds={bounds} />
 
         {/* Visual Route Corridor: Golden Glow Underlay + Crisp Dashed Directional Polyline */}

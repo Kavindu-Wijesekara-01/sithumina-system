@@ -72,6 +72,25 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
   customerPins = [],
 }) => {
   const [isFullScreen, setIsFullScreen] = useState(false);
+  const [isMapReady, setIsMapReady] = useState(false);
+  const [mapLoadTimedOut, setMapLoadTimedOut] = useState(false);
+  const [mapErrorMsg, setMapErrorMsg] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  // 15-second timeout watcher to surface helpful retry UI if WebView initialization stalls
+  useEffect(() => {
+    if (isMapReady) {
+      setMapLoadTimedOut(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (!isMapReady) {
+        console.warn("[MAP] Initialization timed out after 15s");
+        setMapLoadTimedOut(true);
+      }
+    }, 15000);
+    return () => clearTimeout(timer);
+  }, [isMapReady, reloadKey]);
 
   // Show lorries: always include the driver's own lorry (if single vehicle or matching plate), plus online vehicles
   const filteredLorries = useMemo(() => {
@@ -94,25 +113,109 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  
+  <script>
+    // 1. Critical: Immediate error & console interceptors at the very top of <head>
+    window.onerror = function(msg, url, line, col, err) {
+      if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'MAP_ERROR',
+          message: String(msg) + ' at ' + (url || 'inline') + ':' + line + (col ? (':' + col) : '')
+        }));
+      }
+    };
+
+    window.onunhandledrejection = function(e) {
+      if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'MAP_ERROR',
+          message: 'Unhandled Promise Rejection: ' + (e.reason ? (e.reason.message || String(e.reason)) : 'unknown')
+        }));
+      }
+    };
+
+    (function() {
+      var origLog = console.log;
+      var origWarn = console.warn;
+      var origErr = console.error;
+      function forward(level, args) {
+        try {
+          var str = Array.prototype.slice.call(args).map(function(a) {
+            return (a && typeof a === 'object') ? JSON.stringify(a) : String(a);
+          }).join(' ');
+          if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'MAP_LOG',
+              level: level,
+              message: str
+            }));
+          }
+        } catch(e) {}
+      }
+      console.log = function() { origLog.apply(console, arguments); forward('log', arguments); };
+      console.warn = function() { origWarn.apply(console, arguments); forward('warn', arguments); };
+      console.error = function() { origErr.apply(console, arguments); forward('error', arguments); };
+    })();
+  </script>
+
   <style>
     ${BUNDLED_LEAFLET_CSS}
   </style>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
   <script>
-    if (typeof L === 'undefined') {
+    // 2. Load bundled Leaflet JS offline first
+    try {
       ${BUNDLED_LEAFLET_JS}
+    } catch(bundleErr) {
+      console.warn('Bundled Leaflet failed, falling back to CDN:', bundleErr);
     }
   </script>
+
+  <script>
+    // 3. Fallback CDN if bundled Leaflet did not initialize window.L
+    if (typeof L === 'undefined') {
+      console.log('Loading Leaflet from CDN...');
+      var cdnCss = document.createElement('link');
+      cdnCss.rel = 'stylesheet';
+      cdnCss.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(cdnCss);
+
+      var cdnScript = document.createElement('script');
+      cdnScript.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      cdnScript.onload = function() {
+        console.log('Leaflet loaded from CDN successfully');
+        if (typeof initLeafletMap === 'function') {
+          initLeafletMap();
+        }
+      };
+      cdnScript.onerror = function(err) {
+        console.error('Leaflet CDN load failed:', err);
+      };
+      document.head.appendChild(cdnScript);
+    }
+  </script>
+
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body, #map {
-      height: 100%;
+    html, body {
+      margin: 0;
+      padding: 0;
       width: 100%;
+      height: 100%;
       background: #EFECE1;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overflow: hidden;
       touch-action: pan-x pan-y pinch-zoom;
       -webkit-overflow-scrolling: touch;
+      position: relative;
+    }
+    #map {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      min-height: 100%;
+      background: #EFECE1;
     }
     
     /* Custom Pin Container */
@@ -141,7 +244,7 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
       100% { transform: translate(-50%, -50%) scale(2.3); opacity: 0; }
     }
 
-    /* Lorry Pin Badge: ONLY Lorry Emoji */
+    /* Lorry Pin Badge */
     .lorry-badge {
       position: relative;
       z-index: 2;
@@ -181,7 +284,7 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
       pointer-events: none;
     }
 
-    /* Rich Popup Styling: Shows ALL Rider Submitted Information */
+    /* Rich Popup Styling */
     .leaflet-popup-content-wrapper {
       background: #26231B !important;
       color: #F6F1DF !important;
@@ -331,100 +434,179 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
   }
 
   <script>
-    window.onerror = function(msg, url, line) {
-      if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'MAP_ERROR',
-          message: String(msg) + ' at line ' + line
-        }));
-      }
-    };
-
     var map = null;
     var baseTileLayer = null;
     var markers = {};
     var activeRouteLayers = {};
     var roadRoutingCache = {};
+    var pendingRouteRequests = {};
     var lastFittedTrip = '';
     var userInteracted = false;
     var focusLorryGlobal = null;
     var lorriesData = ${lorriesJson};
     var selectedPlate = ${selectedJson};
     var customerPinsData = ${customerPinsJson};
+    var pendingUpdate = null;
+    var tilesLoadedOnce = false;
+    var consecutiveTileErrors = 0;
+
+    // Smooth marker position animation helper
+    function smoothMoveMarker(marker, targetLatLng, durationMs) {
+      if (!marker || !targetLatLng) return;
+      var cur = marker.getLatLng();
+      if (!cur) {
+        marker.setLatLng(targetLatLng);
+        return;
+      }
+      var startLat = cur.lat;
+      var startLng = cur.lng;
+      var endLat = targetLatLng[0];
+      var endLng = targetLatLng[1];
+      if (Math.abs(startLat - endLat) < 0.000005 && Math.abs(startLng - endLng) < 0.000005) {
+        return;
+      }
+      if (marker._animFrame) {
+        cancelAnimationFrame(marker._animFrame);
+        marker._animFrame = null;
+      }
+      var startTime = (window.performance && window.performance.now) ? window.performance.now() : Date.now();
+      var dur = durationMs || 900;
+      function animTick(now) {
+        var elapsed = (now || ((window.performance && window.performance.now) ? window.performance.now() : Date.now())) - startTime;
+        var p = Math.min(1.0, elapsed / dur);
+        // Ease-out cubic curve
+        var ease = 1 - Math.pow(1 - p, 3);
+        var curLat = startLat + (endLat - startLat) * ease;
+        var curLng = startLng + (endLng - startLng) * ease;
+        marker.setLatLng([curLat, curLng]);
+        if (p < 1.0) {
+          marker._animFrame = requestAnimationFrame(animTick);
+        } else {
+          marker.setLatLng([endLat, endLng]);
+          marker._animFrame = null;
+        }
+      }
+      marker._animFrame = requestAnimationFrame(animTick);
+    }
 
     function initLeafletMap() {
       if (map) return;
       if (typeof L === 'undefined') {
-        setTimeout(initLeafletMap, 30);
+        setTimeout(initLeafletMap, 50);
         return;
       }
       var mapContainer = document.getElementById('map');
       if (!mapContainer) {
-        setTimeout(initLeafletMap, 30);
+        setTimeout(initLeafletMap, 50);
         return;
       }
 
-      // Smooth zoom & inertia physics enabled
-      map = L.map('map', {
-        center: [7.8731, 80.7718],
-        zoom: ${fullscreenMode ? 8 : isMiniMap ? 6.9 : 7.6},
-        minZoom: 6.0,
-        maxZoom: 19,
-        zoomControl: false,
-        attributionControl: false,
-        zoomAnimation: true,
-        fadeAnimation: true,
-        markerZoomAnimation: true,
-        wheelDebounceTime: 40,
-        wheelPxPerZoomLevel: 60,
-        touchZoom: true,
-        doubleClickZoom: true,
-        scrollWheelZoom: true,
-        boxZoom: true,
-        dragging: true,
-        inertia: true,
-        inertiaDeceleration: 3000
-      });
+      try {
+        console.log('init ok');
 
-      // Ultra-reliable high speed multi-source tile layer for Sri Lanka:
-      // Google Streets primary + OpenStreetMap fallback + CartoDB fallback
-      // Loaded as pure <img> without crossOrigin: true so Android WebView never blocks
-      var googleTileUrl = 'https://mt{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}';
-      baseTileLayer = L.tileLayer(googleTileUrl, {
-        maxZoom: 20,
-        minZoom: 6,
-        subdomains: ['0', '1', '2', '3']
-      }).addTo(map);
+        // Smooth zoom & inertia physics enabled
+        map = L.map('map', {
+          center: [7.8731, 80.7718],
+          zoom: ${fullscreenMode ? 8 : isMiniMap ? 6.9 : 7.6},
+          minZoom: 6.0,
+          maxZoom: 19,
+          zoomControl: false,
+          attributionControl: false,
+          zoomAnimation: true,
+          fadeAnimation: true,
+          markerZoomAnimation: true,
+          wheelDebounceTime: 40,
+          wheelPxPerZoomLevel: 60,
+          touchZoom: true,
+          doubleClickZoom: true,
+          scrollWheelZoom: true,
+          boxZoom: true,
+          dragging: true,
+          inertia: true,
+          inertiaDeceleration: 3000
+        });
 
-      baseTileLayer.on('tileerror', function(e) {
-        if (!e || !e.tile || !e.coords) return;
-        var tileImg = e.tile;
-        var z = e.coords.z;
-        var x = e.coords.x;
-        var y = e.coords.y;
-        var step = parseInt(tileImg.getAttribute('data-err-step') || '0', 10);
-        if (step === 0) {
-          tileImg.setAttribute('data-err-step', '1');
-          tileImg.src = 'https://a.tile.openstreetmap.org/' + z + '/' + x + '/' + y + '.png';
-        } else if (step === 1) {
-          tileImg.setAttribute('data-err-step', '2');
-          tileImg.src = 'https://a.basemaps.cartocdn.com/rastertiles/voyager/' + z + '/' + x + '/' + y + '.png';
+        // Multi-source tile layer: Google Streets primary + OpenStreetMap fallback + CartoDB fallback
+        var googleTileUrl = 'https://mt{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}';
+        baseTileLayer = L.tileLayer(googleTileUrl, {
+          maxZoom: 20,
+          minZoom: 6,
+          subdomains: ['0', '1', '2', '3'],
+          keepBuffer: 4,
+          updateWhenIdle: false,
+          updateWhenZooming: true
+        }).addTo(map);
+
+        baseTileLayer.on('load', function() {
+          if (!tilesLoadedOnce) {
+            tilesLoadedOnce = true;
+            if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'tilesLoaded' }));
+            }
+          }
+        });
+
+        baseTileLayer.on('tileerror', function(e) {
+          consecutiveTileErrors++;
+          if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'tileError',
+              errorCount: consecutiveTileErrors
+            }));
+          }
+          if (!e || !e.tile || !e.coords) return;
+          var tileImg = e.tile;
+          var z = e.coords.z;
+          var x = e.coords.x;
+          var y = e.coords.y;
+          var step = parseInt(tileImg.getAttribute('data-err-step') || '0', 10);
+          if (step === 0) {
+            tileImg.setAttribute('data-err-step', '1');
+            tileImg.src = 'https://a.tile.openstreetmap.org/' + z + '/' + x + '/' + y + '.png';
+          } else if (step === 1) {
+            tileImg.setAttribute('data-err-step', '2');
+            tileImg.src = 'https://a.basemaps.cartocdn.com/rastertiles/voyager/' + z + '/' + x + '/' + y + '.png';
+          }
+        });
+
+        window.map = map;
+
+        // User touch listener properly registered INSIDE initLeafletMap()
+        map.on('dragstart zoomstart', function() {
+          userInteracted = true;
+        });
+
+        invalidateMap();
+        setTimeout(invalidateMap, 50);
+        setTimeout(invalidateMap, 150);
+        setTimeout(invalidateMap, 300);
+        setTimeout(invalidateMap, 1000);
+
+        // Apply queued updates if any arrived before map was ready
+        if (pendingUpdate) {
+          if (pendingUpdate.lorries) lorriesData = pendingUpdate.lorries;
+          if (pendingUpdate.selected !== undefined) selectedPlate = pendingUpdate.selected;
+          if (pendingUpdate.pins) customerPinsData = pendingUpdate.pins;
+          pendingUpdate = null;
         }
-      });
 
-      window.map = map;
-      invalidateMap();
-      setTimeout(invalidateMap, 50);
-      setTimeout(invalidateMap, 150);
-      setTimeout(invalidateMap, 400);
-      setTimeout(invalidateMap, 1200);
+        renderLorries(lorriesData, selectedPlate);
+        renderCustomerPins(customerPinsData);
 
-      map.on('dragstart zoomstart', function() {
-        userInteracted = true;
-      });
-
-      renderLorries(lorriesData, selectedPlate);
-      renderCustomerPins(customerPinsData);
+        // Notify React Native that Map is ready right after init!
+        if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'mapReady' }));
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'MAP_READY' }));
+        }
+      } catch (initErr) {
+        console.error('initLeafletMap exception:', initErr);
+        if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'MAP_ERROR',
+            message: 'initLeafletMap failed: ' + (initErr && initErr.message ? initErr.message : String(initErr))
+          }));
+        }
+      }
     }
 
     function invalidateMap() {
@@ -435,11 +617,8 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
     window.addEventListener('resize', invalidateMap);
     window.addEventListener('load', invalidateMap);
 
-    map.on('dragstart zoomstart', function() {
-      userInteracted = true;
-    });
-
     function recenterMap() {
+      if (!map) return;
       userInteracted = false;
       lastFittedTrip = '';
       if (focusLorryGlobal && focusLorryGlobal.lat && focusLorryGlobal.lng) {
@@ -459,11 +638,11 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
     }
 
     function zoomIn() {
-      map.zoomIn(1);
+      if (map) map.zoomIn(1);
     }
 
     function zoomOut() {
-      map.zoomOut(1);
+      if (map) map.zoomOut(1);
     }
 
     function triggerFullScreen() {
@@ -520,10 +699,13 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
         }
       }
 
-      // 5. Cleaned English match (strip road, street, junction, town, fort, etc.)
-      var clean = lower
-        .replace(/\b(road|rd|highway|expressway|street|st|lane|junction|junc|jn|town|city|hub|port|harbor|harbour|fort|park|station|village|estate)\b/gi, '')
-        .replace(/[^a-z0-9]/g, '');
+      // 5. Cleaned English match
+      var stopWords = ['road', 'rd', 'highway', 'expressway', 'street', 'st', 'lane', 'junction', 'junc', 'jn', 'town', 'city', 'hub', 'port', 'harbor', 'harbour', 'fort', 'park', 'station', 'village', 'estate'];
+      var clean = lower;
+      for (var sw = 0; sw < stopWords.length; sw++) {
+        clean = clean.split(stopWords[sw]).join(' ');
+      }
+      clean = clean.replace(/[^a-z0-9]/g, '');
 
       if (clean.length >= 3) {
         for (var i = 0; i < ALL_SL_CITIES.length; i++) {
@@ -548,6 +730,22 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
       var lat = Number(c[0]);
       var lng = Number(c[1]);
       return Number.isFinite(lat) && Number.isFinite(lng) && lat >= 5.0 && lat <= 10.5 && lng >= 79.0 && lng <= 82.5;
+    }
+
+    function tokenizeRoute(str) {
+      if (!str || typeof str !== 'string') return [];
+      var s = str;
+      var seps = [',', ';', '-', '/', '→', '->', 'via', 'VIA', 'Via', 'through', 'THROUGH', 'Through', 'to', 'TO', 'To', 'හරහා'];
+      for (var si = 0; si < seps.length; si++) {
+        s = s.split(seps[si]).join('|');
+      }
+      var tokens = s.split('|');
+      var out = [];
+      for (var ti = 0; ti < tokens.length; ti++) {
+        var t = tokens[ti].trim();
+        if (t.length >= 3) out.push(t);
+      }
+      return out;
     }
 
     function notifySelect(plate) {
@@ -623,7 +821,7 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
       var lat1 = from[0], lng1 = from[1];
       var lat2 = to[0], lng2 = to[1];
 
-      // 1. Southern Hills (Deniyaya, Morawaka, Kalugalahena) <-> Western Province (Panadura, Kalutara, Bandaragama, Colombo)
+      // 1. Southern Hills <-> Western Province
       var isSouthHills1 = lat1 >= 6.10 && lat1 <= 6.50 && lng1 >= 80.40 && lng1 <= 80.75;
       var isWest1 = lat1 >= 6.50 && lat1 <= 7.25 && lng1 >= 79.75 && lng1 <= 80.15;
       var isSouthHills2 = lat2 >= 6.10 && lat2 <= 6.50 && lng2 >= 80.40 && lng2 <= 80.75;
@@ -631,32 +829,32 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
 
       if (isSouthHills1 && isWest2) {
         return [
-          [6.2667, 80.4833], // Morawaka
-          [6.0989, 80.4736], // Akuressa
-          [6.0400, 80.4100], // Kokmaduwa / E01 entry
-          [6.1833, 80.1833], // Baddegama / E01
-          [6.2550, 80.1450], // Kurundugahahetekma / E01
-          [6.5233, 80.1147], // Dodangoda / E01
-          [6.6850, 80.0200], // Gelanigama / Bandaragama exit
-          [6.7140, 79.9890], // Bandaragama
-          [6.7130, 79.9074]  // Panadura
+          [6.2667, 80.4833],
+          [6.0989, 80.4736],
+          [6.0400, 80.4100],
+          [6.1833, 80.1833],
+          [6.2550, 80.1450],
+          [6.5233, 80.1147],
+          [6.6850, 80.0200],
+          [6.7140, 79.9890],
+          [6.7130, 79.9074]
         ];
       }
       if (isWest1 && isSouthHills2) {
         return [
-          [6.7130, 79.9074], // Panadura
-          [6.7140, 79.9890], // Bandaragama
-          [6.6850, 80.0200], // Gelanigama / Bandaragama exit
-          [6.5233, 80.1147], // Dodangoda / E01
-          [6.2550, 80.1450], // Kurundugahahetekma / E01
-          [6.1833, 80.1833], // Baddegama / E01
-          [6.0400, 80.4100], // Kokmaduwa / E01 exit
-          [6.0989, 80.4736], // Akuressa
-          [6.2667, 80.4833]  // Morawaka
+          [6.7130, 79.9074],
+          [6.7140, 79.9890],
+          [6.6850, 80.0200],
+          [6.5233, 80.1147],
+          [6.2550, 80.1450],
+          [6.1833, 80.1833],
+          [6.0400, 80.4100],
+          [6.0989, 80.4736],
+          [6.2667, 80.4833]
         ];
       }
 
-      // 2. South Coast (Matara, Galle) <-> Western Coast (Panadura, Colombo)
+      // 2. South Coast <-> Western Coast
       var isSouthCoast1 = lat1 >= 5.90 && lat1 <= 6.15 && lng1 >= 80.15 && lng1 <= 80.70;
       var isSouthCoast2 = lat2 >= 5.90 && lat2 <= 6.15 && lng2 >= 80.15 && lng2 <= 80.70;
 
@@ -725,8 +923,39 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
       return [fromCoord, toCoord];
     }
 
+    function applyRouteGeometry(latLngs, routeHolder) {
+      if (!map || !routeHolder || !Array.isArray(latLngs) || latLngs.length < 2) return;
+      if (routeHolder.glowLine && routeHolder.dashLine) {
+        routeHolder.glowLine.setLatLngs(latLngs);
+        routeHolder.dashLine.setLatLngs(latLngs);
+      } else {
+        routeHolder.glowLine = L.polyline(latLngs, {
+          color: '#FFC20E',
+          weight: 6,
+          opacity: 0.6,
+          lineCap: 'round',
+          lineJoin: 'round'
+        }).addTo(map);
+        routeHolder.dashLine = L.polyline(latLngs, {
+          color: '#26231B',
+          weight: 3.5,
+          dashArray: '5, 8',
+          opacity: 0.9,
+          lineCap: 'round',
+          lineJoin: 'round'
+        }).addTo(map);
+      }
+    }
+
     function fetchRoadRouteForTrip(key, fromCoord, toCoord, viaCoords, routeHolder) {
-      if (!fromCoord || !toCoord) return;
+      if (!fromCoord || !toCoord || !map) return;
+      if (roadRoutingCache[key]) {
+        applyRouteGeometry(roadRoutingCache[key], routeHolder);
+        return;
+      }
+      if (pendingRouteRequests[key]) return; // In-flight request deduplication
+      pendingRouteRequests[key] = true;
+
       var pts = [fromCoord[1] + ',' + fromCoord[0]];
       if (Array.isArray(viaCoords)) {
         for (var vi = 0; vi < viaCoords.length; vi++) {
@@ -742,40 +971,24 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
       fetch(osrmUrl)
         .then(function(r) { return r.json(); })
         .then(function(res) {
+          delete pendingRouteRequests[key];
           if (res && res.code === 'Ok' && res.routes && res.routes[0] && res.routes[0].geometry) {
             var raw = res.routes[0].geometry.coordinates || [];
             var latLngs = raw.map(function(c) { return [c[1], c[0]]; });
             if (latLngs.length >= 2) {
               roadRoutingCache[key] = latLngs;
               try { sessionStorage.setItem('sr_route_' + key, JSON.stringify(latLngs)); } catch(e) {}
-              if (routeHolder.glowLine && routeHolder.dashLine) {
-                routeHolder.glowLine.setLatLngs(latLngs);
-                routeHolder.dashLine.setLatLngs(latLngs);
-              } else {
-                routeHolder.glowLine = L.polyline(latLngs, {
-                  color: '#FFC20E',
-                  weight: 6,
-                  opacity: 0.6,
-                  lineCap: 'round',
-                  lineJoin: 'round'
-                }).addTo(map);
-                routeHolder.dashLine = L.polyline(latLngs, {
-                  color: '#26231B',
-                  weight: 3.5,
-                  dashArray: '5, 8',
-                  opacity: 0.9,
-                  lineCap: 'round',
-                  lineJoin: 'round'
-                }).addTo(map);
-              }
+              applyRouteGeometry(latLngs, routeHolder);
             }
           }
         })
-        .catch(function(e) {});
+        .catch(function(e) {
+          delete pendingRouteRequests[key];
+        });
     }
 
     function renderLorries(data, sel) {
-      if (!Array.isArray(data)) return;
+      if (!map || !Array.isArray(data)) return;
       var activePlates = {};
       var focusLorry = null;
       var focusDestCoord = null;
@@ -792,7 +1005,7 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
         var popupContent = buildPopupHtml(l);
 
         if (markers[l.plate]) {
-          markers[l.plate].setLatLng([l.lat, l.lng]);
+          smoothMoveMarker(markers[l.plate], [l.lat, l.lng], 950);
           markers[l.plate].setIcon(icon);
           markers[l.plate].setPopupContent(popupContent);
         } else {
@@ -811,7 +1024,7 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
           focusDestCoord = destCoord;
         }
 
-        // Extract via coordinates from structured viaWaypoints or travelRoute / returnRoute text
+        // Extract via coordinates
         var viaCoords = [];
         if (Array.isArray(l.viaWaypoints) && l.viaWaypoints.length > 0) {
           for (var vIdx = 0; vIdx < l.viaWaypoints.length; vIdx++) {
@@ -823,10 +1036,9 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
         } else {
           var rawRoute = l.travelRoute || l.returnRoute || '';
           if (rawRoute) {
-            var rTokens = rawRoute.split(/[,;\-\/→]|(?:\bvia\b)|(?:\bthrough\b)|(?:\bto\b)|(?:හරහා)/i);
+            var rTokens = tokenizeRoute(rawRoute);
             for (var rk = 0; rk < rTokens.length; rk++) {
-              var rt = rTokens[rk].trim();
-              if (rt.length < 3) continue;
+              var rt = rTokens[rk];
               var rc = resolveCity(rt);
               if (rc && isValidCoord(rc)) {
                 if (startCoord && Math.abs(startCoord[0] - rc[0]) < 0.02 && Math.abs(startCoord[1] - rc[1]) < 0.02) continue;
@@ -837,7 +1049,6 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
           }
         }
 
-        // Trip key strictly based on origin, via waypoints & destination
         var sKey = startCoord ? (startCoord[0].toFixed(3) + ',' + startCoord[1].toFixed(3)) : (l.startLocation || 'start');
         var dKey = destCoord ? (destCoord[0].toFixed(3) + ',' + destCoord[1].toFixed(3)) : (l.endLocation || 'end');
         var viaKey = viaCoords.map(function(c) { return c[0].toFixed(3) + ',' + c[1].toFixed(3); }).join('|');
@@ -901,7 +1112,6 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
             dMarker = L.marker(destCoord, { icon: destIcon }).addTo(map);
             dMarker.bindPopup('<div style="font-size:11px;font-weight:700;padding:2px;color:#26231B;">Final Destination: ' + (l.endLocation || 'Destination') + '</div>');
 
-            // Render via town markers
             for (var vi2 = 0; vi2 < viaCoords.length; vi2++) {
               var vc = viaCoords[vi2];
               var viaHtml = '<div style="display:flex;align-items:center;gap:3px;background:#26231B;color:#FFC20E;border:1.5px solid #FFC20E;border-radius:12px;padding:2px 7px;box-shadow:0 2px 6px rgba(0,0,0,0.35);font-size:9.5px;font-weight:700;">' +
@@ -1017,6 +1227,7 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
     var customerRouteLines = [];
 
     function renderCustomerPins(pins) {
+      if (!map) return;
       for (var ci = 0; ci < customerMarkers.length; ci++) {
         try { map.removeLayer(customerMarkers[ci]); } catch(e) {}
       }
@@ -1033,7 +1244,6 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
         if (typeof cp.lat === 'number' && typeof cp.lng === 'number' && !isNaN(cp.lat) && !isNaN(cp.lng)) {
           allBounds.push([cp.lat, cp.lng]);
           
-          // PickMe Style Customer Pickup Marker with pulsing radar ring
           var custSvg = '<svg width="18" height="18" viewBox="0 0 24 24" fill="#FFFFFF"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>';
           var custHtml = '<div style="position:relative; width:36px; height:36px;">' +
             '<div style="position:absolute; inset:-4px; border-radius:50%; background:rgba(26,115,232,0.35); border:1.5px solid #1A73E8; animation:pulseAnim 1.8s infinite ease-out; pointer-events:none;"></div>' +
@@ -1095,36 +1305,39 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
     }
 
     window.updateMapData = function(data, sel, pins) {
-      lorriesData = data;
-      selectedPlate = sel;
+      if (data) lorriesData = data;
+      if (sel !== undefined) selectedPlate = sel;
       if (pins) customerPinsData = pins;
       if (!map) {
-        initLeafletMap();
+        pendingUpdate = { lorries: data, selected: sel, pins: pins };
         return;
       }
       invalidateMap();
-      renderLorries(data, sel);
-      if (pins) renderCustomerPins(pins);
+      renderLorries(lorriesData, selectedPlate);
+      if (customerPinsData) renderCustomerPins(customerPinsData);
     };
 
     window.updateCustomerPins = function(pins) {
-      customerPinsData = pins;
+      if (pins) customerPinsData = pins;
       if (!map) {
-        initLeafletMap();
+        if (!pendingUpdate) pendingUpdate = {};
+        pendingUpdate.pins = pins;
         return;
       }
-      renderCustomerPins(pins);
+      renderCustomerPins(customerPinsData);
     };
 
     window.updateLorries = function(data, sel) {
-      lorriesData = data;
-      selectedPlate = sel;
+      if (data) lorriesData = data;
+      if (sel !== undefined) selectedPlate = sel;
       if (!map) {
-        initLeafletMap();
+        if (!pendingUpdate) pendingUpdate = {};
+        pendingUpdate.lorries = data;
+        pendingUpdate.selected = sel;
         return;
       }
       invalidateMap();
-      renderLorries(data, sel);
+      renderLorries(lorriesData, selectedPlate);
     };
 
     window.addEventListener('message', function(ev) {
@@ -1132,22 +1345,33 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
         var d = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
         if (d && d.type === 'UPDATE_MAP_DATA') {
           if (d.lorries) lorriesData = d.lorries;
-          if (d.selectedPlate) selectedPlate = d.selectedPlate;
+          if (d.selectedPlate !== undefined) selectedPlate = d.selectedPlate;
           if (d.customerPins) customerPinsData = d.customerPins;
-          if (!map) { initLeafletMap(); return; }
+          if (!map) {
+            pendingUpdate = { lorries: d.lorries, selected: d.selectedPlate, pins: d.customerPins };
+            return;
+          }
           renderLorries(lorriesData, selectedPlate);
           renderCustomerPins(customerPinsData);
         } else if (d && d.type === 'UPDATE_LORRIES') {
           if (d.lorries) lorriesData = d.lorries;
-          if (d.selectedPlate) selectedPlate = d.selectedPlate;
-          if (!map) { initLeafletMap(); return; }
+          if (d.selectedPlate !== undefined) selectedPlate = d.selectedPlate;
+          if (!map) {
+            if (!pendingUpdate) pendingUpdate = {};
+            pendingUpdate.lorries = d.lorries;
+            pendingUpdate.selected = d.selectedPlate;
+            return;
+          }
           renderLorries(lorriesData, selectedPlate);
         }
       } catch(e) {}
     });
 
+    // Run map initialization safely on DOM readiness
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', initLeafletMap);
+      document.addEventListener('DOMContentLoaded', function() {
+        initLeafletMap();
+      });
     } else {
       initLeafletMap();
     }
@@ -1159,12 +1383,24 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
   const handleMessage = (event: any) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
-      if (data.type === "SELECT_LORRY" && onSelectLorry) {
+      if (data.type === "mapReady" || data.type === "MAP_READY") {
+        console.log("[MAP] ready - Leaflet Map initialized");
+        setIsMapReady(true);
+        setMapLoadTimedOut(false);
+        setMapErrorMsg(null);
+      } else if (data.type === "tilesLoaded") {
+        console.log("[MAP] tiles loaded");
+      } else if (data.type === "tileError") {
+        console.warn("[MAP] tile error (fallback triggered, count: " + data.errorCount + ")");
+      } else if (data.type === "MAP_LOG") {
+        console.log(`[MAP] [WebView ${data.level || "log"}]`, data.message);
+      } else if (data.type === "MAP_ERROR") {
+        console.warn("[MAP] error:", data.message);
+        setMapErrorMsg(data.message);
+      } else if (data.type === "SELECT_LORRY" && onSelectLorry) {
         onSelectLorry(data.plate);
       } else if (data.type === "TOGGLE_FULLSCREEN") {
         setIsFullScreen(true);
-      } else if (data.type === "MAP_ERROR") {
-        console.warn("Leaflet Map Error inside WebView:", data.message);
       }
     } catch (e) {
       // Ignored
@@ -1219,6 +1455,7 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
           />
         ) : (
           <WebView
+            key={`map-view-${reloadKey}`}
             ref={webViewRef}
             originWhitelist={["*"]}
             source={{ html: mapHtml, baseUrl: "https://tile.openstreetmap.org" }}
@@ -1236,7 +1473,17 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
             scalesPageToFit={false}
             setSupportMultipleWindows={false}
             nestedScrollEnabled={true}
+            onError={(syntheticEvent) => {
+              const { nativeEvent } = syntheticEvent;
+              console.warn("[MAP] WebView native onError:", nativeEvent);
+              setMapErrorMsg(`WebView load error: ${nativeEvent.description || "Unknown"}`);
+            }}
+            onHttpError={(syntheticEvent) => {
+              const { nativeEvent } = syntheticEvent;
+              console.warn("[MAP] WebView native onHttpError:", nativeEvent.statusCode, nativeEvent.url);
+            }}
             onLoadEnd={() => {
+              console.log("[MAP] WebView native onLoadEnd");
               const payload = JSON.stringify(filteredLorries);
               const sel = JSON.stringify(selectedPlate || "");
               const pinsPayload = JSON.stringify(customerPins || []);
@@ -1246,6 +1493,36 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
             }}
             style={[styles.webView, { width: "100%", height: "100%" }]}
           />
+        )}
+
+        {/* Loading overlay while Leaflet finishes initializing */}
+        {!isMapReady && !mapLoadTimedOut && Platform.OS !== "web" && (
+          <View style={styles.loadingContainer} pointerEvents="none">
+            <ActivityIndicator size="small" color="#FFC20E" />
+            <Text style={styles.loadingText}>Loading Sri Lanka Live Map...</Text>
+          </View>
+        )}
+
+        {/* Error / Retry overlay if map fails to report ready within 15s */}
+        {mapLoadTimedOut && !isMapReady && (
+          <View style={styles.errorOverlayContainer}>
+            <Text style={styles.errorTitle}>Map Initialization Delayed</Text>
+            <Text style={styles.errorSub}>
+              {mapErrorMsg || "Network or tile service is taking longer than usual."}
+            </Text>
+            <TouchableOpacity
+              style={styles.retryBtn}
+              onPress={() => {
+                console.log("[MAP] User tapped Retry Loading Map");
+                setMapLoadTimedOut(false);
+                setMapErrorMsg(null);
+                setReloadKey((k) => k + 1);
+              }}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.retryBtnText}>Retry Loading Map</Text>
+            </TouchableOpacity>
+          </View>
         )}
 
         {!isMiniMap && (
@@ -1291,6 +1568,7 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
               />
             ) : (
               <WebView
+                key={`fullscreen-map-${reloadKey}`}
                 ref={fullScreenWebViewRef}
                 originWhitelist={["*"]}
                 source={{ html: fullScreenHtml, baseUrl: "https://tile.openstreetmap.org" }}
@@ -1308,6 +1586,14 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
                 scalesPageToFit={false}
                 setSupportMultipleWindows={false}
                 nestedScrollEnabled={true}
+                onError={(syntheticEvent) => {
+                  const { nativeEvent } = syntheticEvent;
+                  console.warn("[MAP] FullScreen WebView native onError:", nativeEvent);
+                }}
+                onHttpError={(syntheticEvent) => {
+                  const { nativeEvent } = syntheticEvent;
+                  console.warn("[MAP] FullScreen WebView native onHttpError:", nativeEvent.statusCode, nativeEvent.url);
+                }}
                 onLoadEnd={() => {
                   const payload = JSON.stringify(filteredLorries);
                   const sel = JSON.stringify(selectedPlate || "");
@@ -1345,15 +1631,50 @@ const styles = StyleSheet.create({
   loadingContainer: {
     position: "absolute",
     inset: 0,
-    backgroundColor: "#F4F2EA",
+    backgroundColor: "rgba(239, 236, 225, 0.75)",
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
+    zIndex: 10,
   },
   loadingText: {
-    color: "#6F6A5A",
+    color: "#26231B",
     fontSize: 12,
     fontWeight: "700",
+  },
+  errorOverlayContainer: {
+    position: "absolute",
+    inset: 0,
+    backgroundColor: "rgba(38, 35, 27, 0.92)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+    gap: 8,
+    zIndex: 20,
+  },
+  errorTitle: {
+    color: "#FFC20E",
+    fontSize: 14,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  errorSub: {
+    color: "#E7E2D0",
+    fontSize: 11,
+    textAlign: "center",
+    maxWidth: 240,
+    marginBottom: 6,
+  },
+  retryBtn: {
+    backgroundColor: "#FFC20E",
+    paddingVertical: 7,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+  },
+  retryBtnText: {
+    color: "#26231B",
+    fontSize: 12,
+    fontWeight: "800",
   },
   floatingFullScreenBtn: {
     position: "absolute",
@@ -1366,6 +1687,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#FFC20E",
     elevation: 3,
+    zIndex: 5,
   },
   floatingFullScreenText: {
     color: "#FFC20E",
@@ -1392,9 +1714,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-  },
-  fullScreenFlag: {
-    fontSize: 18,
   },
   fullScreenTitle: {
     color: "#FFC20E",
