@@ -337,7 +337,7 @@ export default function AboutPage() {
               </>
             ) : (
               <>
-                <span className="text-[#C51616]">සිතුමිණ ට්‍රාන්ස්පෝට්</span> සේවාව පිළිබඳව
+                <span className="text-[#C51616]">SITHUMINA TRANSPORTS</span> සේවාව පිළිබඳව
               </>
             )}
           </h1>
@@ -562,8 +562,8 @@ export default function AboutPage() {
                 aria-pressed={active}
                 onClick={() => setActiveService(i)}
                 className={`text-left cursor-pointer flex flex-col gap-3.5 rounded-[22px] bg-white p-5 sm:p-6 border-[1.5px] transition-all duration-300 hover:-translate-y-1 hover:shadow-[0_18px_36px_-18px_rgba(30,60,120,0.3)] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#2F5BEA] ${active
-                    ? "border-[var(--y)] shadow-[0_0_0_4px_var(--y3),0_18px_36px_-20px_rgba(255,194,14,0.6)]"
-                    : "border-[var(--line)]"
+                  ? "border-[var(--y)] shadow-[0_0_0_4px_var(--y3),0_18px_36px_-20px_rgba(255,194,14,0.6)]"
+                  : "border-[var(--line)]"
                   }`}
               >
                 <span
@@ -621,8 +621,8 @@ export default function AboutPage() {
                 <div className="relative overflow-hidden rounded-2xl bg-gradient-to-b from-[#EAF1FD] to-[#F6F9FE] px-3 pt-9">
                   <span
                     className={`absolute top-3 left-3 text-xs font-semibold rounded-full px-2.5 py-0.5 border ${v.cold
-                        ? "bg-[#E7EDFF] text-[#2F5BEA] border-[#CBD8FF]"
-                        : "bg-white text-[var(--mut)] border-[var(--line)]"
+                      ? "bg-[#E7EDFF] text-[#2F5BEA] border-[#CBD8FF]"
+                      : "bg-white text-[var(--mut)] border-[var(--line)]"
                       }`}
                   >
                     {t.badge}

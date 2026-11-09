@@ -48,6 +48,8 @@ export interface CustomerMapPin {
   title: string;
   subtitle?: string;
   bookingId?: string;
+  phone?: string;
+  packageDetails?: string;
 }
 
 interface SriLankaMapViewerProps {
@@ -92,11 +94,15 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     ${BUNDLED_LEAFLET_CSS}
   </style>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    ${BUNDLED_LEAFLET_JS}
+    if (typeof L === 'undefined') {
+      ${BUNDLED_LEAFLET_JS}
+    }
   </script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -325,57 +331,17 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
   }
 
   <script>
-    // Smooth zoom & inertia physics enabled
-    var map = L.map('map', {
-      center: [7.8731, 80.7718],
-      zoom: ${fullscreenMode ? 8 : isMiniMap ? 6.9 : 7.6},
-      minZoom: 6.0,
-      maxZoom: 18,
-      zoomControl: false,
-      attributionControl: false,
-      zoomAnimation: true,
-      fadeAnimation: true,
-      markerZoomAnimation: true,
-      wheelDebounceTime: 40,
-      wheelPxPerZoomLevel: 60,
-      touchZoom: true,
-      doubleClickZoom: true,
-      scrollWheelZoom: true,
-      boxZoom: true,
-      dragging: true,
-      inertia: true,
-      inertiaDeceleration: 3000
-    });
-
-    // Ultra-reliable high speed tile layer for Sri Lanka (Google Streets primary + OSM fallback)
-    var googleTileUrl = 'https://mt{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}';
-    
-    var baseTileLayer = L.tileLayer(googleTileUrl, {
-      maxZoom: 20,
-      subdomains: ['0', '1', '2', '3'],
-      crossOrigin: true
-    }).addTo(map);
-
-    baseTileLayer.on('tileerror', function(error, tile) {
-      if (tile && tile.src && tile.src.indexOf('google.com') !== -1) {
-        tile.src = 'https://tile.openstreetmap.org/' + error.coords.z + '/' + error.coords.x + '/' + error.coords.y + '.png';
-      } else if (tile && tile.src && tile.src.indexOf('openstreetmap.org') !== -1) {
-        tile.src = 'https://tile.openstreetmap.de/' + error.coords.z + '/' + error.coords.x + '/' + error.coords.y + '.png';
+    window.onerror = function(msg, url, line) {
+      if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'MAP_ERROR',
+          message: String(msg) + ' at line ' + line
+        }));
       }
-    });
+    };
 
-    window.map = map;
-    function invalidateMap() {
-      if (map) {
-        try { map.invalidateSize(true); } catch(e) {}
-      }
-    }
-    setTimeout(invalidateMap, 100);
-    setTimeout(invalidateMap, 400);
-    setTimeout(invalidateMap, 1200);
-    window.addEventListener('resize', invalidateMap);
-    window.addEventListener('load', invalidateMap);
-
+    var map = null;
+    var baseTileLayer = null;
     var markers = {};
     var activeRouteLayers = {};
     var roadRoutingCache = {};
@@ -384,6 +350,90 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
     var focusLorryGlobal = null;
     var lorriesData = ${lorriesJson};
     var selectedPlate = ${selectedJson};
+    var customerPinsData = ${customerPinsJson};
+
+    function initLeafletMap() {
+      if (map) return;
+      if (typeof L === 'undefined') {
+        setTimeout(initLeafletMap, 30);
+        return;
+      }
+      var mapContainer = document.getElementById('map');
+      if (!mapContainer) {
+        setTimeout(initLeafletMap, 30);
+        return;
+      }
+
+      // Smooth zoom & inertia physics enabled
+      map = L.map('map', {
+        center: [7.8731, 80.7718],
+        zoom: ${fullscreenMode ? 8 : isMiniMap ? 6.9 : 7.6},
+        minZoom: 6.0,
+        maxZoom: 19,
+        zoomControl: false,
+        attributionControl: false,
+        zoomAnimation: true,
+        fadeAnimation: true,
+        markerZoomAnimation: true,
+        wheelDebounceTime: 40,
+        wheelPxPerZoomLevel: 60,
+        touchZoom: true,
+        doubleClickZoom: true,
+        scrollWheelZoom: true,
+        boxZoom: true,
+        dragging: true,
+        inertia: true,
+        inertiaDeceleration: 3000
+      });
+
+      // Ultra-reliable high speed multi-source tile layer for Sri Lanka:
+      // Google Streets primary + OpenStreetMap fallback + CartoDB fallback
+      // Loaded as pure <img> without crossOrigin: true so Android WebView never blocks
+      var googleTileUrl = 'https://mt{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}';
+      baseTileLayer = L.tileLayer(googleTileUrl, {
+        maxZoom: 20,
+        minZoom: 6,
+        subdomains: ['0', '1', '2', '3']
+      }).addTo(map);
+
+      baseTileLayer.on('tileerror', function(e) {
+        if (!e || !e.tile || !e.coords) return;
+        var tileImg = e.tile;
+        var z = e.coords.z;
+        var x = e.coords.x;
+        var y = e.coords.y;
+        var step = parseInt(tileImg.getAttribute('data-err-step') || '0', 10);
+        if (step === 0) {
+          tileImg.setAttribute('data-err-step', '1');
+          tileImg.src = 'https://a.tile.openstreetmap.org/' + z + '/' + x + '/' + y + '.png';
+        } else if (step === 1) {
+          tileImg.setAttribute('data-err-step', '2');
+          tileImg.src = 'https://a.basemaps.cartocdn.com/rastertiles/voyager/' + z + '/' + x + '/' + y + '.png';
+        }
+      });
+
+      window.map = map;
+      invalidateMap();
+      setTimeout(invalidateMap, 50);
+      setTimeout(invalidateMap, 150);
+      setTimeout(invalidateMap, 400);
+      setTimeout(invalidateMap, 1200);
+
+      map.on('dragstart zoomstart', function() {
+        userInteracted = true;
+      });
+
+      renderLorries(lorriesData, selectedPlate);
+      renderCustomerPins(customerPinsData);
+    }
+
+    function invalidateMap() {
+      if (map) {
+        try { map.invalidateSize(true); } catch(e) {}
+      }
+    }
+    window.addEventListener('resize', invalidateMap);
+    window.addEventListener('load', invalidateMap);
 
     map.on('dragstart zoomstart', function() {
       userInteracted = true;
@@ -963,9 +1013,116 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
       }
     }
 
+    var customerMarkers = [];
+    var customerRouteLines = [];
+
+    function renderCustomerPins(pins) {
+      for (var ci = 0; ci < customerMarkers.length; ci++) {
+        try { map.removeLayer(customerMarkers[ci]); } catch(e) {}
+      }
+      customerMarkers = [];
+      for (var cri = 0; cri < customerRouteLines.length; cri++) {
+        try { map.removeLayer(customerRouteLines[cri]); } catch(e) {}
+      }
+      customerRouteLines = [];
+
+      if (!Array.isArray(pins) || pins.length === 0) return;
+
+      var allBounds = [];
+      pins.forEach(function(cp) {
+        if (typeof cp.lat === 'number' && typeof cp.lng === 'number' && !isNaN(cp.lat) && !isNaN(cp.lng)) {
+          allBounds.push([cp.lat, cp.lng]);
+          
+          // PickMe Style Customer Pickup Marker with pulsing radar ring
+          var custSvg = '<svg width="18" height="18" viewBox="0 0 24 24" fill="#FFFFFF"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>';
+          var custHtml = '<div style="position:relative; width:36px; height:36px;">' +
+            '<div style="position:absolute; inset:-4px; border-radius:50%; background:rgba(26,115,232,0.35); border:1.5px solid #1A73E8; animation:pulseAnim 1.8s infinite ease-out; pointer-events:none;"></div>' +
+            '<div style="position:relative; z-index:2; background:#1A73E8; color:#ffffff; border:2.5px solid #ffffff; border-radius:50%; width:36px; height:36px; display:flex; align-items:center; justify-content:center; box-shadow:0 4px 14px rgba(0,0,0,0.45);">' + custSvg + '</div>' +
+            '</div>';
+          
+          var custIcon = L.divIcon({
+            className: 'cust-marker-icon',
+            html: custHtml,
+            iconSize: [36, 36],
+            iconAnchor: [18, 18],
+            popupAnchor: [0, -18]
+          });
+          
+          var marker = L.marker([cp.lat, cp.lng], { icon: custIcon }).addTo(map);
+          var phoneHtml = cp.phone ? ('<div style="font-size:11px; color:#60A5FA; margin-top:2px; font-weight:700;">📞 ' + cp.phone + '</div>') : '';
+          var pkgHtml = cp.packageDetails ? ('<div style="font-size:10.5px; color:#E5E7EB; margin-top:3px; background:rgba(255,255,255,0.08); padding:3px 6px; border-radius:6px;">📦 ' + cp.packageDetails + '</div>') : '';
+          
+          var popHtml = '<div style="background:#26231B; color:#F6F1DF; padding:8px 10px; border-radius:12px; border:1.5px solid #1A73E8; min-width:190px;">' +
+            '<div style="color:#60A5FA; font-weight:900; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">📍 Customer Pickup (Booked)</div>' +
+            '<div style="color:#FFFFFF; font-weight:800; font-size:14px; margin:2px 0;">' + (cp.title || 'Customer') + '</div>' +
+            '<div style="font-size:11px; color:#D1D5DB;">' + (cp.subtitle || '') + '</div>' +
+            phoneHtml +
+            pkgHtml +
+            '</div>';
+          marker.bindPopup(popHtml);
+          customerMarkers.push(marker);
+
+          // Dotted PickMe route corridor connecting lorry to customer pickup location
+          if (focusLorryGlobal && typeof focusLorryGlobal.lat === 'number' && typeof focusLorryGlobal.lng === 'number') {
+            var connGlow = L.polyline([[focusLorryGlobal.lat, focusLorryGlobal.lng], [cp.lat, cp.lng]], {
+              color: '#1A73E8',
+              weight: 5,
+              opacity: 0.5,
+              lineCap: 'round'
+            }).addTo(map);
+            var connDash = L.polyline([[focusLorryGlobal.lat, focusLorryGlobal.lng], [cp.lat, cp.lng]], {
+              color: '#60A5FA',
+              weight: 3,
+              dashArray: '6, 8',
+              opacity: 0.9,
+              lineCap: 'round'
+            }).addTo(map);
+            customerRouteLines.push(connGlow);
+            customerRouteLines.push(connDash);
+          }
+        }
+      });
+
+      // Auto-fit bounds if multiple pins exist
+      if (!userInteracted && allBounds.length > 0) {
+        if (focusLorryGlobal && typeof focusLorryGlobal.lat === 'number' && typeof focusLorryGlobal.lng === 'number') {
+          allBounds.push([focusLorryGlobal.lat, focusLorryGlobal.lng]);
+        }
+        if (allBounds.length > 1) {
+          map.fitBounds(allBounds, { padding: [45, 45], maxZoom: 14 });
+        }
+      }
+    }
+
+    window.updateMapData = function(data, sel, pins) {
+      lorriesData = data;
+      selectedPlate = sel;
+      if (pins) customerPinsData = pins;
+      if (!map) {
+        initLeafletMap();
+        return;
+      }
+      invalidateMap();
+      renderLorries(data, sel);
+      if (pins) renderCustomerPins(pins);
+    };
+
+    window.updateCustomerPins = function(pins) {
+      customerPinsData = pins;
+      if (!map) {
+        initLeafletMap();
+        return;
+      }
+      renderCustomerPins(pins);
+    };
+
     window.updateLorries = function(data, sel) {
       lorriesData = data;
       selectedPlate = sel;
+      if (!map) {
+        initLeafletMap();
+        return;
+      }
       invalidateMap();
       renderLorries(data, sel);
     };
@@ -973,53 +1130,26 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
     window.addEventListener('message', function(ev) {
       try {
         var d = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
-        if (d && d.type === 'UPDATE_LORRIES') {
-          renderLorries(d.lorries, d.selectedPlate);
+        if (d && d.type === 'UPDATE_MAP_DATA') {
+          if (d.lorries) lorriesData = d.lorries;
+          if (d.selectedPlate) selectedPlate = d.selectedPlate;
+          if (d.customerPins) customerPinsData = d.customerPins;
+          if (!map) { initLeafletMap(); return; }
+          renderLorries(lorriesData, selectedPlate);
+          renderCustomerPins(customerPinsData);
+        } else if (d && d.type === 'UPDATE_LORRIES') {
+          if (d.lorries) lorriesData = d.lorries;
+          if (d.selectedPlate) selectedPlate = d.selectedPlate;
+          if (!map) { initLeafletMap(); return; }
+          renderLorries(lorriesData, selectedPlate);
         }
       } catch(e) {}
     });
 
-    renderLorries(lorriesData, selectedPlate);
-
-    // Render Customer Pickup Pins (Uber / PickMe style)
-    var customerPinsData = ${customerPinsJson};
-    if (Array.isArray(customerPinsData) && customerPinsData.length > 0) {
-      var allBounds = [];
-      customerPinsData.forEach(function(cp) {
-        if (typeof cp.lat === 'number' && typeof cp.lng === 'number' && !isNaN(cp.lat) && !isNaN(cp.lng)) {
-          allBounds.push([cp.lat, cp.lng]);
-          var custSvg = '<svg width="18" height="18" viewBox="0 0 24 24" fill="#FFFFFF"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>';
-          var custHtml = '<div style="background:#1A73E8; color:#ffffff; border:2.5px solid #ffffff; border-radius:50%; width:34px; height:34px; display:flex; align-items:center; justify-content:center; box-shadow:0 4px 14px rgba(0,0,0,0.45);">' + custSvg + '</div>';
-          var custIcon = L.divIcon({
-            className: 'cust-marker-icon',
-            html: custHtml,
-            iconSize: [34, 34],
-            iconAnchor: [17, 17],
-            popupAnchor: [0, -18]
-          });
-          var marker = L.marker([cp.lat, cp.lng], { icon: custIcon }).addTo(map);
-          var popHtml = '<div style="background:#26231B; color:#F6F1DF; padding:8px 10px; border-radius:12px; border:1.5px solid #1A73E8; min-width:180px;">' +
-            '<div style="color:#60A5FA; font-weight:900; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Customer Pickup</div>' +
-            '<div style="color:#FFFFFF; font-weight:800; font-size:14px; margin:2px 0;">' + (cp.title || 'Customer') + '</div>' +
-            '<div style="font-size:11px; color:#D1D5DB;">' + (cp.subtitle || '') + '</div>' +
-            '</div>';
-          marker.bindPopup(popHtml);
-        }
-      });
-
-      // Fit map bounds to show both Driver lorry and Customer pickup pin
-      try {
-        if (Array.isArray(lorriesData)) {
-          lorriesData.forEach(function(l) {
-            if (typeof l.lat === 'number' && typeof l.lng === 'number') allBounds.push([l.lat, l.lng]);
-          });
-        }
-        if (allBounds.length > 1) {
-          map.fitBounds(allBounds, { padding: [40, 40], maxZoom: 15 });
-        } else if (allBounds.length === 1) {
-          map.setView(allBounds[0], 13);
-        }
-      } catch (err) {}
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initLeafletMap);
+    } else {
+      initLeafletMap();
     }
   </script>
 </body>
@@ -1033,6 +1163,8 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
         onSelectLorry(data.plate);
       } else if (data.type === "TOGGLE_FULLSCREEN") {
         setIsFullScreen(true);
+      } else if (data.type === "MAP_ERROR") {
+        console.warn("Leaflet Map Error inside WebView:", data.message);
       }
     } catch (e) {
       // Ignored
@@ -1048,22 +1180,23 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
   useEffect(() => {
     const payload = JSON.stringify(filteredLorries);
     const sel = JSON.stringify(selectedPlate || "");
-    const script = `if (window.updateLorries) { window.updateLorries(${payload}, ${sel}); } true;`;
+    const pinsPayload = JSON.stringify(customerPins || []);
+    const script = `if (window.updateMapData) { window.updateMapData(${payload}, ${sel}, ${pinsPayload}); } else if (window.updateLorries) { window.updateLorries(${payload}, ${sel}); } true;`;
 
     if (Platform.OS === "web") {
       iframeRef.current?.contentWindow?.postMessage(
-        { type: "UPDATE_LORRIES", lorries: filteredLorries, selectedPlate: selectedPlate || "" },
+        { type: "UPDATE_MAP_DATA", lorries: filteredLorries, selectedPlate: selectedPlate || "", customerPins: customerPins || [] },
         "*"
       );
       fullScreenIframeRef.current?.contentWindow?.postMessage(
-        { type: "UPDATE_LORRIES", lorries: filteredLorries, selectedPlate: selectedPlate || "" },
+        { type: "UPDATE_MAP_DATA", lorries: filteredLorries, selectedPlate: selectedPlate || "", customerPins: customerPins || [] },
         "*"
       );
     } else {
       webViewRef.current?.injectJavaScript(script);
       fullScreenWebViewRef.current?.injectJavaScript(script);
     }
-  }, [filteredLorries, selectedPlate]);
+  }, [filteredLorries, selectedPlate, customerPins]);
 
   // Generate HTML ONCE per mode so Android WebView NEVER resets or reloads on GPS ticks!
   const mapHtml = useMemo(() => generateMapHtml(false), [isMiniMap]);
@@ -1088,7 +1221,7 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
           <WebView
             ref={webViewRef}
             originWhitelist={["*"]}
-            source={{ html: mapHtml }}
+            source={{ html: mapHtml, baseUrl: "https://tile.openstreetmap.org" }}
             userAgent="Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
             onMessage={handleMessage}
             javaScriptEnabled={true}
@@ -1106,8 +1239,9 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
             onLoadEnd={() => {
               const payload = JSON.stringify(filteredLorries);
               const sel = JSON.stringify(selectedPlate || "");
+              const pinsPayload = JSON.stringify(customerPins || []);
               webViewRef.current?.injectJavaScript(
-                `if (window.updateLorries) { window.updateLorries(${payload}, ${sel}); } if (window.map) { window.map.invalidateSize(true); } true;`
+                `if (window.updateMapData) { window.updateMapData(${payload}, ${sel}, ${pinsPayload}); } else if (window.updateLorries) { window.updateLorries(${payload}, ${sel}); } if (window.map) { window.map.invalidateSize(true); } true;`
               );
             }}
             style={[styles.webView, { width: "100%", height: "100%" }]}
@@ -1159,7 +1293,7 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
               <WebView
                 ref={fullScreenWebViewRef}
                 originWhitelist={["*"]}
-                source={{ html: fullScreenHtml }}
+                source={{ html: fullScreenHtml, baseUrl: "https://tile.openstreetmap.org" }}
                 userAgent="Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
                 onMessage={handleMessage}
                 javaScriptEnabled={true}
@@ -1177,8 +1311,9 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
                 onLoadEnd={() => {
                   const payload = JSON.stringify(filteredLorries);
                   const sel = JSON.stringify(selectedPlate || "");
+                  const pinsPayload = JSON.stringify(customerPins || []);
                   fullScreenWebViewRef.current?.injectJavaScript(
-                    `if (window.updateLorries) { window.updateLorries(${payload}, ${sel}); } if (window.map) { window.map.invalidateSize(true); } true;`
+                    `if (window.updateMapData) { window.updateMapData(${payload}, ${sel}, ${pinsPayload}); } else if (window.updateLorries) { window.updateLorries(${payload}, ${sel}); } if (window.map) { window.map.invalidateSize(true); } true;`
                   );
                 }}
                 style={[styles.webView, { width: "100%", height: "100%" }]}

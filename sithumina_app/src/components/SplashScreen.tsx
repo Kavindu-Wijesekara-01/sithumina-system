@@ -57,7 +57,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish }) => {
           />
         </View>
 
-        <Text style={styles.sinhalaTitle}>සිතුමිණ ට්‍රාන්ස්පෝට්</Text>
+        <Text style={styles.sinhalaTitle}>SITHUMINA TRANSPORTS</Text>
         <Text style={styles.englishTitle}>SITHUMINA TRANSPORT</Text>
         <Text style={styles.subtitle}>Driver & Fleet Operations Hub</Text>
 

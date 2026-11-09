@@ -6,6 +6,8 @@ import {
   BookingStatusValue,
   PaymentSlipStatus,
   BookingPaymentMethod,
+  StoredRegistration,
+  StoredInquiry,
 } from "@/lib/server-store";
 import { normalizePlate } from "@/lib/phone-utils";
 import {
@@ -24,6 +26,7 @@ import {
   onSnapshot,
   doc,
   setDoc,
+  deleteDoc,
 } from "firebase/firestore";
 import {
   subscribeFleetVehicles,
@@ -42,11 +45,24 @@ import {
   updateBookingStatusAction,
   BookedDateDetail,
   getAllBookingsAction,
+  getAllRegistrationsAction,
+  updateRegistrationStatusAction,
+  approveRegistrationAndAddToFleetAction,
+  getAllInquiriesAction,
+  updateInquiryStatusAction,
 } from "@/actions";
 
 const ADMIN_PIN = "ST@2024";
 
-type NavSection = "overview" | "individual_bookings" | "online_bookings" | "fleet" | "riders" | "settings";
+type NavSection =
+  | "overview"
+  | "individual_bookings"
+  | "online_bookings"
+  | "vehicle_registrations"
+  | "contact_submissions"
+  | "fleet"
+  | "riders"
+  | "settings";
 type BookingStatus = BookingStatusValue;
 type StatusFilter = "all" | "pending" | "awaiting_payment" | "payment_submitted" | "accepted" | "assigned" | "completed";
 
@@ -162,6 +178,22 @@ export default function MasterAdminDashboard() {
   const [expandedIndividualBookings, setExpandedIndividualBookings] = useState<Record<string, boolean>>({});
   const [bookingViewSubTab, setBookingViewSubTab] = useState<"list" | "calendar">("list");
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+
+  // ---- Vehicle Registrations State ----
+  const [registrations, setRegistrations] = useState<
+    (StoredRegistration & { plateNumber?: string; baseCity?: string; updatedAt?: number })[]
+  >([]);
+  const [loadingRegistrations, setLoadingRegistrations] = useState(true);
+  const [regFilter, setRegFilter] = useState<"all" | "pending" | "approved" | "rejected">("all");
+  const [regSearch, setRegSearch] = useState("");
+  const [regActionId, setRegActionId] = useState<string | null>(null);
+
+  // ---- Contact Inquiries State ----
+  const [inquiries, setInquiries] = useState<(StoredInquiry & { type?: string })[]>([]);
+  const [loadingInquiries, setLoadingInquiries] = useState(true);
+  const [inquiryFilter, setInquiryFilter] = useState<"all" | "unread" | "resolved">("all");
+  const [inquirySearch, setInquirySearch] = useState("");
+  const [inquiryActionId, setInquiryActionId] = useState<string | null>(null);
 
   const toggleIndividualBookingCard = (bookingId: string, currentExpanded: boolean) => {
     setExpandedIndividualBookings((prev) => ({
@@ -341,10 +373,14 @@ export default function MasterAdminDashboard() {
     setBookings([]);
     setFleetVehicles([]);
     setDrivers([]);
+    setRegistrations([]);
+    setInquiries([]);
     setSelectedCalendarVehicle(null);
     setLoadingBookings(true);
     setLoadingFleet(true);
     setLoadingDrivers(true);
+    setLoadingRegistrations(true);
+    setLoadingInquiries(true);
     setAuthed(false);
   };
 
@@ -353,14 +389,20 @@ export default function MasterAdminDashboard() {
     if (!authed) {
       setFleetVehicles([]);
       setDrivers([]);
+      setRegistrations([]);
+      setInquiries([]);
       setSelectedCalendarVehicle(null);
       setLoadingFleet(true);
       setLoadingDrivers(true);
+      setLoadingRegistrations(true);
+      setLoadingInquiries(true);
       return;
     }
 
     setLoadingFleet(true);
     setLoadingDrivers(true);
+    setLoadingRegistrations(true);
+    setLoadingInquiries(true);
 
     const unsubFleet = subscribeFleetVehicles((vehicles) => {
       setFleetVehicles(vehicles);
@@ -385,11 +427,80 @@ export default function MasterAdminDashboard() {
       setStoredSlips(slips);
     });
 
+    const unsubRegistrations = onSnapshot(
+      collection(db, "vehicle_registrations"),
+      (snap) => {
+        const list: (StoredRegistration & { plateNumber?: string; baseCity?: string; updatedAt?: number })[] = [];
+        snap.forEach((d) => {
+          const data = d.data();
+          list.push({
+            id: d.id,
+            ownerName: String(data.ownerName || ""),
+            phone: String(data.phone || ""),
+            plateNumber: String(data.plateNumber || data.vehicleNumber || ""),
+            vehicleNumber: String(data.vehicleNumber || data.plateNumber || ""),
+            vehicleType: String(data.vehicleType || "Lorry"),
+            baseCity: String(data.baseCity || ""),
+            capacity: String(data.capacity || ""),
+            province: String(data.province || ""),
+            status: (data.status as "pending" | "approved" | "rejected") || "pending",
+            createdAt: Number(data.createdAt) || Date.now(),
+            updatedAt: Number(data.updatedAt) || Date.now(),
+          });
+        });
+        list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        setRegistrations(list);
+        setLoadingRegistrations(false);
+      },
+      async (err) => {
+        console.warn("Firestore vehicle_registrations subscription notice:", err);
+        const res = await getAllRegistrationsAction();
+        if (res.success && res.data) {
+          setRegistrations(res.data);
+        }
+        setLoadingRegistrations(false);
+      }
+    );
+
+    const unsubInquiries = onSnapshot(
+      collection(db, "inquiries"),
+      (snap) => {
+        const list: (StoredInquiry & { type?: string })[] = [];
+        snap.forEach((d) => {
+          const data = d.data();
+          list.push({
+            id: String(data.id || d.id),
+            name: String(data.name || ""),
+            phone: String(data.phone || ""),
+            email: data.email || "",
+            subject: String(data.subject || "General Inquiry"),
+            message: String(data.message || ""),
+            type: data.type || "general",
+            status: (data.status as "unread" | "resolved") || "unread",
+            createdAt: Number(data.createdAt) || Date.now(),
+          });
+        });
+        list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        setInquiries(list);
+        setLoadingInquiries(false);
+      },
+      async (err) => {
+        console.warn("Firestore inquiries subscription notice:", err);
+        const res = await getAllInquiriesAction();
+        if (res.success && res.data) {
+          setInquiries(res.data);
+        }
+        setLoadingInquiries(false);
+      }
+    );
+
     return () => {
       unsubFleet();
       unsubDrivers();
       unsubBankAccounts();
       unsubSlipsMeta();
+      unsubRegistrations();
+      unsubInquiries();
     };
   }, [authed]);
 
@@ -1296,6 +1407,126 @@ export default function MasterAdminDashboard() {
     }
   };
 
+  // ---- Vehicle Registration Handlers ----
+  const handleApproveRegistration = async (
+    reg: StoredRegistration & { plateNumber?: string; baseCity?: string; updatedAt?: number }
+  ) => {
+    setRegActionId(reg.id);
+    try {
+      const res = await approveRegistrationAndAddToFleetAction(
+        reg.id,
+        reg.province ? `${reg.province} – Island-wide` : undefined
+      );
+      if (res.success) {
+        showToast("Registration approved & added to active live fleet!", "success");
+      } else {
+        showToast(res.error || "Failed to approve registration.", "error");
+      }
+    } catch {
+      showToast("An error occurred while approving registration.", "error");
+    } finally {
+      setRegActionId(null);
+    }
+  };
+
+  const handleUpdateRegistrationStatus = async (
+    id: string,
+    status: "pending" | "approved" | "rejected"
+  ) => {
+    setRegActionId(id);
+    try {
+      const res = await updateRegistrationStatusAction(id, status);
+      if (res.success) {
+        showToast(`Registration marked as ${status}.`, "success");
+      } else {
+        showToast(res.error || "Failed to update registration status.", "error");
+      }
+    } catch {
+      showToast("An error occurred while updating status.", "error");
+    } finally {
+      setRegActionId(null);
+    }
+  };
+
+  const handleDeleteRegistration = async (id: string, label: string) => {
+    if (!confirm(`Are you sure you want to permanently delete registration for ${label || "this vehicle"}?`)) {
+      return;
+    }
+    setRegActionId(id);
+    try {
+      await deleteDoc(doc(db, "vehicle_registrations", id));
+      setRegistrations((prev) => prev.filter((r) => r.id !== id));
+      showToast("Registration deleted successfully.", "success");
+    } catch {
+      showToast("Failed to delete registration document.", "error");
+    } finally {
+      setRegActionId(null);
+    }
+  };
+
+  // ---- Contact Inquiry Handlers ----
+  const handleUpdateInquiryStatus = async (
+    id: string,
+    status: "unread" | "resolved"
+  ) => {
+    setInquiryActionId(id);
+    try {
+      const res = await updateInquiryStatusAction(id, status);
+      if (res.success) {
+        showToast(`Inquiry marked as ${status}.`, "success");
+      } else {
+        showToast(res.error || "Failed to update inquiry status.", "error");
+      }
+    } catch {
+      showToast("An error occurred while updating inquiry.", "error");
+    } finally {
+      setInquiryActionId(null);
+    }
+  };
+
+  const handleDeleteInquiry = async (id: string, senderName: string) => {
+    if (!confirm(`Are you sure you want to delete inquiry from ${senderName || "this customer"}?`)) {
+      return;
+    }
+    setInquiryActionId(id);
+    try {
+      await deleteDoc(doc(db, "inquiries", id));
+      setInquiries((prev) => prev.filter((i) => i.id !== id));
+      showToast("Inquiry deleted successfully.", "success");
+    } catch {
+      showToast("Failed to delete inquiry.", "error");
+    } finally {
+      setInquiryActionId(null);
+    }
+  };
+
+  const formatWhatsAppUrl = (phone?: string) => {
+    const digits = String(phone || "").replace(/[^0-9]/g, "");
+    if (!digits) return "";
+    let clean = digits;
+    if (clean.startsWith("0")) clean = `94${clean.slice(1)}`;
+    else if (!clean.startsWith("94")) clean = `94${clean}`;
+    return `https://wa.me/${clean}`;
+  };
+
+  const formatInquiryDate = (timestamp?: number) => {
+    if (!timestamp) return "—";
+    try {
+      const d = new Date(timestamp);
+      return d.toLocaleString("en-GB", {
+        timeZone: "Asia/Colombo",
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+      });
+    } catch {
+      return "—";
+    }
+  };
+
   // ---- Filtered Lists ----
   const individualBookings = bookings.filter((b) => b.bookingType === "individual_vehicle");
   const onlineBookings = bookings.filter((b) => b.bookingType !== "individual_vehicle");
@@ -1398,6 +1629,62 @@ export default function MasterAdminDashboard() {
       (d.route && d.route.toLowerCase().includes(q))
     );
   });
+
+  // ---- Vehicle Registrations Memos & Filtering ----
+  const pendingRegistrationsCount = useMemo(
+    () => registrations.filter((r) => r.status === "pending").length,
+    [registrations]
+  );
+  const approvedRegistrationsCount = useMemo(
+    () => registrations.filter((r) => r.status === "approved").length,
+    [registrations]
+  );
+  const rejectedRegistrationsCount = useMemo(
+    () => registrations.filter((r) => r.status === "rejected").length,
+    [registrations]
+  );
+
+  const filteredRegistrations = useMemo(() => {
+    return registrations.filter((r) => {
+      if (regFilter !== "all" && r.status !== regFilter) return false;
+      if (!regSearch.trim()) return true;
+      const q = regSearch.toLowerCase();
+      const plate = (r.plateNumber || r.vehicleNumber || "").toLowerCase();
+      return (
+        (r.ownerName && r.ownerName.toLowerCase().includes(q)) ||
+        (r.phone && r.phone.toLowerCase().includes(q)) ||
+        plate.includes(q) ||
+        (r.baseCity && r.baseCity.toLowerCase().includes(q)) ||
+        (r.vehicleType && r.vehicleType.toLowerCase().includes(q)) ||
+        (r.province && r.province.toLowerCase().includes(q))
+      );
+    });
+  }, [registrations, regFilter, regSearch]);
+
+  // ---- Contact Inquiries Memos & Filtering ----
+  const unreadInquiriesCount = useMemo(
+    () => inquiries.filter((i) => i.status === "unread").length,
+    [inquiries]
+  );
+  const resolvedInquiriesCount = useMemo(
+    () => inquiries.filter((i) => i.status === "resolved").length,
+    [inquiries]
+  );
+
+  const filteredInquiries = useMemo(() => {
+    return inquiries.filter((i) => {
+      if (inquiryFilter !== "all" && i.status !== inquiryFilter) return false;
+      if (!inquirySearch.trim()) return true;
+      const q = inquirySearch.toLowerCase();
+      return (
+        (i.name && i.name.toLowerCase().includes(q)) ||
+        (i.phone && i.phone.toLowerCase().includes(q)) ||
+        (i.email && i.email.toLowerCase().includes(q)) ||
+        (i.subject && i.subject.toLowerCase().includes(q)) ||
+        (i.message && i.message.toLowerCase().includes(q))
+      );
+    });
+  }, [inquiries, inquiryFilter, inquirySearch]);
 
   // ---- Status Badge Component ----
   const StatusBadge = ({ status }: { status: string }) => {
@@ -1640,6 +1927,74 @@ export default function MasterAdminDashboard() {
               )}
             </button>
 
+            {/* Vehicle Partner Registrations */}
+            <button
+              onClick={() => {
+                setActiveNav("vehicle_registrations");
+                setSidebarOpen(false);
+              }}
+              className={`w-full px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all text-left flex items-center justify-between cursor-pointer ${
+                activeNav === "vehicle_registrations"
+                  ? "bg-[#FFC20E] text-[#26231B]"
+                  : "text-white/75 hover:bg-white/10 hover:text-white"
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+                  <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+                  <path d="M9 14l2 2 4-4" />
+                </svg>
+                <span>Vehicle Registrations</span>
+              </div>
+              {!loadingRegistrations && pendingRegistrationsCount > 0 ? (
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold ${
+                  activeNav === "vehicle_registrations" ? "bg-[#26231B] text-[#FFC20E]" : "bg-amber-400 text-[#26231B] animate-pulse"
+                }`}>
+                  {pendingRegistrationsCount}
+                </span>
+              ) : (
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                  activeNav === "vehicle_registrations" ? "bg-[#26231B] text-white" : "bg-white/15 text-white/80"
+                }`}>
+                  {loadingRegistrations ? "..." : registrations.length}
+                </span>
+              )}
+            </button>
+
+            {/* Contact Inquiries */}
+            <button
+              onClick={() => {
+                setActiveNav("contact_submissions");
+                setSidebarOpen(false);
+              }}
+              className={`w-full px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all text-left flex items-center justify-between cursor-pointer ${
+                activeNav === "contact_submissions"
+                  ? "bg-[#FFC20E] text-[#26231B]"
+                  : "text-white/75 hover:bg-white/10 hover:text-white"
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+                <span>Contact Inquiries</span>
+              </div>
+              {!loadingInquiries && unreadInquiriesCount > 0 ? (
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold ${
+                  activeNav === "contact_submissions" ? "bg-[#26231B] text-[#FFC20E]" : "bg-amber-400 text-[#26231B] animate-pulse"
+                }`}>
+                  {unreadInquiriesCount}
+                </span>
+              ) : (
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                  activeNav === "contact_submissions" ? "bg-[#26231B] text-white" : "bg-white/15 text-white/80"
+                }`}>
+                  {loadingInquiries ? "..." : inquiries.length}
+                </span>
+              )}
+            </button>
+
             {/* Fleet Lorries */}
             <button
               onClick={() => {
@@ -1763,18 +2118,44 @@ export default function MasterAdminDashboard() {
                 {activeNav === "overview" && "Executive Dashboard Overview"}
                 {activeNav === "individual_bookings" && "Individual Vehicle Bookings"}
                 {activeNav === "online_bookings" && "Online / Live Lorry Bookings"}
+                {activeNav === "vehicle_registrations" && "Vehicle & Partner Registrations"}
+                {activeNav === "contact_submissions" && "Contact Inquiries & Support"}
                 {activeNav === "fleet" && "Fleet Lorries Management"}
                 {activeNav === "riders" && "Riders & Drivers Registry"}
                 {activeNav === "settings" && "System & Payment Settings"}
               </h1>
               <p className="text-[11px] text-[#6F6A5A]">
-                Head Office Dispatch Operations
+                {activeNav === "vehicle_registrations"
+                  ? "Incoming lorry partner applications from /register-vehicle"
+                  : activeNav === "contact_submissions"
+                  ? "Direct customer inquiries & rate quotes from /contact"
+                  : "Head Office Dispatch Operations"}
               </p>
             </div>
           </div>
 
           {/* Quick Header Actions */}
           <div className="flex items-center gap-2">
+            {activeNav === "vehicle_registrations" && (
+              <a
+                href="/register-vehicle"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3.5 py-2 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] text-[#26231B] text-xs font-black transition-all cursor-pointer shadow-xs flex items-center gap-1.5"
+              >
+                <span>Open Registration Form ↗</span>
+              </a>
+            )}
+            {activeNav === "contact_submissions" && (
+              <a
+                href="/contact"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3.5 py-2 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] text-[#26231B] text-xs font-black transition-all cursor-pointer shadow-xs flex items-center gap-1.5"
+              >
+                <span>Open Contact Page ↗</span>
+              </a>
+            )}
             {activeNav === "fleet" && (
               <button
                 onClick={handleOpenAddLorry}
@@ -1874,7 +2255,7 @@ export default function MasterAdminDashboard() {
           {activeNav === "overview" && (
             <div className="flex flex-col gap-6">
               {/* Metric Cards */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                 <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
                   <span className="text-[11px] font-bold text-[#6F6A5A] uppercase block">Total Bookings</span>
                   <span className="text-2xl font-black text-[#26231B] mt-1 block font-mono">
@@ -1882,9 +2263,21 @@ export default function MasterAdminDashboard() {
                   </span>
                 </div>
                 <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
-                  <span className="text-[11px] font-bold text-amber-700 uppercase block">Pending / Slip Review</span>
+                  <span className="text-[11px] font-bold text-amber-700 uppercase block">Pending Bookings</span>
                   <span className="text-2xl font-black text-amber-800 mt-1 block font-mono">
                     {loadingBookings ? "..." : totalPendingCount}
+                  </span>
+                </div>
+                <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
+                  <span className="text-[11px] font-bold text-amber-700 uppercase block">Pending Regs</span>
+                  <span className="text-2xl font-black text-amber-800 mt-1 block font-mono">
+                    {loadingRegistrations ? "..." : pendingRegistrationsCount}
+                  </span>
+                </div>
+                <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
+                  <span className="text-[11px] font-bold text-purple-700 uppercase block">Unread Inquiries</span>
+                  <span className="text-2xl font-black text-purple-800 mt-1 block font-mono">
+                    {loadingInquiries ? "..." : unreadInquiriesCount}
                   </span>
                 </div>
                 <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
@@ -1902,7 +2295,7 @@ export default function MasterAdminDashboard() {
               </div>
 
               {/* Quick Jump Modules */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 <div className="p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
                   <div>
                     <h2 className="text-base font-black text-[#26231B]">Individual Vehicle Bookings</h2>
@@ -1926,6 +2319,56 @@ export default function MasterAdminDashboard() {
                     className="mt-5 w-full py-2.5 rounded-xl bg-[#26231B] hover:bg-[#FFC20E] hover:text-[#26231B] text-white text-xs font-black transition-colors cursor-pointer"
                   >
                     Open Individual Bookings →
+                  </button>
+                </div>
+
+                {/* Vehicle Registrations Quick Jump */}
+                <div className="p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
+                  <div>
+                    <h2 className="text-base font-black text-[#26231B]">Vehicle Partner Registrations</h2>
+                    <p className="text-xs text-[#6F6A5A] mt-1">
+                      Incoming lorry owner applications from /register-vehicle. Approve to add directly to live fleet.
+                    </p>
+                    <div className="mt-4 flex flex-wrap items-center gap-3 text-xs font-bold text-[#26231B]">
+                      <span>Total: {loadingRegistrations ? "..." : registrations.length}</span>
+                      <span className="text-amber-700">
+                        Pending: {loadingRegistrations ? "..." : pendingRegistrationsCount}
+                      </span>
+                      <span className="text-emerald-700">
+                        Approved: {loadingRegistrations ? "..." : approvedRegistrationsCount}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setActiveNav("vehicle_registrations")}
+                    className="mt-5 w-full py-2.5 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] text-[#26231B] text-xs font-black transition-colors cursor-pointer shadow-xs"
+                  >
+                    Review Registrations →
+                  </button>
+                </div>
+
+                {/* Contact Inquiries Quick Jump */}
+                <div className="p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
+                  <div>
+                    <h2 className="text-base font-black text-[#26231B]">Contact Inquiries & Support</h2>
+                    <p className="text-xs text-[#6F6A5A] mt-1">
+                      Customer questions, freight rate quotes, and message submissions from /contact.
+                    </p>
+                    <div className="mt-4 flex flex-wrap items-center gap-3 text-xs font-bold text-[#26231B]">
+                      <span>Total: {loadingInquiries ? "..." : inquiries.length}</span>
+                      <span className="text-purple-700">
+                        Unread: {loadingInquiries ? "..." : unreadInquiriesCount}
+                      </span>
+                      <span className="text-emerald-700">
+                        Resolved: {loadingInquiries ? "..." : resolvedInquiriesCount}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setActiveNav("contact_submissions")}
+                    className="mt-5 w-full py-2.5 rounded-xl bg-[#26231B] hover:bg-[#FFC20E] hover:text-[#26231B] text-white text-xs font-black transition-colors cursor-pointer"
+                  >
+                    View Inquiries →
                   </button>
                 </div>
 
@@ -3534,6 +3977,561 @@ export default function MasterAdminDashboard() {
                   </div>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB 7: VEHICLE & PARTNER REGISTRATIONS                    */}
+          {/* ========================================================= */}
+          {activeNav === "vehicle_registrations" && (
+            <div className="flex flex-col gap-5">
+              {/* Top Summary Bar & Filters */}
+              <div className="p-4 sm:p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col gap-4">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-base font-black text-[#26231B] flex items-center gap-2">
+                      <span>Vehicle & Fleet Partner Registrations</span>
+                      <span className="px-2 py-0.5 rounded-full bg-[#F7F5EE] border border-[#E7E2D0] text-[11px] font-mono text-[#6F6A5A]">
+                        {registrations.length} Total
+                      </span>
+                    </h2>
+                    <p className="text-xs text-[#6F6A5A] mt-0.5">
+                      Lorry owners registering to join the Sithumina transport network via /register-vehicle.
+                    </p>
+                  </div>
+
+                  {/* Status Filter Pills */}
+                  <div className="flex flex-wrap items-center gap-1.5 p-1 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0]">
+                    <button
+                      type="button"
+                      onClick={() => setRegFilter("all")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        regFilter === "all"
+                          ? "bg-[#26231B] text-[#FFC20E] shadow-xs"
+                          : "text-[#6F6A5A] hover:text-[#26231B]"
+                      }`}
+                    >
+                      All ({registrations.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRegFilter("pending")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                        regFilter === "pending"
+                          ? "bg-amber-400 text-[#26231B] shadow-xs"
+                          : "text-[#6F6A5A] hover:text-amber-700"
+                      }`}
+                    >
+                      <span>Pending</span>
+                      {pendingRegistrationsCount > 0 && (
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono font-black bg-[#26231B] text-[#FFC20E]">
+                          {pendingRegistrationsCount}
+                        </span>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRegFilter("approved")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        regFilter === "approved"
+                          ? "bg-emerald-600 text-white shadow-xs"
+                          : "text-[#6F6A5A] hover:text-emerald-700"
+                      }`}
+                    >
+                      Approved ({approvedRegistrationsCount})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRegFilter("rejected")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        regFilter === "rejected"
+                          ? "bg-rose-600 text-white shadow-xs"
+                          : "text-[#6F6A5A] hover:text-rose-700"
+                      }`}
+                    >
+                      Rejected ({rejectedRegistrationsCount})
+                    </button>
+                  </div>
+                </div>
+
+                {/* Search Input */}
+                <div className="pt-3 border-t border-[#E7E2D0] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="relative flex-1 min-w-0">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#6F6A5A] pointer-events-none">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="11" cy="11" r="8" />
+                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                      </svg>
+                    </span>
+                    <input
+                      type="text"
+                      placeholder="Search by owner name, phone, plate number, base city, vehicle type..."
+                      value={regSearch}
+                      onChange={(e) => setRegSearch(e.target.value)}
+                      className="w-full pl-9 pr-9 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B] placeholder:text-[#8A836E] transition-colors"
+                    />
+                    {regSearch.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setRegSearch("")}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 w-6 h-6 rounded-lg bg-[#E7E2D0]/70 hover:bg-[#FFC20E] text-[#26231B] flex items-center justify-center text-xs font-black transition-colors cursor-pointer"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                  <span className="px-2.5 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-[11px] font-bold text-[#6F6A5A] flex-shrink-0">
+                    Showing <b className="text-[#26231B]">{filteredRegistrations.length}</b> of{" "}
+                    <b className="text-[#26231B]">{registrations.length}</b>
+                  </span>
+                </div>
+              </div>
+
+              {/* Registrations List / Grid */}
+              {loadingRegistrations ? (
+                <div className="p-12 rounded-3xl bg-white border border-[#E7E2D0] text-center">
+                  <div className="inline-block w-8 h-8 border-3 border-[#FFC20E] border-t-transparent rounded-full animate-spin mb-3" />
+                  <p className="text-xs font-bold text-[#6F6A5A]">Syncing vehicle registrations...</p>
+                </div>
+              ) : filteredRegistrations.length === 0 ? (
+                <div className="p-12 rounded-3xl bg-white border border-[#E7E2D0] text-center flex flex-col items-center justify-center">
+                  <div className="w-14 h-14 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0] flex items-center justify-center mb-3 text-[#6F6A5A]">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/>
+                      <path d="M15 18H9"/>
+                      <path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.62l-3.48-4.35A1 1 0 0 0 17.52 8H14"/>
+                      <circle cx="17" cy="18" r="2"/>
+                      <circle cx="7" cy="18" r="2"/>
+                    </svg>
+                  </div>
+                  <h3 className="text-sm font-black text-[#26231B]">No Vehicle Registrations Found</h3>
+                  <p className="text-xs text-[#6F6A5A] mt-1 max-w-sm">
+                    {regSearch.trim() || regFilter !== "all"
+                      ? "No registrations match your current search or filter criteria."
+                      : "No vehicle registration applications have been submitted yet via /register-vehicle."}
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {filteredRegistrations.map((reg) => {
+                    const plate = (reg.plateNumber || reg.vehicleNumber || "UNREGISTERED").toUpperCase();
+                    const isActing = regActionId === reg.id;
+                    const waUrl = formatWhatsAppUrl(reg.phone);
+
+                    return (
+                      <div
+                        key={reg.id}
+                        className="p-5 sm:p-6 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs hover:border-[#FFC20E] transition-all flex flex-col justify-between gap-4"
+                      >
+                        {/* Header: Plate, Vehicle Type, Status */}
+                        <div>
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="px-3 py-1 rounded-xl bg-[#26231B] text-[#FFC20E] font-black font-mono text-xs tracking-wider shadow-xs">
+                                {plate}
+                              </span>
+                              <span className="px-2.5 py-0.5 rounded-lg bg-[#F7F5EE] border border-[#E7E2D0] text-xs font-bold text-[#26231B]">
+                                {reg.vehicleType || "Lorry"}
+                              </span>
+                              {reg.capacity && (
+                                <span className="px-2 py-0.5 rounded-lg bg-amber-50 border border-amber-200 text-[11px] font-bold text-amber-800">
+                                  {reg.capacity}
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Status Badge */}
+                            <div>
+                              {reg.status === "pending" && (
+                                <span className="px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-300 text-[11px] font-black flex items-center gap-1.5 animate-pulse">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-amber-600" />
+                                  Pending Review
+                                </span>
+                              )}
+                              {reg.status === "approved" && (
+                                <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 text-[11px] font-black flex items-center gap-1.5">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
+                                  Approved & Active
+                                </span>
+                              )}
+                              {reg.status === "rejected" && (
+                                <span className="px-2.5 py-1 rounded-full bg-rose-100 text-rose-800 border border-rose-300 text-[11px] font-black flex items-center gap-1.5">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-rose-600" />
+                                  Rejected
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Owner Information */}
+                          <div className="mt-3.5">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A]">Lorry Owner / Partner</span>
+                            <h3 className="text-base font-black text-[#26231B]">{reg.ownerName}</h3>
+                          </div>
+
+                          {/* Details Grid */}
+                          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2.5 p-3 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0]">
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Contact Number</span>
+                              <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                                <span className="text-xs font-mono font-bold text-[#26231B]">{reg.phone}</span>
+                                <a
+                                  href={`tel:${reg.phone}`}
+                                  className="px-2 py-0.5 rounded-lg bg-white border border-[#E7E2D0] hover:bg-[#FFC20E] text-[10px] font-bold text-[#26231B] transition-colors"
+                                  title="Call Phone"
+                                >
+                                  📞 Call
+                                </a>
+                                {waUrl && (
+                                  <a
+                                    href={waUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="px-2 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-[10px] font-bold text-white transition-colors"
+                                    title="WhatsApp Chat"
+                                  >
+                                    💬 WhatsApp
+                                  </a>
+                                )}
+                              </div>
+                            </div>
+
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Location / Base</span>
+                              <span className="text-xs font-bold text-[#26231B] mt-0.5 block">
+                                {reg.baseCity ? `${reg.baseCity}, ` : ""}{reg.province || "Western Province"}
+                              </span>
+                            </div>
+
+                            <div className="sm:col-span-2 flex items-center justify-between text-[11px] text-[#6F6A5A] pt-1 border-t border-[#E7E2D0]/60">
+                              <span>Submitted: {formatInquiryDate(reg.createdAt)}</span>
+                              <span className="font-mono text-[10px]">ID: {reg.id}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Action Buttons */}
+                        <div className="pt-3 border-t border-[#E7E2D0] flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {reg.status === "pending" && (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={isActing}
+                                  onClick={() => handleApproveRegistration(reg)}
+                                  className="px-3.5 py-2 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] text-[#26231B] text-xs font-black transition-colors cursor-pointer shadow-xs disabled:opacity-50 flex items-center gap-1.5"
+                                >
+                                  {isActing ? (
+                                    <span>Approving...</span>
+                                  ) : (
+                                    <>
+                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                        <polyline points="20 6 9 17 4 12" />
+                                      </svg>
+                                      <span>Approve & Add to Live Fleet</span>
+                                    </>
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isActing}
+                                  onClick={() => handleUpdateRegistrationStatus(reg.id, "rejected")}
+                                  className="px-3 py-2 rounded-xl border border-rose-300 text-rose-700 hover:bg-rose-50 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                                >
+                                  Reject
+                                </button>
+                              </>
+                            )}
+
+                            {reg.status === "approved" && (
+                              <button
+                                type="button"
+                                disabled={isActing}
+                                onClick={() => handleUpdateRegistrationStatus(reg.id, "pending")}
+                                className="px-3 py-1.5 rounded-xl border border-[#E7E2D0] hover:bg-[#F7F5EE] text-[#26231B] text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                              >
+                                Reset to Pending
+                              </button>
+                            )}
+
+                            {reg.status === "rejected" && (
+                              <button
+                                type="button"
+                                disabled={isActing}
+                                onClick={() => handleUpdateRegistrationStatus(reg.id, "pending")}
+                                className="px-3 py-1.5 rounded-xl border border-amber-300 text-amber-800 hover:bg-amber-50 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                              >
+                                Re-open as Pending
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Delete button */}
+                          <button
+                            type="button"
+                            disabled={isActing}
+                            onClick={() => handleDeleteRegistration(reg.id, plate)}
+                            className="p-2 rounded-xl text-rose-600 hover:bg-rose-50 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                            title="Delete Application"
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="3 6 5 6 21 6" />
+                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB 8: CONTACT INQUIRIES & SUPPORT                        */}
+          {/* ========================================================= */}
+          {activeNav === "contact_submissions" && (
+            <div className="flex flex-col gap-5">
+              {/* Top Summary Bar & Filters */}
+              <div className="p-4 sm:p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col gap-4">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-base font-black text-[#26231B] flex items-center gap-2">
+                      <span>Contact Inquiries & Freight Quotes</span>
+                      <span className="px-2 py-0.5 rounded-full bg-[#F7F5EE] border border-[#E7E2D0] text-[11px] font-mono text-[#6F6A5A]">
+                        {inquiries.length} Total
+                      </span>
+                    </h2>
+                    <p className="text-xs text-[#6F6A5A] mt-0.5">
+                      Direct customer inquiries, cargo details and rate quote requests submitted via /contact.
+                    </p>
+                  </div>
+
+                  {/* Status Filter Pills */}
+                  <div className="flex flex-wrap items-center gap-1.5 p-1 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0]">
+                    <button
+                      type="button"
+                      onClick={() => setInquiryFilter("all")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        inquiryFilter === "all"
+                          ? "bg-[#26231B] text-[#FFC20E] shadow-xs"
+                          : "text-[#6F6A5A] hover:text-[#26231B]"
+                      }`}
+                    >
+                      All ({inquiries.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setInquiryFilter("unread")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                        inquiryFilter === "unread"
+                          ? "bg-amber-400 text-[#26231B] shadow-xs"
+                          : "text-[#6F6A5A] hover:text-amber-700"
+                      }`}
+                    >
+                      <span>Unread</span>
+                      {unreadInquiriesCount > 0 && (
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono font-black bg-[#26231B] text-[#FFC20E]">
+                          {unreadInquiriesCount}
+                        </span>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setInquiryFilter("resolved")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        inquiryFilter === "resolved"
+                          ? "bg-emerald-600 text-white shadow-xs"
+                          : "text-[#6F6A5A] hover:text-emerald-700"
+                      }`}
+                    >
+                      Resolved ({resolvedInquiriesCount})
+                    </button>
+                  </div>
+                </div>
+
+                {/* Search Input */}
+                <div className="pt-3 border-t border-[#E7E2D0] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="relative flex-1 min-w-0">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#6F6A5A] pointer-events-none">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="11" cy="11" r="8" />
+                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                      </svg>
+                    </span>
+                    <input
+                      type="text"
+                      placeholder="Search by customer name, phone, email, subject, message content..."
+                      value={inquirySearch}
+                      onChange={(e) => setInquirySearch(e.target.value)}
+                      className="w-full pl-9 pr-9 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B] placeholder:text-[#8A836E] transition-colors"
+                    />
+                    {inquirySearch.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setInquirySearch("")}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 w-6 h-6 rounded-lg bg-[#E7E2D0]/70 hover:bg-[#FFC20E] text-[#26231B] flex items-center justify-center text-xs font-black transition-colors cursor-pointer"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                  <span className="px-2.5 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-[11px] font-bold text-[#6F6A5A] flex-shrink-0">
+                    Showing <b className="text-[#26231B]">{filteredInquiries.length}</b> of{" "}
+                    <b className="text-[#26231B]">{inquiries.length}</b>
+                  </span>
+                </div>
+              </div>
+
+              {/* Inquiries List */}
+              {loadingInquiries ? (
+                <div className="p-12 rounded-3xl bg-white border border-[#E7E2D0] text-center">
+                  <div className="inline-block w-8 h-8 border-3 border-[#FFC20E] border-t-transparent rounded-full animate-spin mb-3" />
+                  <p className="text-xs font-bold text-[#6F6A5A]">Loading contact inquiries...</p>
+                </div>
+              ) : filteredInquiries.length === 0 ? (
+                <div className="p-12 rounded-3xl bg-white border border-[#E7E2D0] text-center flex flex-col items-center justify-center">
+                  <div className="w-14 h-14 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0] flex items-center justify-center mb-3 text-[#6F6A5A]">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                    </svg>
+                  </div>
+                  <h3 className="text-sm font-black text-[#26231B]">No Inquiries Found</h3>
+                  <p className="text-xs text-[#6F6A5A] mt-1 max-w-sm">
+                    {inquirySearch.trim() || inquiryFilter !== "all"
+                      ? "No contact submissions match your search or filter."
+                      : "No customer inquiries have been submitted yet via /contact."}
+                  </p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-4">
+                  {filteredInquiries.map((inq) => {
+                    const isActing = inquiryActionId === inq.id;
+                    const waUrl = formatWhatsAppUrl(inq.phone);
+
+                    return (
+                      <div
+                        key={inq.id}
+                        className={`p-5 sm:p-6 rounded-3xl bg-white border transition-all flex flex-col gap-4 shadow-xs ${
+                          inq.status === "unread"
+                            ? "border-amber-300 ring-1 ring-amber-200"
+                            : "border-[#E7E2D0] hover:border-[#FFC20E]"
+                        }`}
+                      >
+                        {/* Header Row */}
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-base font-black text-[#26231B]">{inq.name}</h3>
+                            <span className="px-2.5 py-0.5 rounded-lg bg-[#F7F5EE] border border-[#E7E2D0] text-xs font-bold text-[#26231B]">
+                              {inq.subject || "General Inquiry"}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <span className="text-[11px] font-medium text-[#6F6A5A]">
+                              {formatInquiryDate(inq.createdAt)}
+                            </span>
+                            {inq.status === "unread" ? (
+                              <span className="px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-300 text-[11px] font-black flex items-center gap-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-600 animate-ping" />
+                                Unread
+                              </span>
+                            ) : (
+                              <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 text-[11px] font-black flex items-center gap-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
+                                Resolved
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Contact Methods Bar */}
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span className="text-[#6F6A5A] font-bold">Contact:</span>
+                          <span className="font-mono font-bold text-[#26231B]">{inq.phone}</span>
+                          <a
+                            href={`tel:${inq.phone}`}
+                            className="px-2.5 py-1 rounded-lg bg-[#F7F5EE] border border-[#E7E2D0] hover:bg-[#FFC20E] text-[11px] font-bold text-[#26231B] transition-colors"
+                          >
+                            📞 Call
+                          </a>
+                          {waUrl && (
+                            <a
+                              href={waUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-[11px] font-bold text-white transition-colors"
+                            >
+                              💬 WhatsApp
+                            </a>
+                          )}
+                          {inq.email && (
+                            <a
+                              href={`mailto:${inq.email}`}
+                              className="px-2.5 py-1 rounded-lg bg-[#F7F5EE] border border-[#E7E2D0] hover:bg-sky-100 hover:text-sky-800 text-[11px] font-bold text-[#26231B] transition-colors"
+                            >
+                              ✉️ {inq.email}
+                            </a>
+                          )}
+                        </div>
+
+                        {/* Message Body */}
+                        <div className="p-4 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0] text-xs text-[#26231B] leading-relaxed whitespace-pre-wrap font-sans">
+                          {inq.message}
+                        </div>
+
+                        {/* Bottom Action Footer */}
+                        <div className="pt-2 border-t border-[#E7E2D0] flex items-center justify-between">
+                          <div>
+                            {inq.status === "unread" ? (
+                              <button
+                                type="button"
+                                disabled={isActing}
+                                onClick={() => handleUpdateInquiryStatus(inq.id, "resolved")}
+                                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5 shadow-xs"
+                              >
+                                {isActing ? (
+                                  <span>Updating...</span>
+                                ) : (
+                                  <>
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                      <polyline points="20 6 9 17 4 12" />
+                                    </svg>
+                                    <span>Mark as Resolved</span>
+                                  </>
+                                )}
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={isActing}
+                                onClick={() => handleUpdateInquiryStatus(inq.id, "unread")}
+                                className="px-3.5 py-1.5 rounded-xl border border-[#E7E2D0] hover:bg-[#F7F5EE] text-[#26231B] text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                              >
+                                Mark as Unread
+                              </button>
+                            )}
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled={isActing}
+                            onClick={() => handleDeleteInquiry(inq.id, inq.name)}
+                            className="p-2 rounded-xl text-rose-600 hover:bg-rose-50 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                            title="Delete Inquiry"
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="3 6 5 6 21 6" />
+                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </main>

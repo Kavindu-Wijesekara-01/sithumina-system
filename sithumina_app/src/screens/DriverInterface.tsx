@@ -511,14 +511,28 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
   };
 
   const customerMapPins = pendingDispatches
-    .filter((d) => typeof d.pickupLat === "number" && typeof d.pickupLng === "number")
-    .map((d) => ({
-      lat: d.pickupLat!,
-      lng: d.pickupLng!,
-      title: d.customerName || "Customer Pickup",
-      subtitle: `${d.pickupCity} → ${d.deliveryCity}`,
-      bookingId: d.bookingId,
-    }));
+    .map((d) => {
+      let lat = typeof d.pickupLat === "number" && Number.isFinite(d.pickupLat) ? d.pickupLat : null;
+      let lng = typeof d.pickupLng === "number" && Number.isFinite(d.pickupLng) ? d.pickupLng : null;
+      if (lat === null || lng === null) {
+        const resolved = resolveCityCoordinates(d.pickupCity);
+        if (resolved) {
+          lat = resolved[0];
+          lng = resolved[1];
+        }
+      }
+      if (lat === null || lng === null) return null;
+      return {
+        lat,
+        lng,
+        title: d.customerName || "Customer Pickup",
+        subtitle: `${d.pickupCity} → ${d.deliveryCity}`,
+        bookingId: d.bookingId,
+        phone: d.customerPhone,
+        packageDetails: d.cargo || d.vehicleType,
+      };
+    })
+    .filter(Boolean) as any[];
 
   const chosenPlate =
     activeTrip?.plate ||

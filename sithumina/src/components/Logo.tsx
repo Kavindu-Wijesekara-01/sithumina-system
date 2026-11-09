@@ -27,7 +27,7 @@ export const Logo: React.FC<LogoProps> = ({ variant = "desktop", className = "" 
           priority
         />
         <span className="tracking-tight font-black text-[#C51616] text-[16px]">
-          සිතුමිණ ට්‍රාන්ස්පෝට්
+          SITHUMINA TRANSPORTS
         </span>
       </Link>
     );
@@ -49,7 +49,7 @@ export const Logo: React.FC<LogoProps> = ({ variant = "desktop", className = "" 
           priority
         />
         <span className="tracking-tight font-black text-[#C51616] text-[17px]">
-          සිතුමිණ ට්‍රාන්ස්පෝට්
+          SITHUMINA TRANSPORTS
         </span>
       </Link>
     );
@@ -70,7 +70,7 @@ export const Logo: React.FC<LogoProps> = ({ variant = "desktop", className = "" 
           className="h-[38px] sm:h-[42px] w-auto object-contain flex-none drop-shadow-xs transition-transform group-hover:scale-105"
         />
         <span className="tracking-tight font-black text-[#C51616] text-[20px] sm:text-[22px] leading-tight drop-shadow-xs">
-          සිතුමිණ ට්‍රාන්ස්පෝට්
+          SITHUMINA TRANSPORTS
         </span>
       </Link>
     );

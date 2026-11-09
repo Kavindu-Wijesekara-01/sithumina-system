@@ -77,9 +77,8 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
     <>
       {/* Backdrop */}
       <div
-        className={`fixed inset-0 bg-black/60 z-[9998] transition-opacity duration-200 lg:hidden ${
-          isOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
-        }`}
+        className={`fixed inset-0 bg-black/60 z-[9998] transition-opacity duration-200 lg:hidden ${isOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+          }`}
         onClick={onClose}
         aria-hidden="true"
       />
@@ -90,9 +89,8 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
         role="dialog"
         aria-modal="true"
         aria-label="Navigation Drawer"
-        className={`fixed inset-y-0 right-0 w-full max-w-[340px] bg-[var(--card)] z-[9999] flex flex-col transition-transform duration-250 ease-out lg:hidden shadow-2xl overflow-hidden ${
-          isOpen ? "translate-x-0" : "translate-x-full"
-        }`}
+        className={`fixed inset-y-0 right-0 w-full max-w-[340px] bg-[var(--card)] z-[9999] flex flex-col transition-transform duration-250 ease-out lg:hidden shadow-2xl overflow-hidden ${isOpen ? "translate-x-0" : "translate-x-full"
+          }`}
       >
         {/* Drawer Header (Yellow Background, Red Text, Black X button) */}
         <header className="flex items-center justify-between px-4 py-3.5 bg-[var(--y)] text-[#26231B] border-b border-black/10 select-none flex-none shadow-xs">
@@ -106,7 +104,7 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
               priority
             />
             <span className="font-black text-[17px] text-[#C51616] tracking-tight leading-none">
-              සිතුමිණ ට්‍රාන්ස්පෝට්
+              SITHUMINA TRANSPORTS
             </span>
           </div>
           <button
@@ -143,11 +141,10 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
                 key={item.key}
                 href={item.href}
                 onClick={onClose}
-                className={`flex items-center gap-3 px-3 py-2.5 rounded-[10px] text-[14px] font-semibold transition-colors no-underline ${
-                  isActive
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-[10px] text-[14px] font-semibold transition-colors no-underline ${isActive
                     ? "bg-[var(--y)] text-[#26231B] font-bold shadow-xs"
                     : "text-[var(--ink)] hover:bg-[var(--y3)]"
-                }`}
+                  }`}
                 aria-current={isActive ? "page" : undefined}
               >
                 <svg
@@ -185,12 +182,12 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
                   </svg>
                   <span>
                     {profile.name &&
-                    profile.name !== "Valued Customer" &&
-                    profile.name !== "Customer"
+                      profile.name !== "Valued Customer" &&
+                      profile.name !== "Customer"
                       ? profile.name
                       : locale === "en"
-                      ? "My Account"
-                      : "මගේ ගිණුම"}
+                        ? "My Account"
+                        : "මගේ ගිණුම"}
                   </span>
                 </>
               ) : (

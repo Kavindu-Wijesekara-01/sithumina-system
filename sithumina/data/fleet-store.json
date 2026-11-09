@@ -16,7 +16,7 @@
     {
       "id": "lorry-wplb4521",
       "plate": "WP LB-4521",
-      "route": "Deniyaya → Anuradhapura",
+      "route": "Deniyaya → Maharagama",
       "driverName": "D. M. Perera",
       "driverPhone": "077 123 4567",
       "driverId": "R-1001",
@@ -27,40 +27,40 @@
       "images": [],
       "description": "",
       "startLocation": "Deniyaya",
-      "endLocation": "Anuradhapura",
-      "travelRoute": "via Avissawella → Kandy",
+      "endLocation": "Maharagama",
+      "travelRoute": "via Ratnapura → Avissawella",
       "viaWaypoints": [
+        {
+          "name": "Ratnapura",
+          "lat": 6.6828,
+          "lng": 80.4037
+        },
         {
           "name": "Avissawella",
           "lat": 6.9535,
           "lng": 80.2104
-        },
-        {
-          "name": "Kandy",
-          "lat": 7.2906,
-          "lng": 80.6337
         }
       ],
       "startLat": 6.3409,
       "startLng": 80.5595,
-      "endLat": 8.3114,
-      "endLng": 80.4037,
+      "endLat": 6.848,
+      "endLng": 79.9265,
       "finalDestination": "",
       "emptyTime": "",
       "returnRoute": "",
       "availableSpace": "Full (100%)",
       "availableCapacityKg": "3,000 Kg",
-      "hasFreezer": true,
+      "hasFreezer": false,
       "hasHelper": true,
       "isOnline": true,
       "isLive": true,
-      "lat": 6.3409863,
-      "lng": 80.5695066,
-      "heading": 281,
-      "speedKmH": 1,
+      "lat": 6.3409884,
+      "lng": 80.5694912,
+      "heading": 90,
+      "speedKmH": 3,
       "status": "empty",
       "lastUpdated": "Just now",
-      "updatedAt": 1794222739797
+      "updatedAt": 1794225286612
     }
   ],
   "customers": [
