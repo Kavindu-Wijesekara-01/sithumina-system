@@ -102,6 +102,7 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({ isOpen, onClose }) =
               height={28}
               className="h-[30px] w-auto object-contain flex-none drop-shadow-xs"
               priority
+              unoptimized
             />
             <span className="font-black text-[17px] text-[#C51616] tracking-tight leading-none">
               SITHUMINA TRANSPORTS

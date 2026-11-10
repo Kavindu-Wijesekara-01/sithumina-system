@@ -2473,7 +2473,7 @@ export default function MasterAdminDashboard() {
               <img
                 src="/logo.png"
                 alt="Sithumina Transport Logo"
-                className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0"
+                className="w-10 h-10 rounded-xl bg-[#FFC20E] p-1 object-contain shadow-sm shrink-0"
               />
               <div>
                 <span className="font-black text-sm tracking-tight block">Sithumina Admin</span>

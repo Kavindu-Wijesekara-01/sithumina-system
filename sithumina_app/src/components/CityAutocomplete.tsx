@@ -28,7 +28,7 @@ export default function CityAutocomplete({
   value,
   onChangeText,
   onSelectCity,
-  placeholder = 'Enter city name / නගරය ඇතුළත් කරන්න',
+  placeholder = '',
   inputStyle,
   containerStyle,
   maxSuggestions = 8,

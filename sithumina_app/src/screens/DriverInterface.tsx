@@ -1420,8 +1420,6 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                 <Text style={styles.inputLabel}>Vehicle Number (වාහන අංකය) *</Text>
                 <TextInput
                   style={[styles.formInput, { borderColor: "#FFC20E", borderWidth: 1.5, fontWeight: "800" }]}
-                  placeholder="e.g. WP LB-4521 / SP LK-8902"
-                  placeholderTextColor="#8C877A"
                   value={enteredVehiclePlate}
                   onChangeText={setEnteredVehiclePlate}
                   autoCapitalize="characters"
@@ -1460,7 +1458,6 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     value={startLoc}
                     onChangeText={setStartLoc}
                     onSelectCity={(city: CityEntry) => setStartLoc(city.name)}
-                    placeholder="e.g. Deniyaya / කොළඹ / Galle"
                     inlineMode={true}
                   />
 
@@ -1469,15 +1466,12 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     value={endLoc}
                     onChangeText={setEndLoc}
                     onSelectCity={(city: CityEntry) => setEndLoc(city.name)}
-                    placeholder="e.g. Colombo / Kandy / යාපනය"
                     inlineMode={true}
                   />
 
                   <Text style={styles.inputLabel}>Emptying time (බඩු බා හිස්වන වෙලාව)</Text>
                   <TextInput
                     style={styles.formInput}
-                    placeholder="e.g. Today 4:30 PM / අද සවස 4ට"
-                    placeholderTextColor="#8C877A"
                     value={emptyTime}
                     onChangeText={setEmptyTime}
                   />
@@ -1585,13 +1579,6 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                         <CityAutocomplete
                           value={viaInput}
                           onChangeText={setViaInput}
-                          placeholder={
-                            viaWaypoints.length === 0
-                              ? "උදා: Galle / ගාල්ල (Type කර Touch කරන්න)..."
-                              : viaWaypoints.length === 1
-                              ? "උදා: Ratnapura / රත්නපුර (Type කර Touch කරන්න)..."
-                              : "උදා: Kaduwela / කඩුවෙල (Type කර Touch කරන්න)..."
-                          }
                           inlineMode={true}
                           onSelectCity={(city: CityEntry) => handleAddViaTown(city, "loaded")}
                         />
@@ -1608,8 +1595,6 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                   <Text style={styles.inputLabel}>Ending point (ගමන අවසන් කරන තැන)</Text>
                   <TextInput
                     style={styles.formInput}
-                    placeholder="e.g. Peliyagoda Transport Hub"
-                    placeholderTextColor="#8C877A"
                     value={finalDest}
                     onChangeText={setFinalDest}
                   />
@@ -1623,7 +1608,6 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                       value={currentLocName}
                       onChangeText={setCurrentLocName}
                       onSelectCity={(city: CityEntry) => setCurrentLocName(city.name)}
-                      placeholder="e.g. Deniyaya / Galle Fort / කොළඹ"
                       inlineMode={true}
                     />
                     {currentCity && currentCity !== "Detecting location..." && (
@@ -1641,7 +1625,6 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     value={emptyEndDest}
                     onChangeText={setEmptyEndDest}
                     onSelectCity={(city: CityEntry) => setEmptyEndDest(city.name)}
-                    placeholder="e.g. Colombo / Kandy / මීගමුව"
                     inlineMode={true}
                   />
 
@@ -1749,13 +1732,6 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                         <CityAutocomplete
                           value={viaInput}
                           onChangeText={setViaInput}
-                          placeholder={
-                            viaWaypoints.length === 0
-                              ? "උදා: Galle / ගාල්ල (Type කර Touch කරන්න)..."
-                              : viaWaypoints.length === 1
-                              ? "උදා: Ratnapura / රත්නපුර (Type කර Touch කරන්න)..."
-                              : "උදා: Kaduwela / කඩුවෙල (Type කර Touch කරන්න)..."
-                          }
                           inlineMode={true}
                           onSelectCity={(city: CityEntry) => handleAddViaTown(city, "empty")}
                         />
@@ -1819,8 +1795,6 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                   <Text style={styles.inputLabel}>Available weight capacity (පැටවිය හැකි බර)</Text>
                   <TextInput
                     style={styles.formInput}
-                    placeholder="e.g. 3,500 Kg or 3.5 Tons"
-                    placeholderTextColor="#8C877A"
                     value={availKg}
                     onChangeText={setAvailKg}
                   />

@@ -244,7 +244,6 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
                   required
                   value={customerName}
                   onChange={(e) => setCustomerName(e.target.value)}
-                  placeholder={locale === "en" ? "e.g. Kamal Perera" : "උදා: කමල් පෙරේරා"}
                   className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] font-bold focus:outline-none focus:border-[#FFC20E]"
                 />
               </div>
@@ -258,7 +257,6 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
                   required
                   value={phone}
                   onChange={(e) => setPhone(e.target.value)}
-                  placeholder="077 123 4567"
                   className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] font-mono font-bold focus:outline-none focus:border-[#FFC20E]"
                 />
               </div>
@@ -275,7 +273,6 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
                 required
                 value={whatsapp}
                 onChange={(e) => setWhatsapp(e.target.value)}
-                placeholder="077 123 4567"
                 className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] font-mono font-bold focus:outline-none focus:border-[#FFC20E]"
               />
             </div>
@@ -291,7 +288,6 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
                   required
                   value={pickupCity}
                   onChange={(e) => setPickupCity(e.target.value)}
-                  placeholder={locale === "en" ? "Town/City (e.g. Deniyaya)" : "නගරය (උදා: දෙනියාය)"}
                   className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] font-bold focus:outline-none focus:border-[#FFC20E]"
                 />
               </div>
@@ -305,7 +301,6 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
                   required
                   value={deliveryCity}
                   onChange={(e) => setDeliveryCity(e.target.value)}
-                  placeholder={locale === "en" ? "Town/City (e.g. Hatton)" : "නගරය (උදා: හැටන්)"}
                   className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] font-bold focus:outline-none focus:border-[#FFC20E]"
                 />
               </div>
@@ -340,7 +335,6 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
                   required
                   value={cargoDetails}
                   onChange={(e) => setCargoDetails(e.target.value)}
-                  placeholder={locale === "en" ? "e.g. 15 carton boxes, 2 wooden tables" : "උදා: පෙට්ටි 15ක් සහ මේස 2ක්"}
                   className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] focus:outline-none focus:border-[#FFC20E]"
                 />
               </div>
@@ -353,7 +347,6 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
                   type="text"
                   value={weightKg}
                   onChange={(e) => setWeightKg(e.target.value)}
-                  placeholder="e.g. 500 Kg"
                   className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] font-mono focus:outline-none focus:border-[#FFC20E]"
                 />
               </div>

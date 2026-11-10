@@ -220,7 +220,6 @@ export default function ReviewsPage() {
                     onChange={(e) =>
                       setNewReview({ ...newReview, name: e.target.value })
                     }
-                    placeholder="e.g. Kasun Fernando"
                     className="p-2.5 text-xs rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] outline-none focus:border-[#FFC20E]"
                   />
                 </div>
@@ -235,7 +234,6 @@ export default function ReviewsPage() {
                     onChange={(e) =>
                       setNewReview({ ...newReview, role: e.target.value })
                     }
-                    placeholder="e.g. Store Owner"
                     className="p-2.5 text-xs rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] outline-none focus:border-[#FFC20E]"
                   />
                 </div>
@@ -251,7 +249,6 @@ export default function ReviewsPage() {
                   onChange={(e) =>
                     setNewReview({ ...newReview, route: e.target.value })
                   }
-                  placeholder="e.g. Colombo – Galle"
                   className="p-2.5 text-xs rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] outline-none focus:border-[#FFC20E]"
                 />
               </div>
@@ -267,7 +264,6 @@ export default function ReviewsPage() {
                   onChange={(e) =>
                     setNewReview({ ...newReview, commentEn: e.target.value })
                   }
-                  placeholder="Share details of your experience..."
                   className="p-2.5 text-xs rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] outline-none focus:border-[#FFC20E]"
                 />
               </div>
@@ -282,7 +278,6 @@ export default function ReviewsPage() {
                   onChange={(e) =>
                     setNewReview({ ...newReview, commentSi: e.target.value })
                   }
-                  placeholder="ඔබගේ අත්දැකීම සිංහලෙන් ලියන්න..."
                   className="p-2.5 text-xs rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] outline-none focus:border-[#FFC20E]"
                 />
               </div>

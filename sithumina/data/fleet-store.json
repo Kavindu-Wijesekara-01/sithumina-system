@@ -16,7 +16,7 @@
     {
       "id": "lorry-wplb4521",
       "plate": "WP LB-4521",
-      "route": "Deniyaya → Katunayake",
+      "route": "Deniyaya → Galle",
       "driverName": "D. M. Perera",
       "driverPhone": "077 123 4567",
       "driverId": "R-1001",
@@ -27,24 +27,24 @@
       "images": [],
       "description": "",
       "startLocation": "Deniyaya",
-      "endLocation": "Katunayake",
-      "travelRoute": "via Avissawella → Kaduwela",
+      "endLocation": "Galle",
+      "travelRoute": "via Akuressa → Imaduwa",
       "viaWaypoints": [
         {
-          "name": "Avissawella",
-          "lat": 6.9535,
-          "lng": 80.2104
+          "name": "Akuressa",
+          "lat": 6.0989,
+          "lng": 80.4736
         },
         {
-          "name": "Kaduwela",
-          "lat": 6.9344,
-          "lng": 79.9839
+          "name": "Imaduwa",
+          "lat": 6.15,
+          "lng": 80.3667
         }
       ],
       "startLat": 6.3409,
       "startLng": 80.5595,
-      "endLat": 7.1695,
-      "endLng": 79.8884,
+      "endLat": 6.0535,
+      "endLng": 80.221,
       "finalDestination": "",
       "emptyTime": "",
       "returnRoute": "",
@@ -54,13 +54,13 @@
       "hasHelper": true,
       "isOnline": true,
       "isLive": true,
-      "lat": 6.3409779,
-      "lng": 80.5695032,
+      "lat": 6.3409762,
+      "lng": 80.5694972,
       "heading": 0,
       "speedKmH": 0,
       "status": "empty",
       "lastUpdated": "Just now",
-      "updatedAt": 1794283062295
+      "updatedAt": 1794310516593
     }
   ],
   "customers": [
@@ -138,12 +138,12 @@
     },
     {
       "id": "CUST-0776091697",
-      "name": "kavindu",
+      "name": "Kavindu Wijesekara",
       "phone": "0776091697",
       "email": "",
       "city": "",
       "createdAt": 1794155880065,
-      "lastLoginAt": 1794286951429
+      "lastLoginAt": 1794310574251
     }
   ],
   "bookings": [],

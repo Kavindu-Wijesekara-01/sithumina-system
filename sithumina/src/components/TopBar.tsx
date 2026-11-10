@@ -24,8 +24,8 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileMenu }) => {
 
   return (
     <header className="sticky top-0 z-40 w-full bg-[var(--y)] text-[#26231B] shadow-sm select-none">
-      {/* DESKTOP TOP BAR (≥1024px, ~84px high, 3 columns) */}
-      <div className="hidden lg:grid grid-cols-[240px_1fr_auto] items-center h-[84px] px-6 gap-4 max-w-[1920px] mx-auto">
+      {/* DESKTOP TOP BAR (≥1024px, ~72px high, 3 columns) */}
+      <div className="hidden lg:grid grid-cols-[240px_1fr_auto] items-center h-[72px] px-6 gap-4 max-w-[1920px] mx-auto">
         {/* Left Column: Logo mark from public/logo.png */}
         <div className="flex items-center">
           <Logo variant="desktop" />
@@ -33,20 +33,21 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileMenu }) => {
 
         {/* Centre Column: Logo from public/logo.png + Sithumina Transport bold Sinhala text in red + Phone links */}
         <div className="flex flex-col items-center justify-center text-center">
-          <div className="flex items-center justify-center gap-3.5">
+          <div className="flex items-center justify-center gap-3">
             <Image
               src="/logo.png"
               alt="Sithumina Transport Logo"
               width={68}
               height={52}
-              className="h-[50px] sm:h-[54px] w-auto object-contain flex-none drop-shadow-xs"
+              className="h-[40px] sm:h-[44px] w-auto object-contain flex-none drop-shadow-xs"
               priority
+              unoptimized
             />
             <div className="flex flex-col items-stretch w-fit">
               <h1
-                className="text-[32px] sm:text-[36px] font-black tracking-tight text-[#C51616] leading-none m-0 select-none text-center whitespace-nowrap"
+                className="text-[24px] sm:text-[26px] font-black tracking-tight text-[#C51616] leading-none m-0 select-none text-center whitespace-nowrap"
                 style={{
-                  WebkitTextStroke: "1.2px #ffffff",
+                  WebkitTextStroke: "1px #ffffff",
                   paintOrder: "stroke fill",
                   textShadow: "0 0 2px #ffffff, 0 1px 2px rgba(255,255,255,0.8)",
                 }}
@@ -55,18 +56,19 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileMenu }) => {
               </h1>
               <PhoneLinks
                 size="sm"
-                className="mt-1.5 w-full flex items-center justify-between"
+                className="mt-1 w-full flex items-center justify-between gap-3"
+                itemClassName="!text-[11px] sm:!text-[11.5px]"
               />
             </div>
 
             {/* 24 Hours / 365 Days Authentic Service Badge */}
-            <div className="flex items-center justify-center flex-none pl-1.5 select-none">
+            <div className="flex items-center justify-center flex-none pl-1 select-none">
               <Image
                 src="/service-badge.png"
                 alt="දින 365 පැය 24 පුරා"
                 width={80}
                 height={197}
-                className="h-[62px] sm:h-[68px] w-auto object-contain drop-shadow-xs select-none"
+                className="h-[46px] sm:h-[50px] w-auto object-contain drop-shadow-xs select-none"
                 priority
               />
             </div>
@@ -74,10 +76,10 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileMenu }) => {
         </div>
 
         {/* Right Column: Login/Profile button + Language Switch */}
-        <div className="flex items-center justify-end gap-2.5">
+        <div className="flex items-center justify-end gap-2">
           <Link
             href="/login"
-            className="border-0 bg-[#26231B] text-[var(--y)] text-[13px] font-extrabold py-[9px] px-[18px] rounded-[10px] cursor-pointer hover:bg-[#1a1813] transition-all no-underline shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-[#26231B] flex items-center gap-1.5"
+            className="border-0 bg-[#26231B] text-[var(--y)] text-[12px] font-extrabold py-[7px] px-[14px] rounded-[9px] cursor-pointer hover:bg-[#1a1813] transition-all no-underline shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-[#26231B] flex items-center gap-1.5"
           >
             <span className="flex items-center gap-1.5" suppressHydrationWarning>
               {mounted && profile ? (
@@ -105,8 +107,8 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileMenu }) => {
         </div>
       </div>
 
-      {/* MOBILE TOP BAR (<1024px, compact height ~54px) */}
-      <div className="lg:hidden flex items-center justify-between h-[54px] sm:h-[58px] px-2 sm:px-3 max-w-full">
+      {/* MOBILE TOP BAR (<1024px, compact height ~50px) */}
+      <div className="lg:hidden flex items-center justify-between h-[50px] sm:h-[54px] px-2 sm:px-3 max-w-full">
         {/* Left Aligned: Logo & Sinhala Text Horizontally */}
         <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
           {/* Logo */}
@@ -120,8 +122,9 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileMenu }) => {
               alt="Sithumina Transport Logo"
               width={48}
               height={38}
-              className="h-[36px] sm:h-[40px] w-auto object-contain drop-shadow-xs"
+              className="h-[32px] sm:h-[34px] w-auto object-contain drop-shadow-xs"
               priority
+              unoptimized
             />
           </Link>
 
@@ -129,7 +132,7 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileMenu }) => {
           <div className="flex flex-col justify-center flex-none">
             <Link href="/" className="no-underline select-none">
               <h1
-                className="text-[14.5px] sm:text-[17px] font-black tracking-tight text-[#C51616] leading-tight m-0 whitespace-nowrap"
+                className="text-[13px] sm:text-[15px] font-black tracking-tight text-[#C51616] leading-tight m-0 whitespace-nowrap"
                 style={{
                   WebkitTextStroke: "0.6px #ffffff",
                   paintOrder: "stroke fill",
@@ -142,7 +145,8 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileMenu }) => {
             <PhoneLinks
               size="xs"
               limit={2}
-              className="w-full flex items-center justify-between text-[8.5px] sm:text-[9.5px] mt-0.5"
+              className="w-full flex items-center justify-between gap-2 mt-0.5"
+              itemClassName="!text-[9px] sm:!text-[10px]"
             />
           </div>
 
@@ -153,7 +157,7 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileMenu }) => {
               alt="දින 365 පැය 24 පුරා"
               width={50}
               height={125}
-              className="h-[36px] sm:h-[40px] w-auto object-contain drop-shadow-xs select-none"
+              className="h-[32px] sm:h-[34px] w-auto object-contain drop-shadow-xs select-none"
               priority
             />
           </div>

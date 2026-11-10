@@ -63,11 +63,11 @@ export const BottomNav: React.FC = () => {
           </span>
         </Link>
 
-        {/* 2. Lorries */}
+        {/* 2. Vehicles */}
         <Link
           href="/find-empty-lorry"
           className="flex flex-col items-center justify-center group no-underline transition-transform active:scale-95"
-          aria-label={locale === "si" ? "හිස් ලොරි" : "Lorries"}
+          aria-label={locale === "si" ? "වාහන" : "Vehicles"}
           aria-current={isLorriesActive ? "page" : undefined}
         >
           <div
@@ -98,7 +98,7 @@ export const BottomNav: React.FC = () => {
                 : "font-semibold text-[#6F6A5A] group-hover:text-[#26231B]"
             }`}
           >
-            {locale === "si" ? "ලොරි" : "Lorries"}
+            {locale === "si" ? "වාහන" : "Vehicles"}
           </span>
         </Link>
 

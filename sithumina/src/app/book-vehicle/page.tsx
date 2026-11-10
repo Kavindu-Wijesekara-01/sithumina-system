@@ -1122,7 +1122,6 @@ function BookVehicleContent() {
               <input
                 type="text"
                 required
-                placeholder={locale === "en" ? "e.g. Kaduwela, Colombo, Kelaniya" : "උදා: කඩුවෙල, කොළඹ, පෑලියගොඩ"}
                 value={form.pickup}
                 onChange={(e) => setForm({ ...form, pickup: e.target.value })}
                 className="w-full px-4 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] focus:outline-none focus:border-[var(--ink)] font-semibold"
@@ -1150,7 +1149,6 @@ function BookVehicleContent() {
               <input
                 type="text"
                 required
-                placeholder={locale === "en" ? "e.g. Galle, Kandy, Kurunegala" : "උදා: ගාල්ල, මහනුවර, කුරුණෑගල"}
                 value={form.destination}
                 onChange={(e) => setForm({ ...form, destination: e.target.value })}
                 className="w-full px-4 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] focus:outline-none focus:border-[var(--ink)] font-semibold"
@@ -1278,7 +1276,6 @@ function BookVehicleContent() {
                 <input
                   type="tel"
                   required
-                  placeholder="07X XXXXXXX"
                   value={form.phone}
                   onChange={(e) => setForm({ ...form, phone: e.target.value })}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm font-mono font-bold text-[var(--ink)] focus:outline-none focus:border-[#26231B]"
@@ -1291,7 +1288,6 @@ function BookVehicleContent() {
                 </label>
                 <input
                   type="text"
-                  placeholder={locale === "en" ? "e.g. Kamal Perera" : "උදා: කමල් පෙරේරා"}
                   value={form.customerName}
                   onChange={(e) => setForm({ ...form, customerName: e.target.value })}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] focus:outline-none focus:border-[#26231B]"
@@ -1361,7 +1357,6 @@ function BookVehicleContent() {
                 </label>
                 <input
                   type="text"
-                  placeholder={locale === "en" ? "e.g. 1,500 Kg or 2 Tons" : "උදා: කිලෝ 1,500ක් හෝ ටොන් 2ක්"}
                   value={form.cargoWeight}
                   onChange={(e) => setForm({ ...form, cargoWeight: e.target.value })}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] focus:outline-none focus:border-[#26231B]"
@@ -1390,7 +1385,6 @@ function BookVehicleContent() {
               </label>
               <textarea
                 rows={2}
-                placeholder={locale === "en" ? "e.g. Ground floor pickup, fragile packing required" : "උදා: බිම් මහලෙන් පැටවීම, බිඳෙනසුලු ද්‍රව්‍ය"}
                 value={form.notes}
                 onChange={(e) => setForm({ ...form, notes: e.target.value })}
                 className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] focus:outline-none focus:border-[#26231B] resize-none"

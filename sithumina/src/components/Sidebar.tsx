@@ -53,7 +53,7 @@ export const Sidebar: React.FC = () => {
 
   return (
     <aside
-      className="hidden lg:flex w-[240px] flex-none flex-col border-r border-[var(--line)] bg-[var(--card)] p-3 py-4 sticky top-[84px] h-[calc(100vh-84px)] select-none"
+      className="hidden lg:flex w-[240px] flex-none flex-col border-r border-[var(--line)] bg-[var(--card)] p-3 py-4 sticky top-[72px] h-[calc(100vh-72px)] select-none"
       aria-label="Main Navigation"
     >
       <nav className="flex flex-col gap-1 overflow-y-auto">

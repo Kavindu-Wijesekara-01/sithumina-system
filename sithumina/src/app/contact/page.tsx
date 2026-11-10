@@ -141,7 +141,6 @@ export default function ContactPage() {
                 <input
                   required
                   type="text"
-                  placeholder="e.g. Nimal Perera"
                   value={inquiry.name}
                   onChange={(e) => setInquiry({ ...inquiry, name: e.target.value })}
                   className="p-2.5 text-xs rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] outline-none focus:border-[#FFC20E]"
@@ -155,7 +154,6 @@ export default function ContactPage() {
                 <input
                   required
                   type="tel"
-                  placeholder="077 123 4567"
                   value={inquiry.phone}
                   onChange={(e) => setInquiry({ ...inquiry, phone: e.target.value })}
                   className="p-2.5 text-xs rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] outline-none focus:border-[#FFC20E]"
@@ -190,11 +188,6 @@ export default function ContactPage() {
               <textarea
                 required
                 rows={3}
-                placeholder={
-                  locale === "en"
-                    ? "Explain your goods, routes, or questions..."
-                    : "ඔබගේ භාණ්ඩ, ගමන් මාර්ගය හෝ විමසීම සඳහන් කරන්න..."
-                }
                 value={inquiry.message}
                 onChange={(e) =>
                   setInquiry({ ...inquiry, message: e.target.value })

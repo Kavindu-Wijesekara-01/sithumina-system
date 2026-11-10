@@ -130,7 +130,6 @@ export default function RegisterVehiclePage() {
               <input
                 required
                 type="text"
-                placeholder={locale === "en" ? "e.g. Sunil Perera" : "නම ඇතුළත් කරන්න"}
                 value={form.ownerName}
                 onChange={(e) => setForm({ ...form, ownerName: e.target.value })}
                 className="p-3 text-sm rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] focus:outline-none focus:border-[#FFC20E]"
@@ -144,7 +143,6 @@ export default function RegisterVehiclePage() {
               <input
                 required
                 type="tel"
-                placeholder="077 123 4567"
                 value={form.phone}
                 onChange={(e) => setForm({ ...form, phone: e.target.value })}
                 className="p-3 text-sm rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] focus:outline-none focus:border-[#FFC20E]"
@@ -160,7 +158,6 @@ export default function RegisterVehiclePage() {
               <input
                 required
                 type="text"
-                placeholder="WP LB-4521"
                 value={form.plateNumber}
                 onChange={(e) => setForm({ ...form, plateNumber: e.target.value })}
                 className="p-3 text-sm rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] focus:outline-none focus:border-[#FFC20E]"
@@ -173,7 +170,6 @@ export default function RegisterVehiclePage() {
               </label>
               <input
                 type="text"
-                placeholder={locale === "en" ? "e.g. 14ft Canter / Isuzu" : "උදා: 14ft Canter / Isuzu"}
                 value={form.vehicleType}
                 onChange={(e) => setForm({ ...form, vehicleType: e.target.value })}
                 className="p-3 text-sm rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] focus:outline-none focus:border-[#FFC20E]"
@@ -187,7 +183,6 @@ export default function RegisterVehiclePage() {
               <input
                 required
                 type="text"
-                placeholder={locale === "en" ? "e.g. Kurunegala" : "උදා: කුරුණෑගල"}
                 value={form.baseCity}
                 onChange={(e) => setForm({ ...form, baseCity: e.target.value })}
                 className="p-3 text-sm rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] focus:outline-none focus:border-[#FFC20E]"
