@@ -181,6 +181,9 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     date: string;
     dates?: string[];
     status: string;
+    hasPaymentSlip?: boolean;
+    paymentSlipStatus?: string;
+    quotedAmount?: number;
     createdAt: number;
     updatedAt?: number;
   }
@@ -239,7 +242,12 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
           continue;
         }
         const st = String(data.status || "pending_acceptance").toLowerCase();
-        if (st !== "pending_acceptance" && st !== "accepted" && st !== "in_transit") {
+        if (
+          st !== "pending_acceptance" &&
+          st !== "accepted" &&
+          st !== "goods_collected" &&
+          st !== "in_transit"
+        ) {
           continue;
         }
 
@@ -278,6 +286,15 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
           date: data.date || "",
           dates: Array.isArray(data.dates) ? data.dates : undefined,
           status: st,
+          hasPaymentSlip: Boolean(
+            data.hasPaymentSlip ||
+            data.paymentSlipStatus === "approved" ||
+            data.paymentSlipStatus === "pending" ||
+            data.paymentSlipStatus === "manual_approved" ||
+            data.paymentSlipId
+          ),
+          paymentSlipStatus: data.paymentSlipStatus || "",
+          quotedAmount: typeof data.quotedAmount === "number" ? data.quotedAmount : undefined,
           createdAt: Number(data.createdAt) || Date.now(),
           updatedAt: Number(data.updatedAt) || Number(data.createdAt) || 0,
         };
@@ -426,6 +443,42 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     }
   };
 
+  const handleGoodsCollectedDispatch = async (dispatch: DispatchRecord) => {
+    try {
+      const plateToUse = resolvePlateForDispatch(dispatch);
+      const lorryToUse = dispatch.riderId || liveDriver.lorryId || driver.lorryId;
+      const identity = resolveDriverIdentity(dispatch);
+      await setDoc(
+        doc(db, "dispatches", dispatch.id),
+        {
+          status: "goods_collected",
+          driverId: identity.driverId,
+          ...(identity.driverName ? { driverName: identity.driverName } : {}),
+          ...(identity.driverPhone ? { driverPhone: identity.driverPhone } : {}),
+          assignedPlate: plateToUse,
+          updatedAt: Date.now(),
+        },
+        { merge: true }
+      );
+      if (dispatch.bookingId) {
+        await updateBookingDispatch({
+          id: dispatch.bookingId,
+          status: "goods_collected",
+          assignedLorryId: lorryToUse,
+          ...(identity.driverName ? { assignedDriverName: identity.driverName } : {}),
+          ...(identity.driverPhone ? { assignedDriverPhone: identity.driverPhone } : {}),
+          assignedPlate: plateToUse,
+        });
+      }
+      Alert.alert(
+        "භාණ්ඩය භාරගත්තා (Goods Collected)",
+        "භාණ්ඩය පටවාගත් බව ප්‍රධාන කාර්යාලය (Admin) සහ පාරිභෝගිකයා වෙත යාවත්කාලීන විය."
+      );
+    } catch (err) {
+      Alert.alert("Error", "Could not update status. Please retry.");
+    }
+  };
+
   const handleStartTripDispatch = async (dispatch: DispatchRecord) => {
     try {
       const plateToUse = resolvePlateForDispatch(dispatch);
@@ -511,6 +564,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
   };
 
   const customerMapPins = pendingDispatches
+    .filter((d) => d.status === "pending_acceptance" || d.status === "accepted")
     .map((d) => {
       let lat = typeof d.pickupLat === "number" && Number.isFinite(d.pickupLat) ? d.pickupLat : null;
       let lng = typeof d.pickupLng === "number" && Number.isFinite(d.pickupLng) ? d.pickupLng : null;
@@ -1027,11 +1081,14 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
         {pendingDispatches.length > 0 && pendingDispatches.map((dispatch) => {
           const isPending = dispatch.status === "pending_acceptance";
           const isAccepted = dispatch.status === "accepted";
+          const isCollected = dispatch.status === "goods_collected";
           const isInTransit = dispatch.status === "in_transit";
-          const badgeLabel = isInTransit
+          const badgeLabel = isCollected
+            ? "📦 GOODS COLLECTED"
+            : isInTransit
             ? "TRIP IN TRANSIT"
             : isAccepted
-            ? "ACCEPTED / ACTIVE"
+            ? "ACCEPTED / PROCEED TO PICKUP"
             : "NEW BOOKING ASSIGNED";
 
           return (
@@ -1039,13 +1096,13 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
               key={dispatch.id}
               style={[
                 styles.dispatchCard,
-                isAccepted ? styles.dispatchCardAccepted : isInTransit ? styles.dispatchCardTransit : null,
+                (isAccepted || isCollected) ? styles.dispatchCardAccepted : isInTransit ? styles.dispatchCardTransit : null,
               ]}
             >
               <View
                 style={[
                   styles.dispatchHeader,
-                  isAccepted ? styles.dispatchHeaderAccepted : isInTransit ? styles.dispatchHeaderTransit : null,
+                  (isAccepted || isCollected) ? styles.dispatchHeaderAccepted : isInTransit ? styles.dispatchHeaderTransit : null,
                 ]}
               >
                 <View style={styles.dispatchBadge}>
@@ -1085,22 +1142,26 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
               </View>
 
               <View style={styles.dispatchActions}>
-                {dispatch.customerPhone ? (
+                {dispatch.customerPhone && (dispatch.hasPaymentSlip || isAccepted || isCollected || isInTransit) ? (
                   <TouchableOpacity
                     style={styles.dispatchCallBtn}
                     onPress={() => Linking.openURL(`tel:${dispatch.customerPhone}`)}
                     activeOpacity={0.8}
                   >
-                    <Text style={styles.dispatchCallBtnText}>Call Customer</Text>
+                    <Text style={styles.dispatchCallBtnText}>📞 Call Customer</Text>
                   </TouchableOpacity>
-                ) : null}
+                ) : (
+                  <View style={styles.dispatchLockedPill}>
+                    <Text style={styles.dispatchLockedPillText}>🔒 Phone unlocks on slip upload</Text>
+                  </View>
+                )}
                 <TouchableOpacity
                   style={styles.dispatchNavBtn}
                   onPress={() => openGoogleMaps(dispatch.pickupCity, dispatch.pickupLat, dispatch.pickupLng)}
                   activeOpacity={0.8}
                 >
                   <Text style={styles.dispatchNavBtnText}>
-                    {typeof dispatch.pickupLat === "number" ? "Navigate to Customer (GPS)" : "Navigate to Pickup"}
+                    📍 {typeof dispatch.pickupLat === "number" ? "GPS Navigate" : "Pickup Location"}
                   </Text>
                 </TouchableOpacity>
                 {isPending ? (
@@ -1110,7 +1171,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                       onPress={() => handleAcceptDispatch(dispatch)}
                       activeOpacity={0.8}
                     >
-                      <Text style={styles.dispatchAcceptBtnText}>Accept</Text>
+                      <Text style={styles.dispatchAcceptBtnText}>✓ Accept Job</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={styles.dispatchDeclineBtn}
@@ -1126,26 +1187,35 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                       }}
                       activeOpacity={0.8}
                     >
-                      <Text style={styles.dispatchDeclineBtnText}>Decline</Text>
+                      <Text style={styles.dispatchDeclineBtnText}>✕ Decline</Text>
                     </TouchableOpacity>
                   </>
                 ) : null}
                 {isAccepted ? (
                   <TouchableOpacity
+                    style={[styles.dispatchStartBtn, { backgroundColor: "#FFC20E" }]}
+                    onPress={() => handleGoodsCollectedDispatch(dispatch)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[styles.dispatchAcceptBtnText, { color: "#26231B" }]}>📦 Mark Goods Collected</Text>
+                  </TouchableOpacity>
+                ) : null}
+                {isCollected ? (
+                  <TouchableOpacity
                     style={styles.dispatchStartBtn}
                     onPress={() => handleStartTripDispatch(dispatch)}
                     activeOpacity={0.8}
                   >
-                    <Text style={styles.dispatchAcceptBtnText}>Start Trip</Text>
+                    <Text style={styles.dispatchAcceptBtnText}>🚚 Start Trip / In Transit</Text>
                   </TouchableOpacity>
                 ) : null}
-                {(isAccepted || isInTransit) ? (
+                {(isAccepted || isCollected || isInTransit) ? (
                   <TouchableOpacity
                     style={styles.dispatchCompleteBtn}
                     onPress={() => handleCompleteDispatch(dispatch)}
                     activeOpacity={0.8}
                   >
-                    <Text style={styles.dispatchAcceptBtnText}>Complete Delivery</Text>
+                    <Text style={styles.dispatchAcceptBtnText}>✓ Complete Delivery</Text>
                   </TouchableOpacity>
                 ) : null}
               </View>
@@ -1896,72 +1966,111 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 14,
     paddingBottom: 14,
+    alignItems: "stretch",
   },
   dispatchCallBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 10,
+    flexGrow: 1,
+    minWidth: "45%",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
     borderWidth: 1.5,
     borderColor: "#1A56A8",
     backgroundColor: "#EEF4FF",
+    alignItems: "center",
+    justifyContent: "center",
   },
   dispatchCallBtnText: {
     color: "#1A56A8",
     fontSize: 12,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  dispatchLockedPill: {
+    flexGrow: 1,
+    minWidth: "45%",
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#E2D9BC",
+    backgroundColor: "#FDFBEF",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dispatchLockedPillText: {
+    color: "#856A15",
+    fontSize: 11,
     fontWeight: "700",
+    textAlign: "center",
   },
   dispatchNavBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 10,
+    flexGrow: 1,
+    minWidth: "45%",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
     backgroundColor: "#26231B",
-    flex: 1,
     alignItems: "center",
+    justifyContent: "center",
   },
   dispatchNavBtnText: {
     color: "#FFC20E",
     fontSize: 12,
     fontWeight: "900",
+    textAlign: "center",
   },
   dispatchAcceptBtn: {
-    paddingHorizontal: 18,
-    paddingVertical: 9,
-    borderRadius: 10,
+    flexGrow: 1,
+    minWidth: "45%",
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
     backgroundColor: "#137333",
     alignItems: "center",
+    justifyContent: "center",
   },
   dispatchAcceptBtnText: {
     color: "#FFFFFF",
     fontSize: 12,
     fontWeight: "900",
+    textAlign: "center",
   },
   dispatchStartBtn: {
+    width: "100%",
     paddingHorizontal: 16,
-    paddingVertical: 9,
-    borderRadius: 10,
+    paddingVertical: 11,
+    borderRadius: 12,
     backgroundColor: "#1A56A8",
     alignItems: "center",
+    justifyContent: "center",
   },
   dispatchCompleteBtn: {
+    width: "100%",
     paddingHorizontal: 16,
-    paddingVertical: 9,
-    borderRadius: 10,
+    paddingVertical: 11,
+    borderRadius: 12,
     backgroundColor: "#137333",
     alignItems: "center",
+    justifyContent: "center",
   },
   dispatchDeclineBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 10,
+    flexGrow: 1,
+    minWidth: "45%",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
     borderWidth: 1.5,
     borderColor: "#D32F2F",
     backgroundColor: "#FFF0F0",
     alignItems: "center",
+    justifyContent: "center",
   },
   dispatchDeclineBtnText: {
     color: "#D32F2F",
     fontSize: 12,
-    fontWeight: "700",
+    fontWeight: "800",
+    textAlign: "center",
   },
   container: {
     flex: 1,

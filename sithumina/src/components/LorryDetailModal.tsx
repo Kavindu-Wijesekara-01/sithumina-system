@@ -3,10 +3,10 @@
 import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
-import Link from "next/link";
 import { Lorry } from "@/lib/mock-lorries";
 import { LorryStatusBadge } from "./LorryStatusBadge";
 import { useLanguage } from "@/context/LanguageContext";
+import { LiveLorryBookingModal } from "./LiveLorryBookingModal";
 
 // Dynamically import the Leaflet dedicated map with SSR disabled
 const DynamicDedicatedRouteMap = dynamic(
@@ -35,6 +35,7 @@ export const LorryDetailModal: React.FC<LorryDetailModalProps> = ({
   const { locale } = useLanguage();
   const [mounted, setMounted] = useState(false);
   const [isMapFullscreen, setIsMapFullscreen] = useState(false);
+  const [isBookingModalOpen, setIsBookingModalOpen] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -252,18 +253,18 @@ export const LorryDetailModal: React.FC<LorryDetailModalProps> = ({
               </div>
             </div>
 
-            {lorry.driverPhone ? (
-              <a
-                href={`tel:${lorry.driverPhone.replace(/\s+/g, "")}`}
-                className="px-3.5 py-1.5 rounded-xl bg-[#1E9E5A] hover:bg-[#18854b] active:scale-95 text-white font-extrabold text-xs flex items-center gap-1.5 shadow-sm transition-all no-underline"
-                title="Call Driver"
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
-                </svg>
-                <span>{locale === "en" ? "Call" : "අමතන්න"}</span>
-              </a>
-            ) : null}
+            <button
+              type="button"
+              onClick={() => setIsBookingModalOpen(true)}
+              className="px-3.5 py-1.5 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] active:scale-95 text-[#26231B] font-extrabold text-xs flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
+              title={locale === "en" ? "Book online to connect with driver" : "රියදුරු සම්බන්ධ කරගැනීමට වෙන්කරන්න"}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+              <span>{locale === "en" ? "Book to Connect" : "වෙන්කර අමතන්න"}</span>
+            </button>
           </div>
 
           {/* Specifications Grid */}
@@ -355,9 +356,9 @@ export const LorryDetailModal: React.FC<LorryDetailModalProps> = ({
 
           {/* Modern Book Online Now Action Button */}
           <div className="pt-1 mt-auto">
-            <Link
-              href={`/book-vehicle?plate=${encodeURIComponent(lorry.plate)}&lorryId=${encodeURIComponent(lorry.id)}&route=${encodeURIComponent(lorry.route || "")}`}
-              onClick={onClose}
+            <button
+              type="button"
+              onClick={() => setIsBookingModalOpen(true)}
               className="w-full py-3.5 px-5 rounded-2xl bg-[#FFC20E] hover:bg-[#e6ad00] active:scale-[0.99] text-[#26231B] font-black text-sm flex items-center justify-center gap-2 transition-all shadow-md hover:shadow-lg no-underline text-center cursor-pointer"
             >
               <svg
@@ -379,7 +380,7 @@ export const LorryDetailModal: React.FC<LorryDetailModalProps> = ({
                   ? "Book Online Now"
                   : "අන්තර්ජාලය හරහා දැන්ම වෙන්කරන්න"}
               </span>
-            </Link>
+            </button>
           </div>
         </div>
       </div>
@@ -444,21 +445,35 @@ export const LorryDetailModal: React.FC<LorryDetailModalProps> = ({
                 </div>
               </div>
 
-              {lorry.driverPhone && (
-                <a
-                  href={`tel:${lorry.driverPhone}`}
-                  className="px-3.5 py-2 rounded-xl bg-[#1E9E5A] hover:bg-[#1b8c50] text-white font-black text-xs flex items-center gap-1.5 shadow-sm active:scale-95 transition-all no-underline flex-none"
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
-                  </svg>
-                  <span>Call</span>
-                </a>
-              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsMapFullscreen(false);
+                  setIsBookingModalOpen(true);
+                }}
+                className="px-3.5 py-2 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] text-[#26231B] font-black text-xs flex items-center gap-1.5 shadow-sm active:scale-95 transition-all cursor-pointer flex-none"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                </svg>
+                <span>{locale === "en" ? "Book Online" : "වෙන්කරන්න"}</span>
+              </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* 4. LIVE LORRY ONLINE BOOKING MODAL */}
+      <LiveLorryBookingModal
+        lorry={lorry}
+        isOpen={isBookingModalOpen}
+        onClose={() => setIsBookingModalOpen(false)}
+        onSuccess={() => {
+          setIsBookingModalOpen(false);
+          onClose();
+        }}
+      />
     </div>
   );
 

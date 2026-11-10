@@ -211,9 +211,8 @@ export async function POST(request: Request) {
 
     try {
       const docRef = doc(db, "bookings", booking.id);
-      await setDoc(
-        docRef,
-        {
+      const cleanBookingPayload = Object.fromEntries(
+        Object.entries({
           ...booking,
           trackingId: booking.id,
           phone: booking.customerPhone,
@@ -222,9 +221,9 @@ export async function POST(request: Request) {
           notes: booking.packageDetails || "",
           createdAt: booking.createdAt,
           updatedAt: booking.updatedAt,
-        },
-        { merge: true }
+        }).filter(([, val]) => val !== undefined)
       );
+      await setDoc(docRef, cleanBookingPayload, { merge: true });
     } catch (e) {
       console.warn("Firestore booking sync notice:", e);
     }

@@ -6,6 +6,7 @@ import { useLanguage } from "@/context/LanguageContext";
 import { useLiveLorries } from "@/hooks/useLiveLorries";
 import { LorryStatusBadge } from "@/components/LorryStatusBadge";
 import { LorryDetailModal } from "@/components/LorryDetailModal";
+import { LiveLorryBookingModal } from "@/components/LiveLorryBookingModal";
 import { Lorry } from "@/lib/mock-lorries";
 
 export default function FindEmptyLorryPage() {
@@ -13,6 +14,7 @@ export default function FindEmptyLorryPage() {
   const { lorries: liveLorries, loading } = useLiveLorries();
   const [searchTerm, setSearchTerm] = useState("");
   const [activeModalLorry, setActiveModalLorry] = useState<Lorry | null>(null);
+  const [bookingLorry, setBookingLorry] = useState<Lorry | null>(null);
 
   // Strictly filter only lorries that are actively LIVE from the driver app with status === "empty"
   const emptyLorries = liveLorries.filter(
@@ -214,9 +216,10 @@ export default function FindEmptyLorryPage() {
                   className="flex items-center gap-2 pt-2 border-t border-[var(--line)]"
                   onClick={(e) => e.stopPropagation()}
                 >
-                  <Link
-                    href={`/book-vehicle?plate=${encodeURIComponent(lorry.plate)}&lorryId=${encodeURIComponent(lorry.id)}`}
-                    className="flex-1 py-2 px-2 text-center rounded-xl bg-[var(--y)] hover:bg-[#e6ad00] text-[#26231B] font-extrabold text-xs transition-all shadow-xs no-underline flex items-center justify-center gap-1"
+                  <button
+                    type="button"
+                    onClick={() => setBookingLorry(lorry)}
+                    className="flex-1 py-2 px-2 text-center rounded-xl bg-[var(--y)] hover:bg-[#e6ad00] text-[#26231B] font-extrabold text-xs transition-all shadow-xs border-0 cursor-pointer flex items-center justify-center gap-1"
                   >
                     <svg
                       className="w-3.5 h-3.5 text-[#26231B]"
@@ -233,25 +236,19 @@ export default function FindEmptyLorryPage() {
                       <line x1="3" y1="10" x2="21" y2="10" />
                     </svg>
                     <span>{locale === "en" ? "Book" : "වෙන්කරන්න"}</span>
-                  </Link>
+                  </button>
 
-                  <a
-                    href={`tel:${dialPhone}`}
-                    className="p-2 rounded-xl bg-[var(--bg)] hover:bg-[var(--y3)] text-[var(--ink)] font-bold text-xs border border-[var(--line)] transition-all shadow-xs no-underline flex items-center justify-center"
-                    title={locale === "en" ? "Call Driver" : "රියදුරුට අමතන්න"}
+                  <button
+                    type="button"
+                    onClick={() => setBookingLorry(lorry)}
+                    className="p-2 rounded-xl bg-[var(--bg)] hover:bg-[#FFC20E] text-[var(--ink)] font-bold text-xs border border-[var(--line)] transition-all shadow-xs flex items-center justify-center cursor-pointer"
+                    title={locale === "en" ? "Driver contact available upon booking & payment slip upload" : "වෙන්කිරීමෙන් සහ රිසිට්පත යැවීමෙන් පසු රියදුරු අංකය ලැබේ"}
                   >
-                    <svg
-                      className="w-3.5 h-3.5"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2.2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
                     </svg>
-                  </a>
+                  </button>
 
                   <button
                     type="button"
@@ -271,6 +268,13 @@ export default function FindEmptyLorryPage() {
       <LorryDetailModal
         lorry={activeModalLorry}
         onClose={() => setActiveModalLorry(null)}
+      />
+
+      {/* Live Lorry Booking Modal */}
+      <LiveLorryBookingModal
+        lorry={bookingLorry}
+        isOpen={Boolean(bookingLorry)}
+        onClose={() => setBookingLorry(null)}
       />
     </main>
   );

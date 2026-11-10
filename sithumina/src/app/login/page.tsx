@@ -52,6 +52,18 @@ export default function CustomerPortalPage() {
 
   useEffect(() => {
     setMounted(true);
+
+    if (typeof window !== "undefined") {
+      const sp = new URLSearchParams(window.location.search);
+      const urlPhone = sp.get("phone");
+      if (urlPhone) {
+        setPhone(urlPhone);
+        if (!profile?.phone) {
+          void loginWithPhone(urlPhone, "1234", "customer");
+        }
+      }
+    }
+
     const unsubFleet = subscribeFleetVehicles((vehicles) => {
       setFleetVehicles(vehicles);
     });
@@ -574,7 +586,7 @@ export default function CustomerPortalPage() {
         return (
           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-extrabold bg-[#E6F4EA] text-[#137333] border border-[#CEEAD6]">
             <span className="w-2 h-2 rounded-full bg-[#137333]" />
-            {locale === "en" ? "Approved (Date Locked)" : "අනුමත කළා (දිනය වෙන්කළා)"}
+            {locale === "en" ? "Approved" : "අනුමත කළා"}
           </span>
         );
       case "assigned":
@@ -582,6 +594,13 @@ export default function CustomerPortalPage() {
           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-extrabold bg-[#E6F4EA] text-[#137333] border border-[#CEEAD6]">
             <span className="w-2 h-2 rounded-full bg-[#137333]" />
             {locale === "en" ? "Driver Assigned" : "රියදුරු වෙන්කර ඇත"}
+          </span>
+        );
+      case "goods_collected":
+        return (
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-extrabold bg-[#E0F2F1] text-[#00695C] border border-[#B2DFDB]">
+            <span className="w-2 h-2 rounded-full bg-[#00695C] animate-pulse" />
+            {locale === "en" ? "📦 Goods Collected" : "📦 භාණ්ඩ භාරගත්තා"}
           </span>
         );
       case "in_transit":
@@ -635,7 +654,8 @@ export default function CustomerPortalPage() {
       status === "payment_submitted" ||
       isPaymentDone ||
       (booking.quotedAmount !== undefined && booking.quotedAmount > 0);
-    const isDriverAssigned = ["assigned", "in_transit", "delivered"].includes(status);
+    const isGoodsCollected = status === "goods_collected";
+    const isDriverAssigned = ["assigned", "goods_collected", "in_transit", "delivered"].includes(status);
     const isInTransit = status === "in_transit";
     const isDelivered = status === "delivered";
 
@@ -643,15 +663,17 @@ export default function CustomerPortalPage() {
       ? 100
       : isInTransit
         ? 96
-        : isDriverAssigned
-          ? 92
-          : isPaymentDone
-            ? 80
-            : status === "payment_submitted"
-              ? 60
-              : status === "awaiting_payment"
-                ? 40
-                : 20;
+        : isGoodsCollected
+          ? 94
+          : isDriverAssigned
+            ? 92
+            : isPaymentDone
+              ? 80
+              : status === "payment_submitted"
+                ? 60
+                : status === "awaiting_payment"
+                  ? 40
+                  : 20;
 
     const barGradient = isPaymentDone
       ? "bg-gradient-to-r from-[#10B981] to-[#137333]"
@@ -667,18 +689,22 @@ export default function CustomerPortalPage() {
         ? locale === "en"
           ? "Trip In Progress"
           : "ප්‍රවාහනය සිදුවෙමින් පවතී"
-        : isDriverAssigned
+        : isGoodsCollected
           ? locale === "en"
-            ? "Payment Approved • Driver Assigned"
-            : "ගෙවීම අනුමතයි • රියදුරු වෙන්කළා"
+            ? "📦 Goods Collected by Driver"
+            : "📦 භාණ්ඩය රියදුරු විසින් භාරගෙන ඇත"
+          : isDriverAssigned
+            ? locale === "en"
+              ? "Payment Approved • Driver Assigned"
+              : "ගෙවීම අනුමතයි • රියදුරු වෙන්කළා"
           : isPaymentDone
             ? isCashManual
               ? locale === "en"
-                ? "Cash / Direct Payment Approved • Date Locked"
-                : "මුදල් ගෙවීම අනුමතයි • දිනය වෙන්කළා"
+                ? "Cash / Direct Payment Approved"
+                : "මුදල් ගෙවීම අනුමතයි"
               : locale === "en"
-                ? "Payment Approved • Calendar Date Locked"
-                : "ගෙවීම අනුමතයි • දිනය වෙන්කළා"
+                ? "Payment Approved"
+                : "ගෙවීම අනුමතයි"
             : status === "payment_submitted"
               ? locale === "en"
                 ? "Payment Slip Under Head Office Review"
@@ -748,11 +774,11 @@ export default function CustomerPortalPage() {
         title: locale === "en" ? "Approved" : "අනුමතයි",
         sub: isPaymentDone
           ? locale === "en"
-            ? "Date Locked"
-            : "දිනය වෙන්විය"
+            ? "Approved"
+            : "අනුමතයි"
           : locale === "en"
-            ? "Date Open"
-            : "විවෘතයි",
+            ? "Pending"
+            : "බලාපොරොත්තුවෙන්",
         done: isPaymentDone,
         active: false,
         tone: "emerald",
@@ -1437,12 +1463,20 @@ export default function CustomerPortalPage() {
                   );
 
                   const isApprovedStage = ["accepted", "booked", "confirmed"].includes(b.status);
-                  const isAssignedOrTransit = ["assigned", "in_transit"].includes(b.status);
+                  const isAssignedOrTransit = ["assigned", "goods_collected", "in_transit"].includes(b.status);
                   const isCashManual =
                     b.paymentMethod === "cash_manual" || b.paymentSlipStatus === "manual_approved";
+                  const isSlipSubmittedOrApproved = Boolean(
+                    b.paymentSlipId ||
+                    b.paymentSlipStatus === "pending_review" ||
+                    b.paymentSlipStatus === "approved" ||
+                    b.paymentSlipStatus === "manual_approved" ||
+                    b.paymentMethod === "cash_manual"
+                  );
                   const isDriverVisible =
-                    ["assigned", "in_transit", "delivered"].includes(b.status) ||
-                    Boolean(b.assignedDriverPhone && String(b.assignedDriverPhone).trim());
+                    isSlipSubmittedOrApproved &&
+                    (["assigned", "goods_collected", "in_transit", "delivered", "accepted", "booked"].includes(b.status) ||
+                      Boolean(b.assignedDriverPhone && String(b.assignedDriverPhone).trim()));
                   const resolvedDates =
                     Array.isArray(b.dates) && b.dates.length > 0
                       ? b.dates
@@ -1513,9 +1547,16 @@ export default function CustomerPortalPage() {
                       />
 
                       {/* Card Header - Arrow locked strictly in the top-right corner across all viewports */}
-                      <button
-                        type="button"
+                      <div
+                        role="button"
+                        tabIndex={0}
                         onClick={() => toggleBookingCard(b.id, isExpanded)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            toggleBookingCard(b.id, isExpanded);
+                          }
+                        }}
                         aria-expanded={isExpanded}
                         aria-label={
                           isExpanded
@@ -1537,7 +1578,7 @@ export default function CustomerPortalPage() {
                               {locale === "en" ? "Individual Vehicle" : "තනි වාහන වෙන්කිරීම"}
                             </span>
                           </div>
-                          <div className="flex items-center flex-shrink-0">
+                          <div className="flex items-center gap-2 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
                             {getStatusBadge(b.status)}
                           </div>
                         </div>
@@ -1595,7 +1636,7 @@ export default function CustomerPortalPage() {
                             <polyline points="6 9 12 15 18 9" />
                           </svg>
                         </span>
-                      </button>
+                      </div>
 
                       {/* Card Body: Always-Visible Stepper + Collapsible Details */}
                       <div className="px-4 pb-4 sm:px-5 sm:pb-5 flex flex-col gap-3.5">
@@ -1947,11 +1988,11 @@ export default function CustomerPortalPage() {
                                   <span className="text-[10px] font-black text-[#137333] uppercase tracking-wide">
                                     {isCashManual
                                       ? locale === "en"
-                                        ? "Cash / Direct Payment Approved & Calendar Date Locked"
-                                        : "මුදල් ගෙවීම අනුමත කළා (දිනය ස්ථිර ලෙස වෙන්කළා)"
+                                        ? "Cash / Direct Payment Approved"
+                                        : "මුදල් ගෙවීම අනුමත කළා"
                                       : locale === "en"
-                                        ? "Booking Approved & Calendar Date Locked"
-                                        : "වෙන්කිරීම අනුමත කළා (දිනය ස්ථිර ලෙස වෙන්කළා)"}
+                                        ? "Booking Approved"
+                                        : "වෙන්කිරීම අනුමත කළා"}
                                   </span>
                                   <p className="text-xs font-bold text-green-950 leading-relaxed">
                                     {b.quotedAmount !== undefined && (
@@ -2007,10 +2048,19 @@ export default function CustomerPortalPage() {
                                       </span>
                                     )}
                                   </p>
-                                  {resolvedDriverPhone && (
+                                  {resolvedDriverPhone ? (
                                     <p className="mt-1 text-xs font-mono font-bold text-emerald-900">
                                       {locale === "en" ? "Rider Phone:" : "රියදුරු අංකය:"} {resolvedDriverPhone}
                                     </p>
+                                  ) : (
+                                    <div className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] text-[#856A15] bg-[#FDFBEF] px-2.5 py-1 rounded-lg border border-[#E2D9BC]">
+                                      <span>🔒</span>
+                                      <span className="font-semibold">
+                                        {locale === "en"
+                                          ? "Rider phone unlocks once payment slip is submitted"
+                                          : "ගෙවීම් රිසිට්පත (Slip) upload කළ පසු රියදුරුගේ අංකය දිස්වේ"}
+                                      </span>
+                                    </div>
                                   )}
                                 </div>
 

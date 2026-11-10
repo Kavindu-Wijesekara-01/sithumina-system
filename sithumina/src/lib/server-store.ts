@@ -74,6 +74,7 @@ export type BookingStatusValue =
   | "payment_submitted"
   | "accepted"
   | "assigned"
+  | "goods_collected"
   | "in_transit"
   | "delivered"
   | "cancelled"
@@ -93,6 +94,7 @@ export interface StoredBooking {
   id: string;
   customerName: string;
   customerPhone: string;
+  customerWhatsapp?: string;
   pickupCity: string;
   deliveryCity: string;
   pickupLat?: number;
@@ -108,6 +110,7 @@ export interface StoredBooking {
   assignedDriverName?: string;
   assignedDriverPhone?: string;
   assignedPlate?: string;
+  selectedVehiclePlate?: string;
   bookingType?: "individual_vehicle" | "live_lorry";
   cargoNature?: string;
   daysNeeded?: number | string;
@@ -992,6 +995,18 @@ export function updateBookingStatusInStore(
 
   writeStore(store);
   return store.bookings[idx];
+}
+
+export function deleteBookingFromStore(id: string): boolean {
+  const store = readStore();
+  const cleanId = (id || "").trim();
+  const initialCount = store.bookings.length;
+  store.bookings = store.bookings.filter((b) => b.id !== cleanId);
+  if (store.bookings.length !== initialCount) {
+    writeStore(store);
+    return true;
+  }
+  return false;
 }
 
 /* ============================================================

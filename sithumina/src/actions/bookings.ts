@@ -6,6 +6,7 @@ import {
   getAllStoredBookings,
   updateBookingStatusInStore,
   upsertBookingInStore,
+  deleteBookingFromStore,
   StoredBooking,
   BookingStatusValue,
   PaymentSlipStatus,
@@ -189,7 +190,7 @@ async function syncBookingDispatchDoc(
   }
 
   const isTerminal = status === "delivered" || status === "cancelled";
-  const isDispatchable = ["accepted", "assigned", "in_transit", "booked"].includes(status);
+  const isDispatchable = ["accepted", "assigned", "goods_collected", "in_transit", "booked"].includes(status);
 
   if (!isDispatchable && !isTerminal) {
     return;
@@ -208,13 +209,16 @@ async function syncBookingDispatchDoc(
     targetDispatchStatus = "completed";
   } else if (status === "cancelled") {
     targetDispatchStatus = "cancelled";
+  } else if (status === "goods_collected") {
+    targetDispatchStatus = "goods_collected";
   } else if (status === "in_transit") {
-    targetDispatchStatus = "accepted";
+    targetDispatchStatus = "in_transit";
   } else {
     try {
       const existingSnap = await getDoc(doc(db, "dispatches", dispatchDocId));
-      if (existingSnap.exists() && existingSnap.data()?.status === "accepted") {
-        targetDispatchStatus = "accepted";
+      const curSt = existingSnap.data()?.status;
+      if (existingSnap.exists() && ["accepted", "goods_collected", "in_transit"].includes(curSt)) {
+        targetDispatchStatus = curSt;
       }
     } catch {
       // keep pending_acceptance
@@ -227,12 +231,21 @@ async function syncBookingDispatchDoc(
     String(extra?.driverPhone || booking.assignedDriverPhone || "").trim();
 
   if (isDispatchable && effectiveLorryId) {
+    const hasSlip = Boolean(
+      booking.paymentSlipId ||
+      booking.paymentSlipStatus === "approved" ||
+      booking.paymentSlipStatus === "pending_review" ||
+      booking.paymentSlipStatus === "manual_approved" ||
+      booking.paymentMethod === "cash_manual"
+    );
+
     const dispatchPayload: Record<string, any> = {
       riderId: effectiveLorryId,
       assignedPlate: plate,
       bookingId: booking.id,
       customerName: booking.customerName,
       customerPhone: booking.customerPhone,
+      customerWhatsapp: booking.customerWhatsapp || "",
       pickupCity: booking.pickupCity,
       pickupLat: booking.pickupLat ?? null,
       pickupLng: booking.pickupLng ?? null,
@@ -248,6 +261,10 @@ async function syncBookingDispatchDoc(
       helpersCount: booking.helpersCount ?? "0",
       status: targetDispatchStatus,
       bookingType: booking.bookingType || "live_lorry",
+      hasPaymentSlip: hasSlip,
+      paymentSlipStatus: booking.paymentSlipStatus || "",
+      paymentSlipId: booking.paymentSlipId || "",
+      quotedAmount: booking.quotedAmount ?? null,
       updatedAt: Date.now(),
       createdAt: booking.createdAt || Date.now(),
     };
@@ -664,6 +681,9 @@ export async function getLorryBookedDatesAction(
     const bookedDates: string[] = [];
 
     all.forEach((b) => {
+      // Live online bookings are for immediate runs on the road and do NOT lock calendar dates for future rentals
+      if (b.bookingType === "live_lorry") return;
+
       const plateMatch = Boolean(
         cleanPlateNorm &&
           b.assignedPlate &&
@@ -958,6 +978,78 @@ export async function updateBookingStatusAction(
     return {
       success: false,
       error: "Failed to update booking status.",
+    };
+  }
+}
+
+/**
+ * Server Action to permanently delete a booking from local store and Firestore database.
+ * Also cleans up any related dispatches in Firestore so drivers no longer see it.
+ */
+export async function deleteBookingAction(
+  id: string,
+  requesterPhone?: string
+): Promise<ActionResult<{ deletedId: string }>> {
+  try {
+    const cleanId = (id || "").trim();
+    if (!cleanId) {
+      return { success: false, error: "Booking ID is required." };
+    }
+
+    // 1. Delete from local server file store
+    deleteBookingFromStore(cleanId);
+
+    // 2. Delete from Firestore bookings collection
+    try {
+      const docRef = doc(db, "bookings", cleanId);
+      await deleteDoc(docRef);
+
+      // Clean any legacy doc with random doc ID referencing trackingId == cleanId
+      const legacySnap = await getDocs(
+        query(collection(db, "bookings"), where("trackingId", "==", cleanId))
+      );
+      for (const d of legacySnap.docs) {
+        await deleteDoc(doc(db, "bookings", d.id));
+      }
+    } catch (fsErr) {
+      console.warn("Firestore delete booking warning:", fsErr);
+    }
+
+    // 3. Clean corresponding dispatch in dispatches collection
+    try {
+      const dispatchDocId = `dispatch-${cleanId}`;
+      await deleteDoc(doc(db, "dispatches", dispatchDocId));
+
+      const dispatchSnap = await getDocs(
+        query(collection(db, "dispatches"), where("bookingId", "==", cleanId))
+      );
+      for (const d of dispatchSnap.docs) {
+        await deleteDoc(doc(db, "dispatches", d.id));
+      }
+    } catch (dispErr) {
+      console.warn("Firestore delete dispatch warning:", dispErr);
+    }
+
+    // 4. Revalidate pages
+    try {
+      revalidatePath("/admin");
+      revalidatePath("/login");
+      revalidatePath("/book-vehicle");
+      revalidatePath("/find-empty-lorry");
+      revalidatePath("/manage");
+    } catch {
+      // Ignored
+    }
+
+    return {
+      success: true,
+      data: { deletedId: cleanId },
+    };
+  } catch (err: unknown) {
+    console.error("deleteBookingAction error:", err);
+    return {
+      success: false,
+      error: "Failed to delete booking.",
     };
   }
 }

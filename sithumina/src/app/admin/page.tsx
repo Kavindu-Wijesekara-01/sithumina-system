@@ -43,6 +43,7 @@ import { BookingCalendar } from "@/components/BookingCalendar";
 import {
   createBookingAction,
   updateBookingStatusAction,
+  deleteBookingAction,
   BookedDateDetail,
   getAllBookingsAction,
   getAllRegistrationsAction,
@@ -58,6 +59,7 @@ type NavSection =
   | "overview"
   | "individual_bookings"
   | "online_bookings"
+  | "revenue"
   | "vehicle_registrations"
   | "contact_submissions"
   | "fleet"
@@ -159,6 +161,23 @@ function formatBookingDateTime(ts?: number): { date: string; time: string; displ
   }
 }
 
+const SRI_LANKA_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+function getSriLankaDateStr(timestamp: number = Date.now()): string {
+  const d = new Date(timestamp + SRI_LANKA_OFFSET_MS);
+  return d.toISOString().split("T")[0];
+}
+
+function getSriLankaMidnightTimestamp(timestamp: number = Date.now()): number {
+  const d = new Date(timestamp + SRI_LANKA_OFFSET_MS);
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth();
+  const dt = d.getUTCDate();
+  return Date.UTC(y, m, dt) - SRI_LANKA_OFFSET_MS;
+}
+
+type RevenueTimeFilter = "today" | "yesterday" | "pick_date" | "days_count" | "this_month" | "last_month" | "all_time" | "custom";
+
 export default function MasterAdminDashboard() {
   // ---- Auth Gate ----
   const [authed, setAuthed] = useState(false);
@@ -176,8 +195,19 @@ export default function MasterAdminDashboard() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [individualSearch, setIndividualSearch] = useState("");
   const [expandedIndividualBookings, setExpandedIndividualBookings] = useState<Record<string, boolean>>({});
+  const [onlineSearch, setOnlineSearch] = useState("");
+  const [expandedOnlineBookings, setExpandedOnlineBookings] = useState<Record<string, boolean>>({});
   const [bookingViewSubTab, setBookingViewSubTab] = useState<"list" | "calendar">("list");
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+
+  // ---- Revenue Analytics State ----
+  const [revenueFilter, setRevenueFilter] = useState<RevenueTimeFilter>("today");
+  const [revenueSelectedDate, setRevenueSelectedDate] = useState(() => getSriLankaDateStr());
+  const [revenueDaysCount, setRevenueDaysCount] = useState<number>(7);
+  const [revenueCustomStart, setRevenueCustomStart] = useState("");
+  const [revenueCustomEnd, setRevenueCustomEnd] = useState("");
+  const [revenueTypeFilter, setRevenueTypeFilter] = useState<"all" | "individual" | "live_lorry">("all");
+  const [revenueSearch, setRevenueSearch] = useState("");
 
   // ---- Vehicle Registrations State ----
   const [registrations, setRegistrations] = useState<
@@ -197,6 +227,13 @@ export default function MasterAdminDashboard() {
 
   const toggleIndividualBookingCard = (bookingId: string, currentExpanded: boolean) => {
     setExpandedIndividualBookings((prev) => ({
+      ...prev,
+      [bookingId]: !currentExpanded,
+    }));
+  };
+
+  const toggleOnlineBookingCard = (bookingId: string, currentExpanded: boolean) => {
+    setExpandedOnlineBookings((prev) => ({
       ...prev,
       [bookingId]: !currentExpanded,
     }));
@@ -815,6 +852,33 @@ export default function MasterAdminDashboard() {
     [bookings, fleetVehicles, drivers, selectedCalendarVehicle?.plate, refreshVehicleCalendar]
   );
 
+  const handleDeleteBooking = async (bookingId: string) => {
+    if (
+      !confirm(
+        `Are you sure you want to permanently delete booking #${bookingId}? This will remove it from the system, Firestore database, and release any calendar dates.`
+      )
+    ) {
+      return;
+    }
+    setActionLoading(bookingId);
+    try {
+      const res = await deleteBookingAction(bookingId);
+      if (res.success) {
+        setBookings((prev) => prev.filter((b) => b.id !== bookingId));
+        if (selectedCalendarVehicle?.plate) {
+          refreshVehicleCalendar(selectedCalendarVehicle.plate);
+        }
+        showToast(`Booking #${bookingId} deleted permanently.`, "success");
+      } else {
+        showToast(res.error || "Failed to delete booking.", "error");
+      }
+    } catch (e: any) {
+      showToast(e?.message || "Error deleting booking.", "error");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   // ---- Payment Quote, Slip Review, Approve & Delete Handlers ----
   const handleSendQuote = async (booking: StoredBooking) => {
     const entry = quoteInputs[booking.id] || {
@@ -905,6 +969,10 @@ export default function MasterAdminDashboard() {
         ? booking.quotedAmount
         : undefined;
     const hasSlip = Boolean(booking.paymentSlipId && booking.paymentSlipStatus !== "deleted");
+    if (!hasSlip && (!finalAmount || finalAmount <= 0)) {
+      showToast("Please enter the Rs. amount first to manually approve cash payment.", "error");
+      return;
+    }
     const draftNote = (entry?.note || "").trim();
     const resolvedNote =
       draftNote ||
@@ -1565,9 +1633,60 @@ export default function MasterAdminDashboard() {
     );
   }, []);
 
+  const matchesOnlineSearchQuery = useCallback((b: StoredBooking, rawQuery: string) => {
+    const q = rawQuery.trim().toLowerCase();
+    if (!q) return true;
+    const qCompact = q.replace(/\s+/g, "");
+    const qDigits = q.replace(/[^0-9]/g, "");
+    const qDigitsCore = qDigits.replace(/^(94|0)+/, "");
+    const phoneDigits = String(b.customerPhone || "").replace(/[^0-9]/g, "");
+    const phoneDigitsCore = phoneDigits.replace(/^(94|0)+/, "");
+    const whatsappDigits = String(b.customerWhatsapp || "").replace(/[^0-9]/g, "");
+    const whatsappDigitsCore = whatsappDigits.replace(/^(94|0)+/, "");
+    const driverPhoneDigits = String(b.assignedDriverPhone || "").replace(/[^0-9]/g, "");
+    const driverPhoneCore = driverPhoneDigits.replace(/^(94|0)+/, "");
+    const plateCompact = String(b.assignedPlate || b.selectedVehiclePlate || "").toLowerCase().replace(/\s+/g, "");
+    const datesJoined = Array.isArray(b.dates) ? b.dates.join(" ") : "";
+    const createdTiming = formatBookingDateTime(b.createdAt);
+
+    return (
+      String(b.id || "").toLowerCase().includes(q) ||
+      String(b.id || "").toLowerCase().replace(/\s+/g, "").includes(qCompact) ||
+      String(b.customerName || "").toLowerCase().includes(q) ||
+      String(b.customerPhone || "").toLowerCase().includes(q) ||
+      String(b.customerWhatsapp || "").toLowerCase().includes(q) ||
+      (qDigits.length >= 3 &&
+        (phoneDigits.includes(qDigits) ||
+          whatsappDigits.includes(qDigits) ||
+          driverPhoneDigits.includes(qDigits) ||
+          (qDigitsCore.length >= 3 &&
+            (phoneDigitsCore.includes(qDigitsCore) ||
+              whatsappDigitsCore.includes(qDigitsCore) ||
+              driverPhoneCore.includes(qDigitsCore))))) ||
+      String(b.assignedPlate || "").toLowerCase().includes(q) ||
+      String(b.selectedVehiclePlate || "").toLowerCase().includes(q) ||
+      plateCompact.includes(qCompact) ||
+      String(b.vehicleType || "").toLowerCase().includes(q) ||
+      String(b.pickupCity || "").toLowerCase().includes(q) ||
+      String(b.deliveryCity || "").toLowerCase().includes(q) ||
+      String(b.assignedDriverName || "").toLowerCase().includes(q) ||
+      String(b.date || "").toLowerCase().includes(q) ||
+      datesJoined.toLowerCase().includes(q) ||
+      String(b.cargoNature || "").toLowerCase().includes(q) ||
+      String(b.packageDetails || "").toLowerCase().includes(q) ||
+      String(b.cargoWeight || "").toLowerCase().includes(q) ||
+      String(b.status || "").toLowerCase().includes(q) ||
+      (createdTiming && createdTiming.display.toLowerCase().includes(q))
+    );
+  }, []);
+
   const individualSearchMatchesAnyStatusCount = individualSearch.trim()
     ? individualBookings.filter((b) => matchesIndividualSearchQuery(b, individualSearch)).length
     : individualBookings.length;
+
+  const onlineSearchMatchesAnyStatusCount = onlineSearch.trim()
+    ? onlineBookings.filter((b) => matchesOnlineSearchQuery(b, onlineSearch)).length
+    : onlineBookings.length;
 
   const filteredIndividualBookings = individualBookings.filter((b) => {
     const matchesStatus =
@@ -1589,16 +1708,26 @@ export default function MasterAdminDashboard() {
   });
 
   const filteredOnlineBookings = onlineBookings.filter((b) => {
-    if (statusFilter === "pending") return b.status === "pending";
-    if (statusFilter === "awaiting_payment") return b.status === "awaiting_payment";
-    if (statusFilter === "payment_submitted") return b.status === "payment_submitted";
-    if (statusFilter === "accepted") return b.status === "accepted" || b.status === "booked";
-    if (statusFilter === "assigned") return ["assigned", "in_transit"].includes(b.status);
-    if (statusFilter === "completed") return ["delivered", "cancelled"].includes(b.status);
-    return true;
+    const matchesStatus =
+      statusFilter === "pending"
+        ? b.status === "pending"
+        : statusFilter === "awaiting_payment"
+        ? b.status === "awaiting_payment"
+        : statusFilter === "payment_submitted"
+        ? b.status === "payment_submitted"
+        : statusFilter === "accepted"
+        ? b.status === "accepted" || b.status === "booked"
+        : statusFilter === "assigned"
+        ? ["assigned", "in_transit", "goods_collected"].includes(b.status)
+        : statusFilter === "completed"
+        ? ["delivered", "cancelled"].includes(b.status)
+        : true;
+    if (!matchesStatus) return false;
+    return matchesOnlineSearchQuery(b, onlineSearch);
   });
 
   const slipReviewCount = individualBookings.filter((b) => b.status === "payment_submitted").length;
+  const onlineSlipReviewCount = onlineBookings.filter((b) => b.status === "payment_submitted").length;
   const pendingIndividualCount = individualBookings.filter(
     (b) => b.status === "pending" || b.status === "payment_submitted"
   ).length;
@@ -1606,6 +1735,165 @@ export default function MasterAdminDashboard() {
   const totalPendingCount = bookings.filter(
     (b) => b.status === "pending" || b.status === "payment_submitted"
   ).length;
+
+  const [clockTick, setClockTick] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setClockTick(Date.now()), 60000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const revenueData = useMemo(() => {
+    const isPaid = (b: StoredBooking): boolean => {
+      if (b.status === "cancelled") return false;
+      const amt = Number(b.quotedAmount || 0);
+      if (amt <= 0) return false;
+      if (b.paymentApprovedAt && b.paymentApprovedAt > 0) return true;
+      if (b.paymentSlipStatus === "approved" || (b.paymentSlipStatus as string) === "manual_approved") return true;
+      if (["accepted", "booked", "assigned", "goods_collected", "in_transit", "delivered"].includes(b.status)) {
+        return true;
+      }
+      return false;
+    };
+
+    const getPayTs = (b: StoredBooking): number => {
+      if (b.paymentApprovedAt && b.paymentApprovedAt > 0) return b.paymentApprovedAt;
+      if (b.paymentSlipUploadedAt && b.paymentSlipUploadedAt > 0) return b.paymentSlipUploadedAt;
+      return b.updatedAt || b.createdAt || clockTick;
+    };
+
+    const allPaid = bookings
+      .filter(isPaid)
+      .sort((a, b) => getPayTs(b) - getPayTs(a));
+
+    const todayStart = getSriLankaMidnightTimestamp(clockTick);
+    const todayEnd = todayStart + 86400000;
+    const yesterdayStart = todayStart - 86400000;
+    const yesterdayEnd = todayStart;
+
+    const slNow = new Date(clockTick + SRI_LANKA_OFFSET_MS);
+    const thisMonthStart = Date.UTC(slNow.getUTCFullYear(), slNow.getUTCMonth(), 1) - SRI_LANKA_OFFSET_MS;
+    const thisMonthEnd = Date.UTC(slNow.getUTCFullYear(), slNow.getUTCMonth() + 1, 1) - SRI_LANKA_OFFSET_MS;
+    const lastMonthStart = Date.UTC(slNow.getUTCFullYear(), slNow.getUTCMonth() - 1, 1) - SRI_LANKA_OFFSET_MS;
+    const lastMonthEnd = thisMonthStart;
+
+    const todayBookings = allPaid.filter((b) => {
+      const t = getPayTs(b);
+      return t >= todayStart && t < todayEnd;
+    });
+    const todayRevenue = todayBookings.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+
+    const thisMonthBookings = allPaid.filter((b) => {
+      const t = getPayTs(b);
+      return t >= thisMonthStart && t < thisMonthEnd;
+    });
+    const thisMonthRevenue = thisMonthBookings.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+
+    const allTimeRevenue = allPaid.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+
+    let rangeStart = 0;
+    let rangeEnd = Infinity;
+    if (revenueFilter === "today") {
+      rangeStart = todayStart;
+      rangeEnd = todayEnd;
+    } else if (revenueFilter === "yesterday") {
+      rangeStart = yesterdayStart;
+      rangeEnd = yesterdayEnd;
+    } else if (revenueFilter === "pick_date") {
+      if (revenueSelectedDate) {
+        const parts = revenueSelectedDate.split("-").map(Number);
+        if (parts.length === 3 && !parts.some(isNaN)) {
+          rangeStart = Date.UTC(parts[0], parts[1] - 1, parts[2]) - SRI_LANKA_OFFSET_MS;
+          rangeEnd = rangeStart + 86400000;
+        }
+      }
+    } else if (revenueFilter === "days_count") {
+      const safeDays = Math.max(1, Math.min(3650, Number(revenueDaysCount) || 1));
+      rangeStart = todayStart - (safeDays - 1) * 86400000;
+      rangeEnd = todayEnd;
+    } else if (revenueFilter === "this_month") {
+      rangeStart = thisMonthStart;
+      rangeEnd = thisMonthEnd;
+    } else if (revenueFilter === "last_month") {
+      rangeStart = lastMonthStart;
+      rangeEnd = lastMonthEnd;
+    } else if (revenueFilter === "custom") {
+      if (revenueCustomStart) {
+        const parts = revenueCustomStart.split("-").map(Number);
+        if (parts.length === 3 && !parts.some(isNaN)) {
+          rangeStart = Date.UTC(parts[0], parts[1] - 1, parts[2]) - SRI_LANKA_OFFSET_MS;
+        }
+      }
+      if (revenueCustomEnd) {
+        const parts = revenueCustomEnd.split("-").map(Number);
+        if (parts.length === 3 && !parts.some(isNaN)) {
+          rangeEnd = Date.UTC(parts[0], parts[1] - 1, parts[2] + 1) - SRI_LANKA_OFFSET_MS;
+        }
+      }
+    }
+
+    const customRangeDaysCount =
+      revenueFilter === "custom" && revenueCustomStart && revenueCustomEnd && rangeEnd > rangeStart
+        ? Math.round((rangeEnd - rangeStart) / 86400000)
+        : 0;
+
+    const periodBookings = allPaid.filter((b) => {
+      const t = getPayTs(b);
+      if (t < rangeStart || t >= rangeEnd) return false;
+      if (revenueTypeFilter === "individual" && b.bookingType !== "individual_vehicle") return false;
+      if (revenueTypeFilter === "live_lorry" && b.bookingType === "individual_vehicle") return false;
+      if (revenueSearch.trim()) {
+        return matchesOnlineSearchQuery(b, revenueSearch) || matchesIndividualSearchQuery(b, revenueSearch);
+      }
+      return true;
+    });
+
+    const periodTotal = periodBookings.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+    const periodIndividual = periodBookings.filter((b) => b.bookingType === "individual_vehicle");
+    const periodLive = periodBookings.filter((b) => b.bookingType !== "individual_vehicle");
+    const periodIndividualRevenue = periodIndividual.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+    const periodLiveRevenue = periodLive.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+
+    const periodBankSlip = periodBookings.filter(
+      (b) => b.paymentMethod !== "cash_manual" && (b.paymentSlipId || b.paymentSlipStatus === "approved")
+    );
+    const periodCash = periodBookings.filter((b) => !periodBankSlip.includes(b));
+    const periodBankRevenue = periodBankSlip.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+    const periodCashRevenue = periodCash.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+
+    return {
+      todayDateStr: getSriLankaDateStr(clockTick),
+      todayBookingsCount: todayBookings.length,
+      todayRevenue,
+      thisMonthBookingsCount: thisMonthBookings.length,
+      thisMonthRevenue,
+      allTimeCount: allPaid.length,
+      allTimeRevenue,
+      periodBookings,
+      periodTotal,
+      periodIndividualCount: periodIndividual.length,
+      periodIndividualRevenue,
+      periodLiveCount: periodLive.length,
+      periodLiveRevenue,
+      periodBankCount: periodBankSlip.length,
+      periodBankRevenue,
+      periodCashCount: periodCash.length,
+      periodCashRevenue,
+      customRangeDaysCount,
+      getPayTs,
+    };
+  }, [
+    bookings,
+    clockTick,
+    revenueFilter,
+    revenueSelectedDate,
+    revenueDaysCount,
+    revenueCustomStart,
+    revenueCustomEnd,
+    revenueTypeFilter,
+    revenueSearch,
+    matchesOnlineSearchQuery,
+    matchesIndividualSearchQuery,
+  ]);
 
   const filteredFleet = fleetVehicles.filter((v) => {
     if (!lorrySearch.trim()) return true;
@@ -1692,9 +1980,10 @@ export default function MasterAdminDashboard() {
       pending: { cls: "bg-amber-50 text-amber-800 border-amber-200", label: "Pending Quote" },
       awaiting_payment: { cls: "bg-sky-50 text-sky-800 border-sky-200", label: "Awaiting Payment" },
       payment_submitted: { cls: "bg-purple-50 text-purple-800 border-purple-300 font-bold", label: "Slip Submitted — Review" },
-      accepted: { cls: "bg-emerald-50 text-emerald-800 border-emerald-300 font-bold", label: "Approved (Date Locked)" },
+      accepted: { cls: "bg-emerald-50 text-emerald-800 border-emerald-300 font-bold", label: "Approved" },
       booked: { cls: "bg-emerald-50 text-emerald-800 border-emerald-300 font-bold", label: "Booked" },
       assigned: { cls: "bg-green-50 text-green-800 border-green-200", label: "Driver Assigned" },
+      goods_collected: { cls: "bg-teal-50 text-teal-900 border-teal-300 font-bold", label: "📦 Goods Collected by Rider" },
       in_transit: { cls: "bg-blue-50 text-blue-800 border-blue-200", label: "In Transit" },
       delivered: { cls: "bg-gray-100 text-gray-700 border-gray-200", label: "Delivered" },
       cancelled: { cls: "bg-red-50 text-red-700 border-red-200", label: "Cancelled" },
@@ -1818,9 +2107,11 @@ export default function MasterAdminDashboard() {
         <div className="flex flex-col">
           <div className="p-5 border-b border-white/10 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-[#FFC20E] flex items-center justify-center font-black text-[#26231B] text-sm shadow-sm">
-                ST
-              </div>
+              <img
+                src="/logo.png"
+                alt="Sithumina Transport Logo"
+                className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0"
+              />
               <div>
                 <span className="font-black text-sm tracking-tight block">Sithumina Admin</span>
                 <span className="text-[10px] text-white/50 block">Command Center</span>
@@ -1923,6 +2214,34 @@ export default function MasterAdminDashboard() {
                   activeNav === "online_bookings" ? "bg-[#26231B] text-[#FFC20E]" : "bg-amber-400 text-[#26231B]"
                 }`}>
                   {pendingOnlineCount}
+                </span>
+              )}
+            </button>
+
+            {/* Revenue & Financials */}
+            <button
+              onClick={() => {
+                setActiveNav("revenue");
+                setSidebarOpen(false);
+              }}
+              className={`w-full px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all text-left flex items-center justify-between cursor-pointer ${
+                activeNav === "revenue"
+                  ? "bg-[#FFC20E] text-[#26231B]"
+                  : "text-white/75 hover:bg-white/10 hover:text-white"
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="1" x2="12" y2="23" />
+                  <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+                </svg>
+                <span>Revenue &amp; Financials</span>
+              </div>
+              {!loadingBookings && revenueData.todayRevenue > 0 && (
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold ${
+                  activeNav === "revenue" ? "bg-[#26231B] text-[#FFC20E]" : "bg-emerald-500/20 text-emerald-300"
+                }`}>
+                  Rs
                 </span>
               )}
             </button>
@@ -2118,6 +2437,7 @@ export default function MasterAdminDashboard() {
                 {activeNav === "overview" && "Executive Dashboard Overview"}
                 {activeNav === "individual_bookings" && "Individual Vehicle Bookings"}
                 {activeNav === "online_bookings" && "Online / Live Lorry Bookings"}
+                {activeNav === "revenue" && "Revenue"}
                 {activeNav === "vehicle_registrations" && "Vehicle & Partner Registrations"}
                 {activeNav === "contact_submissions" && "Contact Inquiries & Support"}
                 {activeNav === "fleet" && "Fleet Lorries Management"}
@@ -2125,7 +2445,9 @@ export default function MasterAdminDashboard() {
                 {activeNav === "settings" && "System & Payment Settings"}
               </h1>
               <p className="text-[11px] text-[#6F6A5A]">
-                {activeNav === "vehicle_registrations"
+                {activeNav === "revenue"
+                  ? "Individual & Live Lorry · Resets daily at 12:00 AM"
+                  : activeNav === "vehicle_registrations"
                   ? "Incoming lorry partner applications from /register-vehicle"
                   : activeNav === "contact_submissions"
                   ? "Direct customer inquiries & rate quotes from /contact"
@@ -2136,6 +2458,11 @@ export default function MasterAdminDashboard() {
 
           {/* Quick Header Actions */}
           <div className="flex items-center gap-2">
+            {activeNav === "revenue" && (
+              <div className="px-3 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-xs font-mono font-bold text-[#26231B] whitespace-nowrap shrink-0">
+                {revenueData.todayDateStr}
+              </div>
+            )}
             {activeNav === "vehicle_registrations" && (
               <a
                 href="/register-vehicle"
@@ -2296,6 +2623,33 @@ export default function MasterAdminDashboard() {
 
               {/* Quick Jump Modules */}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {/* Revenue & Financials Quick Jump */}
+                <div className="p-5 rounded-3xl bg-gradient-to-br from-[#26231B] to-[#3A3529] text-white border border-[#FFC20E]/40 shadow-sm flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <h2 className="text-base font-black text-white">Today&apos;s Revenue</h2>
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 text-[10px] font-bold">
+                        {revenueData.todayDateStr}
+                      </span>
+                    </div>
+                    <p className="text-2xl font-black text-[#FFC20E] font-mono mt-2">
+                      Rs. {loadingBookings ? "..." : revenueData.todayRevenue.toLocaleString()}
+                    </p>
+                    <p className="text-[11px] text-white/70 mt-1">
+                      Resets daily at 12:00 AM midnight • {revenueData.todayBookingsCount} paid today
+                    </p>
+                    <div className="mt-3 pt-3 border-t border-white/10 flex flex-wrap items-center gap-3 text-xs font-bold text-white/90">
+                      <span>This Month: Rs. {loadingBookings ? "..." : revenueData.thisMonthRevenue.toLocaleString()}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setActiveNav("revenue")}
+                    className="mt-5 w-full py-2.5 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] text-[#26231B] text-xs font-black transition-colors cursor-pointer shadow-xs"
+                  >
+                    Open Revenue & History →
+                  </button>
+                </div>
+
                 <div className="p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
                   <div>
                     <h2 className="text-base font-black text-[#26231B]">Individual Vehicle Bookings</h2>
@@ -3303,11 +3657,27 @@ export default function MasterAdminDashboard() {
                                           updateBooking(b.id, "cancelled");
                                         }
                                       }}
-                                      className="px-3 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 text-xs font-bold transition-colors cursor-pointer"
+                                      className="px-3 py-2 rounded-xl border border-amber-300 text-amber-800 hover:bg-amber-50 text-xs font-bold transition-colors cursor-pointer"
                                     >
                                       Reject / Cancel
                                     </button>
                                   )}
+
+                                  <button
+                                    type="button"
+                                    disabled={actionLoading === b.id}
+                                    onClick={() => handleDeleteBooking(b.id)}
+                                    className="px-3 py-2 rounded-xl border border-red-300 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-black transition-colors cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                                    title="Permanently Delete Booking from Database"
+                                  >
+                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                      <polyline points="3 6 5 6 21 6" />
+                                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                                      <line x1="10" y1="11" x2="10" y2="17" />
+                                      <line x1="14" y1="11" x2="14" y2="17" />
+                                    </svg>
+                                    <span>Delete</span>
+                                  </button>
                                 </div>
                               </div>
                             </div>
@@ -3393,13 +3763,14 @@ export default function MasterAdminDashboard() {
                 </div>
               )}
             </div>
-          )}
+          )}
 
           {/* ========================================================= */}
           {/* TAB 3: ONLINE / LIVE LORRY BOOKINGS                       */}
           {/* ========================================================= */}
           {activeNav === "online_bookings" && (
             <div className="flex flex-col gap-4">
+              {/* Header Card with Title and Counts */}
               <div className="flex items-center justify-between bg-white p-4 rounded-2xl border border-[#E7E2D0]">
                 <div>
                   <h2 className="text-sm font-black text-[#26231B]">Live / Empty Return Bookings</h2>
@@ -3410,73 +3781,1034 @@ export default function MasterAdminDashboard() {
                 </span>
               </div>
 
+              {/* Status Filters + Search Toolbar */}
+              <div className="flex flex-col gap-3 bg-white p-3.5 sm:p-4 rounded-2xl border border-[#E7E2D0] shadow-xs">
+                {/* Status Filter Buttons */}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-1.5 text-xs font-bold">
+                    {([
+                      { key: "all", label: "All" },
+                      { key: "pending", label: "Pending Quote" },
+                      { key: "awaiting_payment", label: "Awaiting Pay" },
+                      { key: "payment_submitted", label: "Slip Review" },
+                      { key: "accepted", label: "Approved" },
+                      { key: "assigned", label: "Assigned" },
+                      { key: "completed", label: "Completed" },
+                    ] as { key: StatusFilter; label: string }[]).map((st) => (
+                      <button
+                        key={st.key}
+                        type="button"
+                        onClick={() => setStatusFilter(st.key)}
+                        className={`px-3 py-1 rounded-lg transition-all cursor-pointer ${
+                          statusFilter === st.key
+                            ? "bg-[#FFC20E] text-[#26231B] font-black"
+                            : "text-[#6F6A5A] hover:bg-[#F7F5EE]"
+                        }`}
+                      >
+                        {st.label}
+                        {st.key === "pending" && pendingOnlineCount > 0 ? ` (${pendingOnlineCount})` : ""}
+                        {st.key === "payment_submitted" && onlineSlipReviewCount > 0 ? ` (${onlineSlipReviewCount})` : ""}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Search Box + Accordion Toolbar */}
+                <div className="pt-3 border-t border-[#E7E2D0] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="relative flex-1 min-w-0">
+                    <span
+                      aria-hidden="true"
+                      className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#6F6A5A] pointer-events-none"
+                    >
+                      <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <circle cx="11" cy="11" r="8" />
+                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                      </svg>
+                    </span>
+                    <input
+                      type="text"
+                      aria-label="Search live bookings by date, customer name, phone, lorry plate, corridor, or cargo"
+                      placeholder="Search date, customer name, phone, lorry plate, corridor, cargo..."
+                      value={onlineSearch}
+                      onChange={(e) => setOnlineSearch(e.target.value)}
+                      className="w-full pl-9 pr-9 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B] placeholder:text-[#8A836E] transition-colors"
+                    />
+                    {onlineSearch.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setOnlineSearch("")}
+                        aria-label="Clear live booking search"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 w-6 h-6 rounded-lg bg-[#E7E2D0]/70 hover:bg-[#FFC20E] text-[#26231B] flex items-center justify-center text-xs font-black transition-colors cursor-pointer"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2 flex-shrink-0">
+                    <span className="px-2.5 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-[11px] font-bold text-[#6F6A5A]">
+                      Showing <b className="text-[#26231B]">{filteredOnlineBookings.length}</b> of{" "}
+                      <b className="text-[#26231B]">{onlineBookings.length}</b>
+                    </span>
+
+                    {filteredOnlineBookings.length > 0 && (() => {
+                      const allExpanded = filteredOnlineBookings.every((b, idx) =>
+                        expandedOnlineBookings[b.id] !== undefined
+                          ? expandedOnlineBookings[b.id]
+                          : idx === 0 || b.status === "pending" || b.status === "payment_submitted"
+                      );
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextState: Record<string, boolean> = { ...expandedOnlineBookings };
+                            filteredOnlineBookings.forEach((b) => {
+                              nextState[b.id] = !allExpanded;
+                            });
+                            setExpandedOnlineBookings(nextState);
+                          }}
+                          className="px-3 py-1.5 rounded-xl border border-[#E7E2D0] bg-white hover:bg-[#FFF4D1] hover:border-[#F0CE68] text-[#26231B] text-[11px] font-black transition-colors cursor-pointer"
+                        >
+                          {allExpanded ? "Collapse All" : "Expand All"}
+                        </button>
+                      );
+                    })()}
+                  </div>
+                </div>
+              </div>
+
               {loadingBookings ? (
                 <div className="p-12 text-center rounded-3xl bg-white border border-[#E7E2D0]">
                   <p className="text-sm font-bold text-[#6F6A5A]">Loading live bookings from Firestore...</p>
                 </div>
               ) : filteredOnlineBookings.length === 0 ? (
                 <div className="p-12 text-center rounded-3xl bg-white border border-[#E7E2D0]">
-                  <p className="text-sm font-bold text-[#6F6A5A]">No live lorry bookings currently.</p>
+                  <p className="text-sm font-bold text-[#6F6A5A]">
+                    {onlineSearch.trim() || statusFilter !== "all"
+                      ? "No live bookings match your current filter or search."
+                      : "No live lorry bookings currently."}
+                  </p>
+                  {(onlineSearch.trim() || statusFilter !== "all") && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOnlineSearch("");
+                        setStatusFilter("all");
+                      }}
+                      className="mt-3 px-4 py-1.5 rounded-xl bg-[#26231B] text-[#FFC20E] text-xs font-black hover:bg-[#3D3A31] transition-colors cursor-pointer"
+                    >
+                      Reset Filter &amp; Search
+                    </button>
+                  )}
                 </div>
               ) : (
-                filteredOnlineBookings.map((b) => (
-                  <div
-                    key={b.id}
-                    className="p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col gap-4"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E7E2D0] pb-3">
-                      <div className="flex items-center gap-2">
-                        <span className="px-2.5 py-1 rounded-lg bg-[#FFC20E] text-[#26231B] text-xs font-black font-mono">
-                          Live Lorry Booking
-                        </span>
-                        <span className="text-xs font-bold text-[#26231B]">{b.customerName}</span>
-                      </div>
-                      <StatusBadge status={b.status} />
-                    </div>
+                filteredOnlineBookings.map((b, idx) => {
+                  const quoteDraft = quoteInputs[b.id] || {
+                    amount: b.quotedAmount ? String(b.quotedAmount) : "",
+                    note: b.quoteNote || "",
+                  };
+                  const hasStoredSlip = Boolean(b.paymentSlipId && b.paymentSlipStatus !== "deleted");
+                  const isQuoted = Boolean(b.quotedAmount && b.quotedAmount > 0);
+                  const isExpanded =
+                    expandedOnlineBookings[b.id] !== undefined
+                      ? expandedOnlineBookings[b.id]
+                      : idx === 0 || b.status === "pending" || b.status === "payment_submitted";
+                  const requestTiming = formatBookingDateTime(b.createdAt);
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs bg-[#F7F5EE] p-3.5 rounded-2xl border border-[#E7E2D0]">
-                      <div>
-                        <span className="text-[#6F6A5A]">Phone: </span>
-                        {b.customerPhone ? (
-                          <a
-                            href={`tel:${String(b.customerPhone || "").replace(/\s+/g, "")}`}
-                            className="font-bold text-[#1E9E5A] font-mono hover:underline"
-                          >
-                            {b.customerPhone}
-                          </a>
-                        ) : (
-                          <span className="text-[#6F6A5A] italic font-mono">Not provided</span>
-                        )}
-                        <div className="mt-1">
-                          <span className="text-[#6F6A5A]">Route: </span>
-                          <b>{b.pickupCity}</b> → <b>{b.deliveryCity}</b>
+                  return (
+                    <div
+                      key={b.id}
+                      className={`rounded-2xl bg-white border overflow-hidden shadow-xs transition-all duration-200 hover:shadow-md ${
+                        b.status === "payment_submitted"
+                          ? "border-purple-300 ring-1 ring-purple-200/70"
+                          : b.status === "pending"
+                            ? "border-[#FFC20E] ring-1 ring-[#FFC20E]/35"
+                            : b.status === "cancelled"
+                              ? "border-red-200/90"
+                              : "border-[#E7E2D0] hover:border-[#D6CEB8]"
+                      }`}
+                    >
+                      {/* Top Status Accent Strip */}
+                      <div
+                        aria-hidden="true"
+                        className={`h-1 w-full ${
+                          b.status === "cancelled"
+                            ? "bg-red-400"
+                            : b.status === "delivered"
+                              ? "bg-slate-400"
+                              : ["accepted", "booked", "assigned", "in_transit", "goods_collected"].includes(b.status)
+                                ? "bg-gradient-to-r from-[#10B981] to-[#137333]"
+                                : b.status === "payment_submitted"
+                                  ? "bg-gradient-to-r from-purple-500 to-indigo-600"
+                                  : "bg-gradient-to-r from-[#FFC20E] to-[#E6A800]"
+                        }`}
+                      />
+
+                      {/* Accordion Header Button with Arrow */}
+                      <button
+                        type="button"
+                        onClick={() => toggleOnlineBookingCard(b.id, isExpanded)}
+                        aria-expanded={isExpanded}
+                        aria-label={`${
+                          isExpanded ? "Minimize live booking details" : "Open live booking details"
+                        } for #${b.id}`}
+                        className="relative w-full text-left border-0 bg-transparent px-4 pt-4 pb-3.5 sm:px-5 sm:pt-4 sm:pb-4 pr-14 sm:pr-16 hover:bg-[#FAF8F2]/80 transition-colors cursor-pointer group"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2.5 min-w-0">
+                          {/* Left: Plate + Badge + Booking ID + Customer Name */}
+                          <div className="flex items-center gap-2 flex-wrap min-w-0">
+                            <span className="px-2.5 py-1 rounded-lg bg-[#26231B] text-[#FFC20E] text-xs font-black font-mono tracking-wider shadow-xs">
+                              {b.assignedPlate || b.selectedVehiclePlate || "Live Lorry"}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-md bg-[#FFF4D1] text-[#7A5A00] text-[11px] font-black font-mono">
+                              Live Booking
+                            </span>
+                            <span className="px-2 py-0.5 rounded-lg bg-[#F7F5EE] border border-[#D8D0B8] text-[#26231B] text-xs font-black font-mono tracking-wide">
+                              #{b.id}
+                            </span>
+                            <span className="text-xs sm:text-sm font-black text-[#26231B]">
+                              {b.customerName}
+                            </span>
+                          </div>
+
+                          {/* Right: Quoted Amount + Status Badge */}
+                          <div className="flex flex-wrap items-center gap-2 flex-shrink-0">
+                            {isQuoted && (
+                              <span className="px-2.5 py-1 rounded-xl bg-amber-50 border border-amber-300 text-xs font-black text-amber-900 font-mono">
+                                Rs. {Number(b.quotedAmount).toLocaleString()}
+                              </span>
+                            )}
+                            <StatusBadge status={b.status} />
+                          </div>
                         </div>
-                      </div>
-                      <div>
-                        <div><span className="text-[#6F6A5A]">Date: </span><b>{b.date}</b></div>
-                        {b.packageDetails && <div className="mt-1 text-[#6F6A5A]"><b>Notes:</b> {b.packageDetails}</div>}
-                      </div>
+
+                        {/* Quick Info Row: Trip Date, Booked Timing, Customer Phone & Corridor */}
+                        <div className="mt-2.5 flex flex-wrap items-center gap-2 text-xs">
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#F7F5EE] border border-[#E7E2D0] text-[11.5px] font-bold text-[#26231B] font-mono">
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.3"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              className="text-[#6F6A5A] flex-shrink-0"
+                            >
+                              <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                              <line x1="16" y1="2" x2="16" y2="6" />
+                              <line x1="8" y1="2" x2="8" y2="6" />
+                              <line x1="3" y1="10" x2="21" y2="10" />
+                            </svg>
+                            <span>Trip Date: {b.date || "Today (Live)"}</span>
+                          </span>
+
+                          {requestTiming && (
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50/80 border border-amber-200 text-[11.5px] font-bold text-[#5B4300] font-mono">
+                              <svg
+                                width="12"
+                                height="12"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2.3"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                className="text-amber-700 flex-shrink-0"
+                              >
+                                <circle cx="12" cy="12" r="10" />
+                                <polyline points="12 6 12 12 16 14" />
+                              </svg>
+                              <span>Booked At: {requestTiming.display}</span>
+                            </span>
+                          )}
+
+                          <span className="inline-flex flex-wrap items-center gap-1.5 text-[12px] text-[#26231B] font-semibold">
+                            {b.customerPhone && (
+                              <span className="font-mono text-[#137333] font-bold">
+                                ({b.customerPhone})
+                              </span>
+                            )}
+                            <span className="text-[#6F6A5A]">
+                              · {b.pickupCity} → {b.deliveryCity}
+                            </span>
+                          </span>
+                        </div>
+
+                        {/* Top-Right Corner Arrow Button */}
+                        <span
+                          aria-hidden="true"
+                          title={isExpanded ? "Minimize Booking Details" : "Open Booking Details"}
+                          className={`absolute top-3.5 right-3.5 sm:top-4 sm:right-4 w-8 h-8 sm:w-9 sm:h-9 rounded-full border flex items-center justify-center transition-all duration-200 shadow-xs ${
+                            isExpanded
+                              ? "bg-[#FFF4D1] border-[#F0CE68] text-[#5B4300] group-hover:bg-[#FFE89D]"
+                              : "bg-[#F7F5EE] border-[#E7E2D0] text-[#26231B] group-hover:bg-[#FFF4D1] group-hover:border-[#F0CE68]"
+                          }`}
+                        >
+                          <svg
+                            width="16"
+                            height="16"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2.6"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            className={`transition-transform duration-200 ${
+                              isExpanded ? "rotate-180" : "rotate-0"
+                            }`}
+                          >
+                            <polyline points="6 9 12 15 18 9" />
+                          </svg>
+                        </span>
+                      </button>
+
+                      {/* Collapsible Details Panel */}
+                      {isExpanded && (
+                        <div className="px-4 pb-4 pt-3.5 sm:px-5 sm:pb-5 border-t border-[#E7E2D0] flex flex-col gap-4">
+                          {/* Assigned Lorry & Driver Information */}
+                          <div className="p-3 rounded-2xl bg-[#FFF9E6] border border-[#FFEBAC] flex flex-wrap items-center justify-between gap-2.5 text-xs">
+                            <div className="flex items-center gap-2">
+                              <span className="px-2 py-0.5 rounded-md bg-[#26231B] text-[#FFC20E] font-mono font-black text-[11px]">
+                                {b.assignedPlate || b.selectedVehiclePlate || "No Vehicle Locked"}
+                              </span>
+                              <span className="font-bold text-[#26231B]">
+                                {b.assignedDriverName || "Awaiting Driver Assignment"}
+                              </span>
+                            </div>
+                            {b.assignedDriverPhone && (
+                              <a
+                                href={`tel:${String(b.assignedDriverPhone).replace(/\s+/g, "")}`}
+                                className="font-mono font-bold text-[#1E9E5A] bg-white px-2.5 py-1 rounded-lg border border-[#1E9E5A]/30 flex items-center gap-1 hover:bg-[#1E9E5A] hover:text-white transition-colors"
+                              >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+                                </svg>
+                                <span>Driver: {b.assignedDriverPhone}</span>
+                              </a>
+                            )}
+                          </div>
+
+                          {/* Main Details Grid */}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs bg-[#F7F5EE] p-3.5 rounded-2xl border border-[#E7E2D0]">
+                            <div className="flex flex-col gap-1.5">
+                              <div>
+                                <span className="text-[#6F6A5A]">Customer Mobile: </span>
+                                {b.customerPhone ? (
+                                  <a
+                                    href={`tel:${String(b.customerPhone || "").replace(/\s+/g, "")}`}
+                                    className="font-bold text-[#1E9E5A] font-mono hover:underline"
+                                  >
+                                    {b.customerPhone}
+                                  </a>
+                                ) : (
+                                  <span className="text-[#6F6A5A] italic font-mono">Not provided</span>
+                                )}
+                              </div>
+                              <div>
+                                <span className="text-[#6F6A5A]">WhatsApp: </span>
+                                {b.customerWhatsapp || b.customerPhone ? (
+                                  <a
+                                    href={`https://wa.me/94${String(b.customerWhatsapp || b.customerPhone).replace(/[^0-9]/g, "").replace(/^0/, "")}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="font-bold text-[#1E9E5A] font-mono hover:underline inline-flex items-center gap-1"
+                                  >
+                                    <span>{b.customerWhatsapp || b.customerPhone}</span>
+                                    <span className="text-[10px] px-1 rounded bg-[#E8F8F0] text-[#1E9E5A]">Chat</span>
+                                  </a>
+                                ) : (
+                                  <span className="text-[#6F6A5A] italic">N/A</span>
+                                )}
+                              </div>
+                              <div>
+                                <span className="text-[#6F6A5A]">Trip Corridor: </span>
+                                <span className="font-bold text-[#26231B]">
+                                  {b.pickupCity} → {b.deliveryCity}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-col gap-1.5">
+                              <div>
+                                <span className="text-[#6F6A5A]">Date: </span>
+                                <b>{b.date || "Today"}</b>
+                              </div>
+                              <div>
+                                <span className="text-[#6F6A5A]">Cargo / Goods Nature: </span>
+                                <span className="font-bold text-[#26231B]">
+                                  {b.cargoNature || b.packageDetails || "General Cargo"}
+                                </span>
+                              </div>
+                              {b.cargoWeight && (
+                                <div>
+                                  <span className="text-[#6F6A5A]">Weight: </span>
+                                  <b>{b.cargoWeight}</b>
+                                </div>
+                              )}
+                              {b.packageDetails && b.packageDetails !== b.cargoNature && (
+                                <div className="text-[11px] text-[#6F6A5A] italic">
+                                  <b>Details:</b> {b.packageDetails}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Quoting & Fee Section */}
+                          <div className="p-3.5 rounded-2xl bg-amber-50/70 border border-amber-200 flex flex-col gap-2.5">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-black text-[#5B4300]">Price / Quotation Fee:</span>
+                                {isQuoted && (
+                                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-900 font-mono font-black text-xs">
+                                    Rs. {Number(b.quotedAmount).toLocaleString()}
+                                  </span>
+                                )}
+                              </div>
+                              {b.quoteNote && (
+                                <span className="text-[11px] text-[#8C6D00] italic">
+                                  Note: {b.quoteNote}
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Quote Inputs */}
+                            <div className="flex flex-wrap items-center gap-2 pt-1">
+                              <input
+                                type="text"
+                                placeholder="Quoted Amount (e.g. 15000)"
+                                value={quoteDraft.amount}
+                                onChange={(e) =>
+                                  setQuoteInputs((prev) => ({
+                                    ...prev,
+                                    [b.id]: { ...quoteDraft, amount: e.target.value },
+                                  }))
+                                }
+                                className="px-3 py-1.5 rounded-xl border border-amber-300 bg-white text-xs font-mono font-bold text-[#26231B] w-36 focus:outline-none"
+                              />
+                              <input
+                                type="text"
+                                placeholder="Optional Note to Customer"
+                                value={quoteDraft.note}
+                                onChange={(e) =>
+                                  setQuoteInputs((prev) => ({
+                                    ...prev,
+                                    [b.id]: { ...quoteDraft, note: e.target.value },
+                                  }))
+                                }
+                                className="px-3 py-1.5 rounded-xl border border-amber-300 bg-white text-xs text-[#26231B] flex-1 min-w-[160px] focus:outline-none"
+                              />
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  const amt = Number(String(quoteDraft.amount).replace(/[^0-9.]/g, ""));
+                                  if (!amt || amt <= 0) {
+                                    alert("Please enter a valid numeric quote amount");
+                                    return;
+                                  }
+                                  await updateBooking(b.id, "awaiting_payment", undefined, {
+                                    quotedAmount: amt,
+                                    quotedAt: Date.now(),
+                                    quoteNote: quoteDraft.note || "",
+                                  });
+                                }}
+                                className="px-4 py-1.5 rounded-xl bg-[#26231B] hover:bg-[#3D3A31] text-[#FFC20E] text-xs font-black transition-colors cursor-pointer"
+                              >
+                                {isQuoted ? "Update Quote" : "Send Quote (Rs.)"}
+                              </button>
+                              {["pending", "awaiting_payment", "payment_submitted"].includes(b.status) && (
+                                <button
+                                  type="button"
+                                  disabled={actionLoading === b.id}
+                                  onClick={() => handleManualApprovePayment(b)}
+                                  className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+                                >
+                                  Manual Approve (Cash)
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Manual Cash Approved Summary (when approved without customer slip) */}
+                          {!hasStoredSlip &&
+                            (b.paymentMethod === "cash_manual" || b.paymentSlipStatus === "manual_approved") && (
+                              <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-xs text-emerald-950">
+                                <span className="font-black text-emerald-900">
+                                  Cash / Direct Payment Approved Manually • Driver Contact Unlocked for Customer
+                                </span>
+                              </div>
+                            )}
+
+                          {/* Bank Payment Slip Review Section */}
+                          {hasStoredSlip && (
+                            <div className="p-3.5 rounded-2xl bg-purple-50 border border-purple-200 flex flex-wrap items-center justify-between gap-3 text-xs">
+                              <div className="flex items-center gap-2">
+                                <span className="w-2.5 h-2.5 rounded-full bg-purple-600 animate-pulse" />
+                                <span className="font-black text-purple-900">
+                                  Payment Slip Uploaded:
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md bg-purple-200 text-purple-900 font-mono text-[11px] font-bold">
+                                  {b.paymentSlipStatus || "pending_review"}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => openSlipReviewModal(b)}
+                                  className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold transition-colors cursor-pointer"
+                                >
+                                  View Bank Slip
+                                </button>
+                                {b.paymentSlipStatus !== "approved" && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleApproveSlipPayment(b)}
+                                    className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-colors cursor-pointer"
+                                  >
+                                    Approve Slip
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Action Buttons & Lifecycle Transitions */}
+                          <div className="flex flex-wrap items-center justify-end gap-2 pt-1 border-t border-[#E7E2D0]">
+                            <button
+                              type="button"
+                              onClick={() => openAssignModal(b)}
+                              className="px-3.5 py-1.5 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] text-[#26231B] text-xs font-black cursor-pointer shadow-xs"
+                            >
+                              {b.assignedPlate ? "Change Lorry/Driver" : "Assign Driver"}
+                            </button>
+
+                            {(b.status === "assigned" || b.status === "accepted") && (
+                              <span className="px-3 py-1.5 rounded-xl bg-teal-50 border border-teal-200 text-teal-800 text-xs font-bold flex items-center gap-1.5 shadow-2xs">
+                                <span className="w-2 h-2 rounded-full bg-teal-500 animate-pulse" />
+                                <span>⏳ Awaiting Rider to Collect Goods</span>
+                              </span>
+                            )}
+
+                            {b.status === "goods_collected" && (
+                              <span className="px-3 py-1.5 rounded-xl bg-teal-100 border border-teal-300 text-teal-900 text-xs font-black flex items-center gap-1.5 shadow-2xs">
+                                <span>📦 Goods Collected by Rider</span>
+                              </span>
+                            )}
+
+                            {b.status === "goods_collected" && (
+                              <button
+                                type="button"
+                                onClick={() => updateBooking(b.id, "in_transit")}
+                                className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-black cursor-pointer shadow-xs"
+                              >
+                                🚚 Mark In Transit
+                              </button>
+                            )}
+
+                            {["goods_collected", "in_transit"].includes(b.status) && (
+                              <button
+                                type="button"
+                                onClick={() => updateBooking(b.id, "delivered")}
+                                className="px-3.5 py-1.5 rounded-xl bg-gray-800 hover:bg-black text-white text-xs font-black cursor-pointer shadow-xs"
+                              >
+                                ✅ Mark Delivered
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              disabled={actionLoading === b.id}
+                              onClick={() => handleDeleteBooking(b.id)}
+                              className="px-3.5 py-1.5 rounded-xl border border-red-300 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-black transition-colors cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                              title="Permanently Delete Booking from Database"
+                            >
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="3 6 5 6 21 6" />
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                                <line x1="10" y1="11" x2="10" y2="17" />
+                                <line x1="14" y1="11" x2="14" y2="17" />
+                              </svg>
+                              <span>Delete</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB: REVENUE (INDIVIDUAL + LIVE LORRY)                    */}
+          {/* ========================================================= */}
+          {activeNav === "revenue" && (
+            <div className="flex flex-col gap-5">
+              {/* Top 3 Core KPI Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                {/* 1. Today's Revenue (Resets at Midnight) */}
+                <div className="p-5 rounded-2xl bg-[#26231B] text-white shadow-xs flex flex-col justify-between">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-white/60">
+                      Today
+                    </span>
+                    <span className="text-[11px] font-semibold text-emerald-400">
+                      {revenueData.todayBookingsCount} paid · 12 AM reset
+                    </span>
+                  </div>
+                  <div className="text-3xl font-black text-[#FFC20E] font-mono mt-2 tracking-tight">
+                    Rs. {revenueData.todayRevenue.toLocaleString()}
+                  </div>
+                </div>
+
+                {/* 2. This Month */}
+                <div className="p-5 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#6F6A5A]">
+                      This Month
+                    </span>
+                    <span className="text-[11px] font-semibold text-[#6F6A5A]">
+                      {revenueData.thisMonthBookingsCount} paid
+                    </span>
+                  </div>
+                  <div className="text-3xl font-black text-[#26231B] font-mono mt-2 tracking-tight">
+                    Rs. {revenueData.thisMonthRevenue.toLocaleString()}
+                  </div>
+                </div>
+
+                {/* 3. All-Time Total */}
+                <div className="p-5 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#6F6A5A]">
+                      All-Time
+                    </span>
+                    <span className="text-[11px] font-semibold text-[#6F6A5A]">
+                      {revenueData.allTimeCount} paid
+                    </span>
+                  </div>
+                  <div className="text-3xl font-black text-[#26231B] font-mono mt-2 tracking-tight">
+                    Rs. {revenueData.allTimeRevenue.toLocaleString()}
+                  </div>
+                </div>
+              </div>
+
+              {/* Stream & Payment Summary Strip for Selected Filter */}
+              <div className="bg-[#E7E2D0] rounded-2xl border border-[#E7E2D0] shadow-2xs grid grid-cols-2 lg:grid-cols-4 gap-px overflow-hidden">
+                <div className="bg-white p-4">
+                  <div className="text-[11px] font-bold text-[#6F6A5A] uppercase">
+                    Selected Total ({revenueData.periodBookings.length})
+                  </div>
+                  <div className="text-lg font-black text-[#26231B] font-mono mt-0.5">
+                    Rs. {revenueData.periodTotal.toLocaleString()}
+                  </div>
+                </div>
+                <div className="bg-white p-4">
+                  <div className="text-[11px] font-bold text-amber-800 uppercase">
+                    Individual ({revenueData.periodIndividualCount})
+                  </div>
+                  <div className="text-lg font-black text-[#26231B] font-mono mt-0.5">
+                    Rs. {revenueData.periodIndividualRevenue.toLocaleString()}
+                  </div>
+                </div>
+                <div className="bg-white p-4">
+                  <div className="text-[11px] font-bold text-emerald-800 uppercase">
+                    Live Lorry ({revenueData.periodLiveCount})
+                  </div>
+                  <div className="text-lg font-black text-[#26231B] font-mono mt-0.5">
+                    Rs. {revenueData.periodLiveRevenue.toLocaleString()}
+                  </div>
+                </div>
+                <div className="bg-white p-4">
+                  <div className="text-[11px] font-bold text-[#6F6A5A] uppercase">
+                    Bank Slip / Cash
+                  </div>
+                  <div className="text-sm font-black text-[#26231B] font-mono mt-1">
+                    Rs. {revenueData.periodBankRevenue.toLocaleString()}{" "}
+                    <span className="text-[#6F6A5A] font-normal">/</span> Rs.{" "}
+                    {revenueData.periodCashRevenue.toLocaleString()}
+                  </div>
+                </div>
+              </div>
+
+              {/* Compact Filter & Search Toolbar */}
+              <div className="p-3.5 rounded-2xl bg-white border border-[#E7E2D0] shadow-2xs flex flex-col gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-2.5">
+                  {/* Time Filters */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {(
+                      [
+                        { id: "today", label: "Today" },
+                        { id: "yesterday", label: "Yesterday" },
+                        { id: "pick_date", label: "Pick Date" },
+                        { id: "days_count", label: "By Days" },
+                        { id: "this_month", label: "This Month" },
+                        { id: "last_month", label: "Last Month" },
+                        { id: "custom", label: "Date Range" },
+                        { id: "all_time", label: "All Time" },
+                      ] as const
+                    ).map((f) => {
+                      const isActive = revenueFilter === f.id;
+                      return (
+                        <button
+                          key={f.id}
+                          type="button"
+                          onClick={() => setRevenueFilter(f.id)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                            isActive
+                              ? "bg-[#26231B] text-[#FFC20E]"
+                              : "bg-[#F7F5EE] hover:bg-[#EBE7D8] text-[#26231B]"
+                          }`}
+                        >
+                          {f.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Stream Filters + Search */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1 bg-[#F7F5EE] p-1 rounded-xl border border-[#E7E2D0]">
+                      {(
+                        [
+                          { id: "all", label: "All" },
+                          { id: "individual", label: "Individual" },
+                          { id: "live_lorry", label: "Live" },
+                        ] as const
+                      ).map((t) => {
+                        const isActive = revenueTypeFilter === t.id;
+                        return (
+                          <button
+                            key={t.id}
+                            type="button"
+                            onClick={() => setRevenueTypeFilter(t.id)}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                              isActive
+                                ? "bg-[#FFC20E] text-[#26231B] shadow-2xs"
+                                : "text-[#6F6A5A] hover:text-[#26231B]"
+                            }`}
+                          >
+                            {t.label}
+                          </button>
+                        );
+                      })}
                     </div>
 
-                    <div className="flex items-center justify-end gap-2">
-                      {b.status === "pending" && (
+                    <div className="relative min-w-[210px] sm:w-64">
+                      <input
+                        type="text"
+                        placeholder="Search ID, name, plate..."
+                        value={revenueSearch}
+                        onChange={(e) => setRevenueSearch(e.target.value)}
+                        className="w-full pl-8 pr-7 py-1.5 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] focus:outline-none focus:border-[#26231B] placeholder-[#A49F8F]"
+                      />
+                      <svg
+                        className="absolute left-2.5 top-2 w-3.5 h-3.5 text-[#A49F8F]"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                        />
+                      </svg>
+                      {revenueSearch && (
                         <button
-                          onClick={() => updateBooking(b.id, "accepted")}
-                          className="px-3.5 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-black cursor-pointer"
+                          type="button"
+                          onClick={() => setRevenueSearch("")}
+                          className="absolute right-2 top-1.5 text-[#A49F8F] hover:text-[#26231B] text-xs font-bold cursor-pointer"
                         >
-                          Accept
+                          ✕
                         </button>
                       )}
-                      <button
-                        onClick={() => openAssignModal(b)}
-                        className="px-3.5 py-1.5 rounded-xl bg-[#FFC20E] text-[#26231B] text-xs font-black cursor-pointer"
-                      >
-                        Assign Driver
-                      </button>
                     </div>
                   </div>
-                ))
-              )}
+                </div>
+
+                {/* Pick Single Date */}
+                {revenueFilter === "pick_date" && (
+                  <div className="flex flex-wrap items-center gap-2 pt-2.5 border-t border-[#E7E2D0]">
+                    <span className="text-xs font-bold text-[#6F6A5A]">Date</span>
+                    <input
+                      type="date"
+                      value={revenueSelectedDate}
+                      onChange={(e) => setRevenueSelectedDate(e.target.value)}
+                      className="px-2.5 py-1 rounded-lg border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B] focus:outline-none focus:border-[#26231B]"
+                    />
+                    {revenueSelectedDate !== revenueData.todayDateStr && (
+                      <button
+                        type="button"
+                        onClick={() => setRevenueSelectedDate(revenueData.todayDateStr)}
+                        className="px-2.5 py-1 rounded-lg bg-[#F7F5EE] hover:bg-[#EBE7D8] text-xs font-bold text-[#26231B] cursor-pointer"
+                      >
+                        Today
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Filter by Number of Days */}
+                {revenueFilter === "days_count" && (
+                  <div className="flex flex-wrap items-center gap-2 pt-2.5 border-t border-[#E7E2D0]">
+                    <span className="text-xs font-bold text-[#6F6A5A]">Last</span>
+                    {[3, 7, 14, 30, 60].map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => setRevenueDaysCount(d)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                          revenueDaysCount === d
+                            ? "bg-[#FFC20E] text-[#26231B]"
+                            : "bg-[#F7F5EE] hover:bg-[#EBE7D8] text-[#26231B]"
+                        }`}
+                      >
+                        {d}d
+                      </button>
+                    ))}
+                    <div className="flex items-center gap-1.5 ml-1">
+                      <input
+                        type="number"
+                        min={1}
+                        max={3650}
+                        value={revenueDaysCount}
+                        onChange={(e) => setRevenueDaysCount(Math.max(1, Number(e.target.value) || 1))}
+                        className="w-16 px-2.5 py-1 rounded-lg border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B] focus:outline-none focus:border-[#26231B]"
+                      />
+                      <span className="text-xs font-bold text-[#6F6A5A]">days</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Custom Date Range Pickers */}
+                {revenueFilter === "custom" && (
+                  <div className="flex flex-wrap items-center gap-2 pt-2.5 border-t border-[#E7E2D0]">
+                    <span className="text-xs font-bold text-[#6F6A5A]">From</span>
+                    <input
+                      type="date"
+                      value={revenueCustomStart}
+                      onChange={(e) => setRevenueCustomStart(e.target.value)}
+                      className="px-2.5 py-1 rounded-lg border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B] focus:outline-none"
+                    />
+                    <span className="text-xs font-bold text-[#6F6A5A]">To</span>
+                    <input
+                      type="date"
+                      value={revenueCustomEnd}
+                      onChange={(e) => setRevenueCustomEnd(e.target.value)}
+                      className="px-2.5 py-1 rounded-lg border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B] focus:outline-none"
+                    />
+                    {revenueData.customRangeDaysCount > 0 && (
+                      <span className="px-2 py-0.5 rounded-lg bg-[#26231B] text-[#FFC20E] text-[11px] font-bold font-mono">
+                        {revenueData.customRangeDaysCount} {revenueData.customRangeDaysCount === 1 ? "day" : "days"}
+                      </span>
+                    )}
+                    {(revenueCustomStart || revenueCustomEnd) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRevenueCustomStart("");
+                          setRevenueCustomEnd("");
+                        }}
+                        className="px-2 py-1 text-xs text-red-600 hover:underline cursor-pointer font-bold"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Booking Payment History Table */}
+              <div className="bg-white rounded-2xl border border-[#E7E2D0] shadow-xs overflow-hidden flex flex-col">
+                <div className="px-5 py-3.5 border-b border-[#E7E2D0] flex items-center justify-between bg-[#FCFBF7]">
+                  <h3 className="text-xs font-black uppercase tracking-wider text-[#26231B]">
+                    Payment History
+                  </h3>
+                  <span className="text-xs font-mono font-bold text-[#6F6A5A]">
+                    {revenueData.periodBookings.length} records · Rs.{" "}
+                    {revenueData.periodTotal.toLocaleString()}
+                  </span>
+                </div>
+
+                {loadingBookings ? (
+                  <div className="p-10 text-center text-xs text-[#6F6A5A]">
+                    Loading...
+                  </div>
+                ) : revenueData.periodBookings.length === 0 ? (
+                  <div className="p-10 text-center flex flex-col items-center gap-2">
+                    <p className="text-xs font-bold text-[#6F6A5A]">
+                      No paid bookings found for this filter.
+                    </p>
+                    {(revenueSearch || revenueFilter !== "all_time" || revenueTypeFilter !== "all") && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRevenueSearch("");
+                          setRevenueFilter("all_time");
+                          setRevenueTypeFilter("all");
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-[#26231B] text-white text-xs font-bold hover:bg-[#FFC20E] hover:text-[#26231B] transition-colors cursor-pointer"
+                      >
+                        Show All History
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="border-b border-[#E7E2D0] bg-[#F7F5EE] text-[11px] font-bold text-[#6F6A5A] uppercase">
+                          <th className="py-2.5 px-4">Booking</th>
+                          <th className="py-2.5 px-4">Date</th>
+                          <th className="py-2.5 px-4">Customer</th>
+                          <th className="py-2.5 px-4">Vehicle / Route</th>
+                          <th className="py-2.5 px-4">Method</th>
+                          <th className="py-2.5 px-4 text-right">Amount</th>
+                          <th className="py-2.5 px-4">Status</th>
+                          <th className="py-2.5 px-4 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#E7E2D0] text-xs">
+                        {revenueData.periodBookings.map((b) => {
+                          const isIndiv = b.bookingType === "individual_vehicle";
+                          const payTs = revenueData.getPayTs(b);
+                          const dateObj = new Date(payTs + SRI_LANKA_OFFSET_MS);
+                          const dateStr = dateObj.toISOString().slice(0, 10);
+                          const h24 = dateObj.getUTCHours();
+                          const mins = String(dateObj.getUTCMinutes()).padStart(2, "0");
+                          const ampm = h24 >= 12 ? "PM" : "AM";
+                          const h12 = h24 % 12 || 12;
+                          const timeStr = `${String(h12).padStart(2, "0")}:${mins} ${ampm}`;
+                          const amount = Number(b.quotedAmount || 0);
+
+                          return (
+                            <tr
+                              key={b.id}
+                              className="hover:bg-[#FCFBF7] transition-colors"
+                            >
+                              <td className="py-3 px-4">
+                                <div className="font-mono font-bold text-[#26231B]">{b.id}</div>
+                                <span
+                                  className={`inline-block mt-0.5 text-[10px] font-bold ${
+                                    isIndiv ? "text-amber-700" : "text-emerald-700"
+                                  }`}
+                                >
+                                  {isIndiv ? "Individual" : "Live Lorry"}
+                                </span>
+                              </td>
+
+                              <td className="py-3 px-4 font-mono">
+                                <div className="font-semibold text-[#26231B]">{dateStr}</div>
+                                <div className="text-[11px] text-[#6F6A5A]">{timeStr}</div>
+                              </td>
+
+                              <td className="py-3 px-4">
+                                <div className="font-bold text-[#26231B]">{b.customerName || "Customer"}</div>
+                                <div className="text-[11px] text-[#6F6A5A] font-mono">
+                                  {b.customerPhone || "-"}
+                                </div>
+                              </td>
+
+                              <td className="py-3 px-4">
+                                <div className="font-bold text-[#26231B]">
+                                  {b.assignedPlate || b.selectedVehiclePlate || b.vehicleType || "Lorry"}
+                                </div>
+                                <div className="text-[11px] text-[#6F6A5A]">
+                                  {b.pickupCity} → {b.deliveryCity}
+                                </div>
+                              </td>
+
+                              <td className="py-3 px-4 font-semibold">
+                                {b.paymentSlipId || b.paymentSlipStatus === "approved" ? (
+                                  <span className="text-purple-800">Bank Slip</span>
+                                ) : (
+                                  <span className="text-blue-800">Direct / Cash</span>
+                                )}
+                              </td>
+
+                              <td className="py-3 px-4 text-right font-mono font-black text-[#26231B]">
+                                Rs. {amount.toLocaleString()}
+                              </td>
+
+                              <td className="py-3 px-4">
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[11px] font-bold capitalize ${
+                                    b.status === "delivered"
+                                      ? "bg-gray-100 text-gray-800"
+                                      : b.status === "in_transit"
+                                      ? "bg-blue-100 text-blue-800"
+                                      : b.status === "goods_collected"
+                                      ? "bg-teal-100 text-teal-800"
+                                      : "bg-emerald-100 text-emerald-800"
+                                  }`}
+                                >
+                                  {b.status.replace("_", " ")}
+                                </span>
+                              </td>
+
+                              <td className="py-3 px-4 text-right">
+                                <div className="inline-flex items-center gap-1.5">
+                                  {(b.paymentSlipId || b.paymentSlipStatus === "approved") && (
+                                    <button
+                                      type="button"
+                                      onClick={() => openSlipReviewModal(b)}
+                                      className="px-2 py-1 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-800 font-bold text-[11px] transition-colors cursor-pointer"
+                                    >
+                                      Slip
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setStatusFilter("all");
+                                      if (isIndiv) {
+                                        setActiveNav("individual_bookings");
+                                        setBookingViewSubTab("list");
+                                        setIndividualSearch(b.id);
+                                      } else {
+                                        setActiveNav("online_bookings");
+                                        setOnlineSearch(b.id);
+                                        setExpandedOnlineBookings((prev) => ({ ...prev, [b.id]: true }));
+                                      }
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg bg-[#26231B] hover:bg-[#FFC20E] text-white hover:text-[#26231B] font-bold text-[11px] transition-colors cursor-pointer"
+                                  >
+                                    View →
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      <tfoot>
+                        <tr className="bg-[#FCFBF7] border-t border-[#E7E2D0] text-xs font-black text-[#26231B]">
+                          <td colSpan={5} className="py-3 px-4 text-right text-[#6F6A5A]">
+                            Total ({revenueData.periodBookings.length})
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono text-sm">
+                            Rs. {revenueData.periodTotal.toLocaleString()}
+                          </td>
+                          <td colSpan={2} />
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -3607,7 +4939,7 @@ export default function MasterAdminDashboard() {
                 </div>
               )}
             </div>
-          )}
+          )}
 
           {/* ========================================================= */}
           {/* TAB 5: RIDERS & DRIVERS REGISTRY                          */}
@@ -3710,7 +5042,7 @@ export default function MasterAdminDashboard() {
                 </div>
               )}
             </div>
-          )}
+          )}
 
           {/* ========================================================= */}
           {/* TAB 6: SYSTEM & PAYMENT SETTINGS (Bank Accounts & Slips)  */}
@@ -4286,7 +5618,7 @@ export default function MasterAdminDashboard() {
                 </div>
               )}
             </div>
-          )}
+          )}
 
           {/* ========================================================= */}
           {/* TAB 8: CONTACT INQUIRIES & SUPPORT                        */}
@@ -4533,7 +5865,7 @@ export default function MasterAdminDashboard() {
                 </div>
               )}
             </div>
-          )}
+          )}
         </main>
       </div>
 

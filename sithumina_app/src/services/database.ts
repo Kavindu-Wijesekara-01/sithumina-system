@@ -1145,7 +1145,7 @@ export interface BookingRecord {
   date: string;
   vehicleType: string;
   packageDetails?: string;
-  status: "pending" | "assigned" | "in_transit" | "delivered" | "cancelled";
+  status: "pending" | "assigned" | "goods_collected" | "in_transit" | "delivered" | "cancelled";
   assignedLorryId?: string;
   assignedDriverName?: string;
   assignedDriverPhone?: string;
@@ -1519,7 +1519,7 @@ export function subscribeAdminBookings(
 
 export async function updateBookingDispatch(input: {
   id: string;
-  status: "pending" | "assigned" | "in_transit" | "delivered" | "cancelled";
+  status: "pending" | "assigned" | "goods_collected" | "in_transit" | "delivered" | "cancelled";
   assignedLorryId?: string;
   assignedDriverName?: string;
   assignedDriverPhone?: string;
