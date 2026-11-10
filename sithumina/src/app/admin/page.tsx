@@ -8,8 +8,9 @@ import {
   BookingPaymentMethod,
   StoredRegistration,
   StoredInquiry,
+  StoredCustomer,
 } from "@/lib/server-store";
-import { normalizePlate } from "@/lib/phone-utils";
+import { normalizePlate, normalizePhoneNumber, phonesMatch } from "@/lib/phone-utils";
 import {
   BankAccountSetting,
   PaymentSlipRecord,
@@ -51,6 +52,7 @@ import {
   approveRegistrationAndAddToFleetAction,
   getAllInquiriesAction,
   updateInquiryStatusAction,
+  getCustomersAction,
 } from "@/actions";
 
 const ADMIN_PIN = process.env.NEXT_PUBLIC_ADMIN_PIN || "ST@2024";
@@ -59,12 +61,34 @@ type NavSection =
   | "overview"
   | "individual_bookings"
   | "online_bookings"
+  | "customers"
   | "revenue"
   | "vehicle_registrations"
   | "contact_submissions"
   | "fleet"
   | "riders"
   | "settings";
+
+export interface CustomerMetric {
+  id: string;
+  name: string;
+  phone: string;
+  canonicalPhone: string;
+  email?: string;
+  city?: string;
+  registeredAt: number;
+  lastActiveAt: number;
+  totalBookings: number;
+  completedBookings: number;
+  activeBookings: number;
+  pendingBookings: number;
+  cancelledBookings: number;
+  totalRevenue: number;
+  averageBookingValue: number;
+  status: "vip" | "gold" | "silver" | "active" | "registered";
+  frequentRoutes: string[];
+  bookingsList: StoredBooking[];
+}
 type BookingStatus = BookingStatusValue;
 type StatusFilter = "all" | "pending" | "awaiting_payment" | "payment_submitted" | "accepted" | "assigned" | "completed";
 
@@ -217,6 +241,21 @@ export default function MasterAdminDashboard() {
   const [revenueCustomEnd, setRevenueCustomEnd] = useState("");
   const [revenueTypeFilter, setRevenueTypeFilter] = useState<"all" | "individual" | "live_lorry">("all");
   const [revenueSearch, setRevenueSearch] = useState("");
+
+  // ---- Customers State ----
+  const [registeredUsers, setRegisteredUsers] = useState<StoredCustomer[]>([]);
+  const [loadingUsers, setLoadingUsers] = useState(true);
+  const [customerSearch, setCustomerSearch] = useState("");
+  const [customerTierFilter, setCustomerTierFilter] = useState<"all" | "vip" | "repeat" | "active" | "registered">("all");
+  const [customerSort, setCustomerSort] = useState<"bookings" | "revenue" | "recent" | "name">("bookings");
+  const [expandedCustomers, setExpandedCustomers] = useState<Record<string, boolean>>({});
+
+  const toggleCustomerExpanded = (customerId: string) => {
+    setExpandedCustomers((prev) => ({
+      ...prev,
+      [customerId]: !prev[customerId],
+    }));
+  };
 
   // ---- Vehicle Registrations State ----
   const [registrations, setRegistrations] = useState<
@@ -421,12 +460,14 @@ export default function MasterAdminDashboard() {
     setDrivers([]);
     setRegistrations([]);
     setInquiries([]);
+    setRegisteredUsers([]);
     setSelectedCalendarVehicle(null);
     setLoadingBookings(true);
     setLoadingFleet(true);
     setLoadingDrivers(true);
     setLoadingRegistrations(true);
     setLoadingInquiries(true);
+    setLoadingUsers(true);
     try {
       if (typeof window !== "undefined") {
         sessionStorage.removeItem("st_admin_authed");
@@ -442,11 +483,13 @@ export default function MasterAdminDashboard() {
       setDrivers([]);
       setRegistrations([]);
       setInquiries([]);
+      setRegisteredUsers([]);
       setSelectedCalendarVehicle(null);
       setLoadingFleet(true);
       setLoadingDrivers(true);
       setLoadingRegistrations(true);
       setLoadingInquiries(true);
+      setLoadingUsers(true);
       return;
     }
 
@@ -454,6 +497,41 @@ export default function MasterAdminDashboard() {
     setLoadingDrivers(true);
     setLoadingRegistrations(true);
     setLoadingInquiries(true);
+    setLoadingUsers(true);
+
+    getCustomersAction().then((res) => {
+      if (res.success && Array.isArray(res.data)) {
+        setRegisteredUsers(res.data);
+      }
+      setLoadingUsers(false);
+    }).catch(() => setLoadingUsers(false));
+
+    const unsubUsers = onSnapshot(
+      collection(db, "users"),
+      (snap) => {
+        const list: StoredCustomer[] = [];
+        snap.forEach((d) => {
+          const data = d.data();
+          if (data.role === "driver" || data.role === "admin") return;
+          list.push({
+            id: String(data.uid || d.id),
+            name: String(data.name || ""),
+            phone: String(data.phone || ""),
+            email: data.email || "",
+            city: data.city || "",
+            createdAt: Number(data.createdAt) || 0,
+            lastLoginAt: Number(data.lastLoginAt) || Number(data.createdAt) || 0,
+          });
+        });
+        if (list.length > 0) {
+          setRegisteredUsers(list);
+        }
+        setLoadingUsers(false);
+      },
+      () => {
+        setLoadingUsers(false);
+      }
+    );
 
     const unsubFleet = subscribeFleetVehicles((vehicles) => {
       setFleetVehicles(vehicles);
@@ -552,6 +630,7 @@ export default function MasterAdminDashboard() {
       unsubSlipsMeta();
       unsubRegistrations();
       unsubInquiries();
+      unsubUsers();
     };
   }, [authed]);
 
@@ -1988,6 +2067,271 @@ export default function MasterAdminDashboard() {
     });
   }, [inquiries, inquiryFilter, inquirySearch]);
 
+  // ---- Customers & Top Clients Computations ----
+  const customersWithMetrics: CustomerMetric[] = useMemo(() => {
+    const custMap = new Map<
+      string,
+      {
+        id: string;
+        name: string;
+        phone: string;
+        email?: string;
+        city?: string;
+        registeredAt: number;
+        lastActiveAt: number;
+        bookings: StoredBooking[];
+      }
+    >();
+
+    // 1. Ingest registered users from users collection
+    registeredUsers.forEach((u) => {
+      const phoneNorm = normalizePhoneNumber(u.phone) || u.phone.trim();
+      const key = phoneNorm || u.id;
+      if (!key) return;
+
+      const rawName = (u.name || "").trim();
+      const isRealName =
+        rawName &&
+        rawName !== "Customer" &&
+        rawName !== "Valued Customer" &&
+        !rawName.startsWith("Customer (");
+
+      custMap.set(key, {
+        id: u.id || `CUST-${phoneNorm}`,
+        name: isRealName ? rawName : "",
+        phone: u.phone || phoneNorm,
+        email: u.email || "",
+        city: u.city || "",
+        registeredAt: u.createdAt || Date.now(),
+        lastActiveAt: u.lastLoginAt || u.createdAt || Date.now(),
+        bookings: [],
+      });
+    });
+
+    // 2. Ingest bookings to correlate clients and discover direct booking users
+    bookings.forEach((b) => {
+      const bPhone = (b.customerPhone || "").trim();
+      const phoneNorm = normalizePhoneNumber(bPhone) || bPhone;
+      const key = phoneNorm || (b.customerName || b.id);
+      if (!key) return;
+
+      const existing = custMap.get(key);
+      const bCreatedAt = Number(b.createdAt) || Date.now();
+      const bUpdatedAt = Number(b.updatedAt) || bCreatedAt;
+      const bName = (b.customerName || "").trim();
+      const isRealName =
+        bName &&
+        bName !== "Customer" &&
+        bName !== "Valued Customer" &&
+        !bName.startsWith("Customer (");
+
+      if (existing) {
+        existing.bookings.push(b);
+        if (!existing.name && isRealName) {
+          existing.name = bName;
+        }
+        if (bCreatedAt > 0 && bCreatedAt < existing.registeredAt) {
+          existing.registeredAt = bCreatedAt;
+        }
+        if (bUpdatedAt > existing.lastActiveAt) {
+          existing.lastActiveAt = bUpdatedAt;
+        }
+        if (!existing.city && b.pickupCity) {
+          existing.city = b.pickupCity;
+        }
+      } else {
+        custMap.set(key, {
+          id: `CUST-${phoneNorm || b.id}`,
+          name: isRealName ? bName : (phoneNorm ? `Customer (${phoneNorm.slice(-4)})` : "Valued Customer"),
+          phone: bPhone,
+          email: "",
+          city: b.pickupCity || "",
+          registeredAt: bCreatedAt,
+          lastActiveAt: bUpdatedAt,
+          bookings: [b],
+        });
+      }
+    });
+
+    // 3. Compute detailed financial and progress metrics
+    const list: CustomerMetric[] = [];
+    custMap.forEach((c, key) => {
+      const totalBookings = c.bookings.length;
+      let completedBookings = 0;
+      let activeBookings = 0;
+      let pendingBookings = 0;
+      let cancelledBookings = 0;
+      let totalRevenue = 0;
+
+      const routeCounts = new Map<string, number>();
+
+      c.bookings.forEach((b) => {
+        if (b.status === "delivered") {
+          completedBookings++;
+        } else if (
+          ["accepted", "assigned", "goods_collected", "in_transit", "booked"].includes(b.status)
+        ) {
+          activeBookings++;
+        } else if (
+          ["pending", "awaiting_payment", "payment_submitted"].includes(b.status)
+        ) {
+          pendingBookings++;
+        } else if (b.status === "cancelled") {
+          cancelledBookings++;
+        }
+
+        const amt = Number(b.quotedAmount) || 0;
+        const isRevenueContributing =
+          amt > 0 &&
+          (b.status === "delivered" ||
+            b.paymentSlipStatus === "approved" ||
+            b.paymentSlipStatus === "manual_approved" ||
+            ["accepted", "assigned", "goods_collected", "in_transit", "booked"].includes(b.status));
+
+        if (isRevenueContributing) {
+          totalRevenue += amt;
+        }
+
+        if (b.pickupCity && b.deliveryCity) {
+          const rKey = `${b.pickupCity} → ${b.deliveryCity}`;
+          routeCounts.set(rKey, (routeCounts.get(rKey) || 0) + 1);
+        }
+      });
+
+      const frequentRoutes = Array.from(routeCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 2)
+        .map(([r, count]) => (count > 1 ? `${r} (${count}x)` : r));
+
+      const billableCount = completedBookings + activeBookings;
+      const averageBookingValue =
+        billableCount > 0 ? Math.round(totalRevenue / billableCount) : totalRevenue;
+
+      let statusTier: CustomerMetric["status"] = "registered";
+      if (totalBookings >= 5 || totalRevenue >= 100000) {
+        statusTier = "vip";
+      } else if (totalBookings >= 3 || totalRevenue >= 40000) {
+        statusTier = "gold";
+      } else if (completedBookings >= 1) {
+        statusTier = "silver";
+      } else if (totalBookings >= 1) {
+        statusTier = "active";
+      }
+
+      const sortedBookings = [...c.bookings].sort(
+        (a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)
+      );
+
+      list.push({
+        id: c.id,
+        name: c.name || (c.phone ? `Customer (${c.phone.slice(-4)})` : "Valued Customer"),
+        phone: c.phone,
+        canonicalPhone: key,
+        email: c.email,
+        city: c.city,
+        registeredAt: c.registeredAt,
+        lastActiveAt: c.lastActiveAt,
+        totalBookings,
+        completedBookings,
+        activeBookings,
+        pendingBookings,
+        cancelledBookings,
+        totalRevenue,
+        averageBookingValue,
+        status: statusTier,
+        frequentRoutes,
+        bookingsList: sortedBookings,
+      });
+    });
+
+    return list.sort((a, b) => {
+      if (b.totalBookings !== a.totalBookings) {
+        return b.totalBookings - a.totalBookings;
+      }
+      return b.totalRevenue - a.totalRevenue;
+    });
+  }, [registeredUsers, bookings]);
+
+  // Top 10 clients who have actually placed bookings
+  const top10Customers = useMemo(() => {
+    return customersWithMetrics
+      .filter((c) => c.totalBookings > 0)
+      .slice(0, 10);
+  }, [customersWithMetrics]);
+
+  // Filtered & sorted customers for the Complete Directory
+  const filteredCustomers = useMemo(() => {
+    return customersWithMetrics
+      .filter((c) => {
+        if (customerTierFilter === "vip" && c.status !== "vip" && c.status !== "gold") {
+          return false;
+        }
+        if (customerTierFilter === "repeat" && c.totalBookings < 2) {
+          return false;
+        }
+        if (customerTierFilter === "active" && c.totalBookings < 1) {
+          return false;
+        }
+        if (customerTierFilter === "registered" && c.totalBookings > 0) {
+          return false;
+        }
+
+        if (!customerSearch.trim()) return true;
+        const q = customerSearch.toLowerCase();
+        return (
+          c.name.toLowerCase().includes(q) ||
+          c.phone.toLowerCase().includes(q) ||
+          (c.city && c.city.toLowerCase().includes(q)) ||
+          (c.email && c.email.toLowerCase().includes(q)) ||
+          c.frequentRoutes.some((r) => r.toLowerCase().includes(q))
+        );
+      })
+      .sort((a, b) => {
+        if (customerSort === "bookings") {
+          return b.totalBookings - a.totalBookings || b.totalRevenue - a.totalRevenue;
+        }
+        if (customerSort === "revenue") {
+          return b.totalRevenue - a.totalRevenue || b.totalBookings - a.totalBookings;
+        }
+        if (customerSort === "recent") {
+          return b.lastActiveAt - a.lastActiveAt;
+        }
+        if (customerSort === "name") {
+          return a.name.localeCompare(b.name);
+        }
+        return 0;
+      });
+  }, [customersWithMetrics, customerTierFilter, customerSearch, customerSort]);
+
+  const totalClientsRevenue = useMemo(
+    () => customersWithMetrics.reduce((sum, c) => sum + c.totalRevenue, 0),
+    [customersWithMetrics]
+  );
+  const totalClientBookingsCount = useMemo(
+    () => customersWithMetrics.reduce((sum, c) => sum + c.totalBookings, 0),
+    [customersWithMetrics]
+  );
+  const repeatClientsCount = useMemo(
+    () => customersWithMetrics.filter((c) => c.totalBookings >= 2).length,
+    [customersWithMetrics]
+  );
+  const activeInTransitClientsCount = useMemo(
+    () => customersWithMetrics.filter((c) => c.activeBookings > 0).length,
+    [customersWithMetrics]
+  );
+  const vipGoldClientsCount = useMemo(
+    () => customersWithMetrics.filter((c) => c.status === "vip" || c.status === "gold").length,
+    [customersWithMetrics]
+  );
+  const registeredOnlyClientsCount = useMemo(
+    () => customersWithMetrics.filter((c) => c.totalBookings === 0).length,
+    [customersWithMetrics]
+  );
+  const overallAverageOrderValue = useMemo(() => {
+    const billable = customersWithMetrics.reduce((sum, c) => sum + c.completedBookings + c.activeBookings, 0);
+    return billable > 0 ? Math.round(totalClientsRevenue / billable) : 0;
+  }, [customersWithMetrics, totalClientsRevenue]);
+
   // ---- Status Badge Component ----
   const StatusBadge = ({ status }: { status: string }) => {
     const map: Record<string, { cls: string; label: string }> = {
@@ -2237,6 +2581,34 @@ export default function MasterAdminDashboard() {
               )}
             </button>
 
+            {/* Customers & Top Clients */}
+            <button
+              onClick={() => {
+                setActiveNav("customers");
+                setSidebarOpen(false);
+              }}
+              className={`w-full px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all text-left flex items-center justify-between cursor-pointer ${
+                activeNav === "customers"
+                  ? "bg-[#FFC20E] text-[#26231B]"
+                  : "text-white/75 hover:bg-white/10 hover:text-white"
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                  <circle cx="9" cy="7" r="4" />
+                  <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                </svg>
+                <span>Customers &amp; Top Clients</span>
+              </div>
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                activeNav === "customers" ? "bg-[#26231B] text-white" : "bg-white/15 text-white/80"
+              }`}>
+                {loadingUsers ? "..." : customersWithMetrics.length}
+              </span>
+            </button>
+
             {/* Revenue & Financials */}
             <button
               onClick={() => {
@@ -2456,6 +2828,7 @@ export default function MasterAdminDashboard() {
                 {activeNav === "overview" && "Executive Dashboard Overview"}
                 {activeNav === "individual_bookings" && "Individual Vehicle Bookings"}
                 {activeNav === "online_bookings" && "Online / Live Lorry Bookings"}
+                {activeNav === "customers" && "Registered Customers & Top Clients"}
                 {activeNav === "revenue" && "Revenue"}
                 {activeNav === "vehicle_registrations" && "Vehicle & Partner Registrations"}
                 {activeNav === "contact_submissions" && "Contact Inquiries & Support"}
@@ -2464,7 +2837,9 @@ export default function MasterAdminDashboard() {
                 {activeNav === "settings" && "System & Payment Settings"}
               </h1>
               <p className="text-[11px] text-[#6F6A5A]">
-                {activeNav === "revenue"
+                {activeNav === "customers"
+                  ? "Directory of all registered clients, Top 10 loyal client ranking, and customer lifetime revenue analytics"
+                  : activeNav === "revenue"
                   ? "Individual & Live Lorry · Resets daily at 12:00 AM"
                   : activeNav === "vehicle_registrations"
                   ? "Incoming lorry partner applications from /register-vehicle"
@@ -2477,6 +2852,13 @@ export default function MasterAdminDashboard() {
 
           {/* Quick Header Actions */}
           <div className="flex items-center gap-2">
+            {activeNav === "customers" && (
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-xs font-mono font-bold text-[#26231B] whitespace-nowrap shrink-0">
+                  {customersWithMetrics.length} Clients Total
+                </span>
+              </div>
+            )}
             {activeNav === "revenue" && (
               <div className="px-3 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-xs font-mono font-bold text-[#26231B] whitespace-nowrap shrink-0">
                 {revenueData.todayDateStr}
@@ -2601,7 +2983,7 @@ export default function MasterAdminDashboard() {
           {activeNav === "overview" && (
             <div className="flex flex-col gap-6">
               {/* Metric Cards */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
                 <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
                   <span className="text-[11px] font-bold text-[#6F6A5A] uppercase block">Total Bookings</span>
                   <span className="text-2xl font-black text-[#26231B] mt-1 block font-mono">
@@ -2612,6 +2994,15 @@ export default function MasterAdminDashboard() {
                   <span className="text-[11px] font-bold text-amber-700 uppercase block">Pending Bookings</span>
                   <span className="text-2xl font-black text-amber-800 mt-1 block font-mono">
                     {loadingBookings ? "..." : totalPendingCount}
+                  </span>
+                </div>
+                <div
+                  onClick={() => setActiveNav("customers")}
+                  className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs cursor-pointer hover:border-[#FFC20E] transition-all"
+                >
+                  <span className="text-[11px] font-bold text-amber-700 uppercase block">Total Clients</span>
+                  <span className="text-2xl font-black text-[#26231B] mt-1 block font-mono">
+                    {loadingUsers ? "..." : customersWithMetrics.length}
                   </span>
                 </div>
                 <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
@@ -2692,6 +3083,31 @@ export default function MasterAdminDashboard() {
                     className="mt-5 w-full py-2.5 rounded-xl bg-[#26231B] hover:bg-[#FFC20E] hover:text-[#26231B] text-white text-xs font-black transition-colors cursor-pointer"
                   >
                     Open Individual Bookings →
+                  </button>
+                </div>
+
+                {/* Customers & Top Clients Quick Jump */}
+                <div className="p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <h2 className="text-base font-black text-[#26231B]">Customers &amp; Top Clients</h2>
+                      <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold">
+                        {top10Customers.length} Top Ranked
+                      </span>
+                    </div>
+                    <p className="text-xs text-[#6F6A5A] mt-1">
+                      Directory of all registered clients, lifetime booking volumes, and Top 10 loyal client rankings.
+                    </p>
+                    <div className="mt-4 flex flex-wrap items-center gap-3 text-xs font-bold text-[#26231B]">
+                      <span>Total Clients: {loadingUsers ? "..." : customersWithMetrics.length}</span>
+                      <span className="text-emerald-700 font-mono">LTV: Rs. {totalClientsRevenue.toLocaleString()}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setActiveNav("customers")}
+                    className="mt-5 w-full py-2.5 rounded-xl bg-[#26231B] hover:bg-[#FFC20E] hover:text-[#26231B] text-white text-xs font-black transition-colors cursor-pointer shadow-xs"
+                  >
+                    View Top Clients &amp; Directory →
                   </button>
                 </div>
 
@@ -4367,6 +4783,600 @@ export default function MasterAdminDashboard() {
                   );
                 })
               )}
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB: REGISTERED CUSTOMERS & TOP CLIENTS LEADERBOARD       */}
+          {/* ========================================================= */}
+          {activeNav === "customers" && (
+            <div className="flex flex-col gap-6">
+              {/* Top 4 Core KPI Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                {/* 1. Total Customers */}
+                <div className="p-5 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#6F6A5A]">
+                      Registered Clients
+                    </span>
+                    <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                      All-Time Directory
+                    </span>
+                  </div>
+                  <div className="text-3xl font-black text-[#26231B] font-mono mt-2 tracking-tight">
+                    {loadingUsers ? "..." : customersWithMetrics.length}
+                  </div>
+                  <div className="text-xs text-[#6F6A5A] mt-1 font-medium">
+                    {repeatClientsCount} repeat bookers ({customersWithMetrics.length > 0 ? Math.round((repeatClientsCount / customersWithMetrics.length) * 100) : 0}% loyalty rate)
+                  </div>
+                </div>
+
+                {/* 2. Total Lifetime Volume */}
+                <div className="p-5 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#6F6A5A]">
+                      Client Bookings
+                    </span>
+                    <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200">
+                      {activeInTransitClientsCount} Active in Transit
+                    </span>
+                  </div>
+                  <div className="text-3xl font-black text-[#26231B] font-mono mt-2 tracking-tight">
+                    {totalClientBookingsCount}
+                  </div>
+                  <div className="text-xs text-[#6F6A5A] mt-1 font-medium">
+                    Individual &amp; Live empty lorry freight jobs
+                  </div>
+                </div>
+
+                {/* 3. Total Lifetime Revenue */}
+                <div className="p-5 rounded-2xl bg-[#26231B] text-white shadow-xs flex flex-col justify-between">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-white/60">
+                      Lifetime Revenue (LTV)
+                    </span>
+                    <span className="text-[11px] font-semibold text-emerald-400">
+                      Confirmed &amp; Delivered
+                    </span>
+                  </div>
+                  <div className="text-3xl font-black text-[#FFC20E] font-mono mt-2 tracking-tight">
+                    Rs. {totalClientsRevenue.toLocaleString()}
+                  </div>
+                  <div className="text-xs text-white/70 mt-1 font-medium">
+                    Avg. Order Value: Rs. {overallAverageOrderValue.toLocaleString()}
+                  </div>
+                </div>
+
+                {/* 4. VIP & High Value Clients */}
+                <div className="p-5 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#6F6A5A]">
+                      High-Value Clients
+                    </span>
+                    <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                      VIP &amp; Gold Tiers
+                    </span>
+                  </div>
+                  <div className="text-3xl font-black text-amber-600 font-mono mt-2 tracking-tight">
+                    {vipGoldClientsCount}
+                  </div>
+                  <div className="text-xs text-[#6F6A5A] mt-1 font-medium">
+                    Clients with 3+ bookings or Rs. 40,000+ spend
+                  </div>
+                </div>
+              </div>
+
+              {/* ========================================================= */}
+              {/* SECTION 1: TOP 10 CLIENTS LEADERBOARD                     */}
+              {/* ========================================================= */}
+              <div className="bg-white border border-[#E7E2D0] rounded-3xl p-5 sm:p-6 shadow-xs flex flex-col gap-5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#E7E2D0]">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-[#FFC20E] text-[#26231B] flex items-center justify-center font-black text-lg shadow-xs">
+                      🏆
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-base sm:text-lg font-black text-[#26231B] tracking-tight">
+                          Top Clients Leaderboard (ප්‍රමුඛ පාරිභෝගිකයින්)
+                        </h2>
+                        <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-black uppercase tracking-wider">
+                          Ranked by Volume
+                        </span>
+                      </div>
+                      <p className="text-xs text-[#6F6A5A] mt-0.5">
+                        Our highest-frequency repeat clients ranked by total confirmed freight orders and financial turnover.
+                      </p>
+                    </div>
+                  </div>
+
+                  <span className="text-xs text-[#6F6A5A] font-bold self-start sm:self-auto bg-[#F7F5EE] px-3 py-1.5 rounded-xl border border-[#E7E2D0]">
+                    Showing Top {top10Customers.length} {top10Customers.length === 1 ? "Client" : "Clients"}
+                  </span>
+                </div>
+
+                {top10Customers.length === 0 ? (
+                  <div className="py-12 px-4 rounded-2xl bg-[#F7F5EE] border border-dashed border-[#E7E2D0] text-center flex flex-col items-center justify-center">
+                    <span className="text-3xl mb-2">⭐</span>
+                    <h3 className="text-sm font-black text-[#26231B]">No client bookings placed yet</h3>
+                    <p className="text-xs text-[#6F6A5A] max-w-md mt-1">
+                      As customers place individual bookings or reserve live empty lorries on the web platform, the Top 10 clients will automatically be ranked here in real time.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {top10Customers.map((c, idx) => {
+                      const rank = idx + 1;
+                      const isGold = rank === 1;
+                      const isSilver = rank === 2;
+                      const isBronze = rank === 3;
+                      const isExpanded = !!expandedCustomers[c.id];
+
+                      const cleanPhoneDigits = c.phone.replace(/[^0-9]/g, "");
+                      const intlPhone = cleanPhoneDigits.startsWith("0")
+                        ? `94${cleanPhoneDigits.slice(1)}`
+                        : cleanPhoneDigits.startsWith("94")
+                        ? cleanPhoneDigits
+                        : `94${cleanPhoneDigits}`;
+
+                      return (
+                        <div
+                          key={c.id}
+                          className={`rounded-2xl border transition-all flex flex-col justify-between overflow-hidden shadow-xs ${
+                            isGold
+                              ? "bg-gradient-to-br from-amber-50/80 via-white to-amber-50/40 border-amber-300 ring-1 ring-amber-300/60"
+                              : isSilver
+                              ? "bg-gradient-to-br from-slate-50 via-white to-slate-50/50 border-slate-300"
+                              : isBronze
+                              ? "bg-gradient-to-br from-amber-50/30 via-white to-orange-50/30 border-amber-200"
+                              : "bg-white border-[#E7E2D0] hover:border-[#26231B]/30"
+                          }`}
+                        >
+                          {/* Card Header & Rank Ribbon */}
+                          <div className="p-4 sm:p-5 flex flex-col gap-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <span
+                                className={`px-2.5 py-1 rounded-xl text-xs font-black flex items-center gap-1.5 shadow-2xs ${
+                                  isGold
+                                    ? "bg-[#FFC20E] text-[#26231B]"
+                                    : isSilver
+                                    ? "bg-slate-200 text-slate-800"
+                                    : isBronze
+                                    ? "bg-amber-200/80 text-amber-900 border border-amber-300"
+                                    : "bg-[#F7F5EE] text-[#4A4538] border border-[#E7E2D0]"
+                                }`}
+                              >
+                                <span>{isGold ? "👑" : isSilver ? "🥈" : isBronze ? "🥉" : "🎖️"}</span>
+                                <span>#{rank} TOP CLIENT</span>
+                              </span>
+
+                              {/* Tier Badge */}
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border ${
+                                  c.status === "vip"
+                                    ? "bg-amber-100 text-amber-900 border-amber-300"
+                                    : c.status === "gold"
+                                    ? "bg-yellow-100 text-yellow-900 border-yellow-300"
+                                    : c.status === "silver"
+                                    ? "bg-slate-100 text-slate-800 border-slate-300"
+                                    : "bg-emerald-50 text-emerald-800 border-emerald-200"
+                                }`}
+                              >
+                                {c.status === "vip"
+                                  ? "👑 VIP Platinum"
+                                  : c.status === "gold"
+                                  ? "🥇 Gold Tier"
+                                  : c.status === "silver"
+                                  ? "🥈 Silver Client"
+                                  : "🥉 Active Client"}
+                              </span>
+                            </div>
+
+                            {/* Client Name & Phone */}
+                            <div>
+                              <h3 className="text-base font-black text-[#26231B] tracking-tight">
+                                {c.name}
+                              </h3>
+                              <div className="flex flex-wrap items-center gap-2 mt-1">
+                                <span className="text-xs font-mono font-bold text-[#6F6A5A]">
+                                  {c.phone || "No phone provided"}
+                                </span>
+                                {c.city && (
+                                  <span className="text-[11px] text-[#8C877A] font-semibold bg-[#F7F5EE] px-2 py-0.2 rounded-md">
+                                    📍 {c.city}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Direct Contact Links */}
+                            <div className="flex items-center gap-2 pt-1">
+                              {c.phone && (
+                                <>
+                                  <a
+                                    href={`tel:${c.phone}`}
+                                    className="flex-1 py-1.5 px-3 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-xs font-bold text-center flex items-center justify-center gap-1.5 transition-colors"
+                                  >
+                                    <span>📞</span>
+                                    <span>Call</span>
+                                  </a>
+                                  <a
+                                    href={`https://wa.me/${intlPhone}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="flex-1 py-1.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold text-center flex items-center justify-center gap-1.5 transition-colors shadow-2xs"
+                                  >
+                                    <span>💬</span>
+                                    <span>WhatsApp</span>
+                                  </a>
+                                </>
+                              )}
+                            </div>
+
+                            {/* Key Performance Metrics Box */}
+                            <div className="grid grid-cols-2 gap-2 p-3 rounded-xl bg-[#F7F5EE]/70 border border-[#E7E2D0] mt-1 text-xs">
+                              <div>
+                                <span className="text-[10px] uppercase font-bold text-[#6F6A5A] block">Total Bookings</span>
+                                <span className="text-base font-black text-[#26231B] font-mono mt-0.5 block">
+                                  {c.totalBookings} <span className="text-[11px] font-normal text-[#6F6A5A]">Trips</span>
+                                </span>
+                                <span className="text-[10px] text-emerald-700 font-bold block mt-0.5">
+                                  {c.completedBookings} Delivered
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[10px] uppercase font-bold text-[#6F6A5A] block">Total Spent (LTV)</span>
+                                <span className="text-base font-black text-[#26231B] font-mono mt-0.5 block">
+                                  Rs. {c.totalRevenue.toLocaleString()}
+                                </span>
+                                <span className="text-[10px] text-[#6F6A5A] font-semibold block mt-0.5">
+                                  Avg: Rs. {c.averageBookingValue.toLocaleString()}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Favorite Corridor / Route */}
+                            {c.frequentRoutes.length > 0 && (
+                              <div className="text-[11px] text-[#4A4538] font-medium flex items-start gap-1.5 pt-1">
+                                <span className="text-[#FFC20E] font-bold">🛣️</span>
+                                <span>
+                                  <strong className="text-[#26231B]">Route:</strong> {c.frequentRoutes.join(", ")}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Footer Action to expand client's booking history */}
+                          <div className="border-t border-[#E7E2D0] bg-[#F7F5EE]/40 px-4 py-2.5 flex items-center justify-between">
+                            <span className="text-[11px] text-[#8C877A]">
+                              Joined: {new Date(c.registeredAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => toggleCustomerExpanded(c.id)}
+                              className="text-xs font-bold text-[#26231B] hover:text-amber-800 flex items-center gap-1 cursor-pointer transition-colors"
+                            >
+                              <span>{isExpanded ? "Hide History ▲" : `View ${c.totalBookings} Bookings ▼`}</span>
+                            </button>
+                          </div>
+
+                          {/* Expandable Booking History Accordion */}
+                          {isExpanded && (
+                            <div className="p-4 bg-white border-t border-[#E7E2D0] flex flex-col gap-2 max-h-72 overflow-y-auto">
+                              <span className="text-[11px] font-bold uppercase text-[#6F6A5A] tracking-wider block mb-1">
+                                Complete Order History ({c.bookingsList.length}):
+                              </span>
+                              {c.bookingsList.map((b) => (
+                                <div
+                                  key={b.id}
+                                  className="p-2.5 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/40 flex flex-col gap-1 text-xs"
+                                >
+                                  <div className="flex items-center justify-between gap-1">
+                                    <span className="font-mono font-bold text-[#26231B]">#{b.id}</span>
+                                    <StatusBadge status={b.status} />
+                                  </div>
+                                  <div className="text-[11px] font-semibold text-[#4A4538]">
+                                    📍 {b.pickupCity} → {b.deliveryCity}
+                                  </div>
+                                  <div className="flex items-center justify-between text-[11px] text-[#6F6A5A] mt-0.5">
+                                    <span>📅 {b.date || "Date unspecified"}</span>
+                                    {b.quotedAmount !== undefined && (
+                                      <span className="font-mono font-bold text-[#26231B]">
+                                        Rs. {b.quotedAmount.toLocaleString()}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* ========================================================= */}
+              {/* SECTION 2: COMPLETE CUSTOMER DIRECTORY (ALL CLIENTS)     */}
+              {/* ========================================================= */}
+              <div className="bg-white border border-[#E7E2D0] rounded-3xl p-5 sm:p-6 shadow-xs flex flex-col gap-5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#E7E2D0]">
+                  <div>
+                    <h2 className="text-base sm:text-lg font-black text-[#26231B] tracking-tight">
+                      Complete Customer Directory (සියලුම ලියාපදිංචි පාරිභෝගිකයින්)
+                    </h2>
+                    <p className="text-xs text-[#6F6A5A] mt-0.5">
+                      Search and inspect every client account ever registered or booked on Sithumina Transport.
+                    </p>
+                  </div>
+
+                  <span className="text-xs text-[#6F6A5A] font-bold bg-[#F7F5EE] px-3 py-1.5 rounded-xl border border-[#E7E2D0] self-start sm:self-auto">
+                    {filteredCustomers.length} of {customersWithMetrics.length} Clients
+                  </span>
+                </div>
+
+                {/* Filter & Search Toolbar */}
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                  {/* Search Input */}
+                  <div className="relative flex-1">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs text-[#8C877A]">
+                      🔍
+                    </span>
+                    <input
+                      type="text"
+                      placeholder="Search by client name, phone number, city, or route..."
+                      value={customerSearch}
+                      onChange={(e) => setCustomerSearch(e.target.value)}
+                      className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] placeholder-[#8C877A] focus:outline-none focus:border-[#26231B]"
+                    />
+                    {customerSearch && (
+                      <button
+                        onClick={() => setCustomerSearch("")}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-[#8C877A] hover:text-[#26231B]"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Tier Filter Tabs */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {[
+                      { key: "all", label: `All (${customersWithMetrics.length})` },
+                      { key: "vip", label: `VIP & Gold (${vipGoldClientsCount})` },
+                      { key: "repeat", label: `Repeat (${repeatClientsCount})` },
+                      { key: "active", label: `Booked Clients (${customersWithMetrics.filter((c) => c.totalBookings > 0).length})` },
+                      { key: "registered", label: `New Registered (${registeredOnlyClientsCount})` },
+                    ].map((tab) => (
+                      <button
+                        key={tab.key}
+                        onClick={() => setCustomerTierFilter(tab.key as any)}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                          customerTierFilter === tab.key
+                            ? "bg-[#26231B] text-white"
+                            : "bg-[#F7F5EE] text-[#6F6A5A] hover:bg-[#E7E2D0]"
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Sort Dropdown */}
+                  <div className="flex items-center gap-2 self-start lg:self-auto">
+                    <span className="text-xs font-bold text-[#6F6A5A]">Sort:</span>
+                    <select
+                      value={customerSort}
+                      onChange={(e) => setCustomerSort(e.target.value as any)}
+                      className="px-3 py-1.5 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-bold text-[#26231B] focus:outline-none"
+                    >
+                      <option value="bookings">Most Bookings</option>
+                      <option value="revenue">Highest Revenue (LTV)</option>
+                      <option value="recent">Recently Active</option>
+                      <option value="name">Alphabetical (A–Z)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Customer Cards List */}
+                {filteredCustomers.length === 0 ? (
+                  <div className="py-12 px-4 rounded-2xl bg-[#F7F5EE] border border-dashed border-[#E7E2D0] text-center flex flex-col items-center justify-center">
+                    <span className="text-2xl mb-1">🔍</span>
+                    <h3 className="text-xs font-bold text-[#26231B]">No customers found matching filter</h3>
+                    <p className="text-[11px] text-[#6F6A5A] mt-0.5">
+                      Try clearing the search query or changing the tier filter.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-3">
+                    {filteredCustomers.map((c) => {
+                      const isExpanded = !!expandedCustomers[c.id];
+                      const initial = (c.name || "C").trim().charAt(0).toUpperCase();
+                      const cleanPhoneDigits = c.phone.replace(/[^0-9]/g, "");
+                      const intlPhone = cleanPhoneDigits.startsWith("0")
+                        ? `94${cleanPhoneDigits.slice(1)}`
+                        : cleanPhoneDigits.startsWith("94")
+                        ? cleanPhoneDigits
+                        : `94${cleanPhoneDigits}`;
+
+                      return (
+                        <div
+                          key={c.id}
+                          className="rounded-2xl border border-[#E7E2D0] bg-white hover:border-[#26231B]/30 transition-all overflow-hidden shadow-2xs"
+                        >
+                          <div className="p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                            {/* Left: Avatar & Identity */}
+                            <div className="flex items-center gap-3.5">
+                              <div className="w-12 h-12 rounded-2xl bg-[#26231B] text-[#FFC20E] flex items-center justify-center font-black text-lg shrink-0 shadow-2xs">
+                                {initial}
+                              </div>
+                              <div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <h3 className="text-sm sm:text-base font-black text-[#26231B]">
+                                    {c.name}
+                                  </h3>
+                                  <span
+                                    className={`px-2 py-0.2 rounded-full text-[10px] font-black uppercase tracking-wider border ${
+                                      c.status === "vip"
+                                        ? "bg-amber-100 text-amber-900 border-amber-300"
+                                        : c.status === "gold"
+                                        ? "bg-yellow-100 text-yellow-900 border-yellow-300"
+                                        : c.status === "silver"
+                                        ? "bg-slate-100 text-slate-800 border-slate-300"
+                                        : c.status === "active"
+                                        ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                                        : "bg-[#F7F5EE] text-[#6F6A5A] border-[#E7E2D0]"
+                                    }`}
+                                  >
+                                    {c.status === "vip"
+                                      ? "👑 VIP Platinum"
+                                      : c.status === "gold"
+                                      ? "🥇 Gold Client"
+                                      : c.status === "silver"
+                                      ? "🥈 Silver Client"
+                                      : c.status === "active"
+                                      ? "🥉 Active Prospect"
+                                      : "👤 Registered Member"}
+                                  </span>
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-2.5 mt-1 text-xs text-[#6F6A5A]">
+                                  <span className="font-mono font-bold text-[#26231B]">
+                                    {c.phone || "No phone provided"}
+                                  </span>
+                                  {c.city && <span>• 📍 {c.city}</span>}
+                                  {c.email && <span>• ✉️ {c.email}</span>}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Center: Financial & Booking Metrics */}
+                            <div className="grid grid-cols-3 gap-3 py-2 px-3 sm:px-4 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] shrink-0 text-center">
+                              <div>
+                                <span className="text-[10px] uppercase font-bold text-[#6F6A5A] block">Bookings</span>
+                                <span className="text-sm sm:text-base font-black text-[#26231B] font-mono mt-0.5 block">
+                                  {c.totalBookings}
+                                </span>
+                                <span className="text-[10px] text-emerald-700 font-bold block">
+                                  {c.completedBookings} Done
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[10px] uppercase font-bold text-[#6F6A5A] block">LTV Revenue</span>
+                                <span className="text-sm sm:text-base font-black text-[#26231B] font-mono mt-0.5 block">
+                                  Rs. {c.totalRevenue.toLocaleString()}
+                                </span>
+                                <span className="text-[10px] text-[#6F6A5A] font-semibold block">
+                                  Lifetime
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[10px] uppercase font-bold text-[#6F6A5A] block">Average Order</span>
+                                <span className="text-sm sm:text-base font-black text-[#26231B] font-mono mt-0.5 block">
+                                  Rs. {c.averageBookingValue.toLocaleString()}
+                                </span>
+                                <span className="text-[10px] text-[#6F6A5A] font-semibold block">
+                                  Per Trip
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Right: Quick Call, WhatsApp & History Toggle */}
+                            <div className="flex flex-wrap items-center gap-2 shrink-0 self-end lg:self-center">
+                              {c.phone && (
+                                <>
+                                  <a
+                                    href={`tel:${c.phone}`}
+                                    className="px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-xs font-bold transition-colors flex items-center gap-1.5"
+                                  >
+                                    <span>📞</span>
+                                    <span>Call</span>
+                                  </a>
+                                  <a
+                                    href={`https://wa.me/${intlPhone}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold transition-colors shadow-2xs flex items-center gap-1.5"
+                                  >
+                                    <span>💬</span>
+                                    <span>WhatsApp</span>
+                                  </a>
+                                </>
+                              )}
+
+                              {c.totalBookings > 0 ? (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleCustomerExpanded(c.id)}
+                                  className="px-3.5 py-2 rounded-xl bg-[#26231B] hover:bg-[#FFC20E] hover:text-[#26231B] text-white text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5"
+                                >
+                                  <span>{isExpanded ? "Hide Orders ▲" : `History (${c.totalBookings}) ▼`}</span>
+                                </button>
+                              ) : (
+                                <span className="px-3 py-1.5 rounded-xl bg-[#F7F5EE] text-[#8C877A] text-xs font-semibold">
+                                  No Orders Yet
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Expandable Order History for this customer */}
+                          {isExpanded && c.bookingsList.length > 0 && (
+                            <div className="p-4 sm:p-5 bg-[#F7F5EE]/40 border-t border-[#E7E2D0] flex flex-col gap-3">
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs font-black text-[#26231B] uppercase tracking-wider">
+                                  Freight Orders Placed by {c.name} ({c.bookingsList.length})
+                                </span>
+                                <span className="text-[11px] text-[#6F6A5A]">
+                                  First Booked: {new Date(c.registeredAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                                </span>
+                              </div>
+
+                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                                {c.bookingsList.map((b) => (
+                                  <div
+                                    key={b.id}
+                                    className="p-3.5 rounded-2xl bg-white border border-[#E7E2D0] shadow-2xs flex flex-col justify-between gap-2"
+                                  >
+                                    <div className="flex items-center justify-between gap-1.5">
+                                      <span className="font-mono font-black text-xs text-[#26231B]">
+                                        #{b.id}
+                                      </span>
+                                      <StatusBadge status={b.status} />
+                                    </div>
+
+                                    <div>
+                                      <div className="text-xs font-black text-[#26231B]">
+                                        📍 {b.pickupCity} → {b.deliveryCity}
+                                      </div>
+                                      <div className="text-[11px] text-[#6F6A5A] mt-0.5">
+                                        🚛 {b.vehicleType}
+                                        {b.cargoNature ? ` • ${b.cargoNature}` : ""}
+                                      </div>
+                                    </div>
+
+                                    <div className="flex items-center justify-between pt-2 border-t border-[#E7E2D0] text-xs">
+                                      <span className="text-[#6F6A5A] text-[11px]">
+                                        📅 {b.date || "Date unspecified"}
+                                      </span>
+                                      <span className="font-mono font-black text-[#26231B]">
+                                        {b.quotedAmount !== undefined
+                                          ? `Rs. ${b.quotedAmount.toLocaleString()}`
+                                          : "Unquoted"}
+                                      </span>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
