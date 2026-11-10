@@ -124,12 +124,12 @@ export async function startGpsTracking(
     stopGpsTracking();
     lastSentCoordinate = null;
 
-    // Request high accuracy GPS hardware (High ensures continuous updates outdoors & indoors)
+    // Request high accuracy GPS hardware with balanced interval for smooth map tracking & battery efficiency
     locationSubscription = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.High,
-        timeInterval: 2000, // sample every 2 seconds
-        distanceInterval: 0, // distance 0 ensures continuous updates even when stationary or in traffic!
+        timeInterval: 3000, // sample every 3 seconds
+        distanceInterval: 5, // trigger when moved at least 5 meters
       },
       (loc) => {
         if (!loc || !loc.coords) return;
@@ -146,7 +146,9 @@ export async function startGpsTracking(
         const now = Date.now();
         const speedKmH = loc.coords.speed ? Math.max(0, loc.coords.speed * 3.6) : 0;
 
-        // Debounce if coordinate hasn't changed and less than 2.5s elapsed
+        // Intelligent debounce: Protects mobile data, battery life, and cloud database write quotas.
+        // 1. If actively moving (distance >= 15m or speed > 5 km/h): stream update every ~8 seconds.
+        // 2. If stationary / waiting in traffic (distance < 15m and speed <= 5 km/h): keep-alive heartbeat every 60 seconds.
         if (lastSentCoordinate) {
           const distMeters = calculateDistanceMeters(
             lastSentCoordinate.lat,
@@ -155,9 +157,12 @@ export async function startGpsTracking(
             lng
           );
           const elapsedSec = (now - lastSentCoordinate.time) / 1000;
+          const isMoving = distMeters >= 15 || speedKmH > 5;
 
-          // If moved less than 1m and less than 2.5s passed, skip to avoid duplicate writes
-          if (distMeters < 1 && elapsedSec < 2.5) {
+          if (isMoving && elapsedSec < 8) {
+            return;
+          }
+          if (!isMoving && elapsedSec < 60) {
             return;
           }
         }

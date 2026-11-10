@@ -53,7 +53,7 @@ import {
   updateInquiryStatusAction,
 } from "@/actions";
 
-const ADMIN_PIN = "ST@2024";
+const ADMIN_PIN = process.env.NEXT_PUBLIC_ADMIN_PIN || "ST@2024";
 
 type NavSection =
   | "overview"
@@ -183,6 +183,15 @@ export default function MasterAdminDashboard() {
   const [authed, setAuthed] = useState(false);
   const [pin, setPin] = useState("");
   const [pinError, setPinError] = useState("");
+
+  // Persist admin authentication state during browser tab session
+  useEffect(() => {
+    try {
+      if (typeof window !== "undefined" && sessionStorage.getItem("st_admin_authed") === "true") {
+        setAuthed(true);
+      }
+    } catch {}
+  }, []);
 
   // ---- Navigation State ----
   const [activeNav, setActiveNav] = useState<NavSection>("overview");
@@ -418,6 +427,11 @@ export default function MasterAdminDashboard() {
     setLoadingDrivers(true);
     setLoadingRegistrations(true);
     setLoadingInquiries(true);
+    try {
+      if (typeof window !== "undefined") {
+        sessionStorage.removeItem("st_admin_authed");
+      }
+    } catch {}
     setAuthed(false);
   };
 
@@ -2035,6 +2049,11 @@ export default function MasterAdminDashboard() {
               if (pin === ADMIN_PIN) {
                 setAuthed(true);
                 setPinError("");
+                try {
+                  if (typeof window !== "undefined") {
+                    sessionStorage.setItem("st_admin_authed", "true");
+                  }
+                } catch {}
               } else {
                 setPinError("Invalid PIN. Please check with Head Office.");
               }

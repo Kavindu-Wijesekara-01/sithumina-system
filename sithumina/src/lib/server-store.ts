@@ -224,9 +224,13 @@ function readStore(): FleetStoreData {
         inquiries: [],
         reviews: DEFAULT_REVIEWS_SEED,
       };
-      const dir = path.dirname(STORE_PATH);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(STORE_PATH, JSON.stringify(initial, null, 2), "utf8");
+      try {
+        const dir = path.dirname(STORE_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(STORE_PATH, JSON.stringify(initial, null, 2), "utf8");
+      } catch {
+        // Read-only serverless environment (e.g. Vercel / AWS Lambda)
+      }
       inMemoryStore = initial;
       return initial;
     }
@@ -272,8 +276,9 @@ function writeStore(data: FleetStoreData, immediate = false): void {
         fs.mkdirSync(dir, { recursive: true });
       }
       fs.writeFileSync(STORE_PATH, JSON.stringify(data, null, 2), "utf8");
-    } catch (err) {
-      console.error("Error writing to fleet-store.json:", err);
+    } catch {
+      // Expected in serverless hosts like Vercel with read-only filesystems.
+      // Firestore acts as the primary cloud database.
     }
   };
 

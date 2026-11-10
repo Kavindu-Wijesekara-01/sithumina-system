@@ -247,6 +247,200 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   const [selectedBannerForInspect, setSelectedBannerForInspect] = useState<AppBanner | null>(null);
   const [inspectPreviewDevice, setInspectPreviewDevice] = useState<"mobile" | "desktop">("mobile");
 
+  const resolveBannerImageUri = (uri?: string) => {
+    if (!uri) return "";
+    if (uri.startsWith("data:") || uri.startsWith("http://") || uri.startsWith("https://")) {
+      return uri;
+    }
+    if (uri.startsWith("/")) {
+      return `http://localhost:3000${uri}`;
+    }
+    return uri;
+  };
+
+  // Direct banner upload from local storage state:
+  const [directUploadingBanner, setDirectUploadingBanner] = useState(false);
+  const [isPickingBannerImg, setIsPickingBannerImg] = useState<"desktop" | "mobile" | null>(null);
+
+  // Dedicated Slideshow Studio States:
+  const [studioDesktopImg, setStudioDesktopImg] = useState("");
+  const [studioMobileImg, setStudioMobileImg] = useState("");
+  const [studioTitle, setStudioTitle] = useState("");
+  const [studioTag, setStudioTag] = useState("PROMO");
+  const [studioCta, setStudioCta] = useState("Call: 0755984984");
+  const [studioIsUploading, setStudioIsUploading] = useState(false);
+
+  const pickImageFromStorage = async (): Promise<string | null> => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== "granted" && Platform.OS !== "web") {
+        Alert.alert(
+          "Permission Required",
+          "Please grant photo gallery / media library permission to select banner images."
+        );
+        return null;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsEditing: true,
+        quality: 0.8,
+        base64: true,
+      });
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return null;
+      }
+
+      const asset = result.assets[0];
+      if (asset.base64) {
+        return `data:image/jpeg;base64,${asset.base64}`;
+      }
+      if (asset.uri && asset.uri.startsWith("data:")) {
+        return asset.uri;
+      }
+      if (Platform.OS === "web" && asset.uri) {
+        try {
+          const resp = await fetch(asset.uri);
+          const blob = await resp.blob();
+          return await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        } catch (e) {
+          console.warn("Failed to convert image blob to Data URI:", e);
+        }
+      }
+      return asset.uri || null;
+    } catch (err) {
+      console.warn("Error picking banner image from storage:", err);
+      showToast("Could not select image");
+      return null;
+    }
+  };
+
+  const handleDirectUploadBanner = async () => {
+    try {
+      setDirectUploadingBanner(true);
+      const imageUri = await pickImageFromStorage();
+      if (!imageUri) {
+        setDirectUploadingBanner(false);
+        return;
+      }
+
+      const now = Date.now();
+      const dateStr = new Date(now).toLocaleDateString("en-GB", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      });
+      const newBanner: AppBanner = {
+        id: `banner-${now}`,
+        title: `Promotional Banner (${dateStr})`,
+        subtitle: "Direct upload from Mobile App Settings",
+        tag: "PROMO",
+        target: "all",
+        viewMode: "all",
+        desktopImage: imageUri,
+        mobileImage: imageUri,
+        ctaText: "Book Now",
+        isActive: true,
+        createdAt: now,
+      };
+
+      await saveAdminBanner(newBanner);
+      showToast("Banner uploaded & published successfully!");
+    } catch (err) {
+      console.warn("Direct banner upload failed:", err);
+      showToast("Banner upload failed");
+    } finally {
+      setDirectUploadingBanner(false);
+    }
+  };
+
+  const handlePickBannerDesktopImage = async () => {
+    setIsPickingBannerImg("desktop");
+    const uri = await pickImageFromStorage();
+    if (uri) {
+      setBannerDesktopImg(uri);
+      showToast("Desktop banner selected from storage");
+    }
+    setIsPickingBannerImg(null);
+  };
+
+  const handlePickBannerMobileImage = async () => {
+    setIsPickingBannerImg("mobile");
+    const uri = await pickImageFromStorage();
+    if (uri) {
+      setBannerMobileImg(uri);
+      showToast("Mobile banner selected from storage");
+    }
+    setIsPickingBannerImg(null);
+  };
+
+  const handlePickStudioDesktop = async () => {
+    setIsPickingBannerImg("desktop");
+    const uri = await pickImageFromStorage();
+    if (uri) {
+      setStudioDesktopImg(uri);
+      showToast("Desktop view image selected");
+    }
+    setIsPickingBannerImg(null);
+  };
+
+  const handlePickStudioMobile = async () => {
+    setIsPickingBannerImg("mobile");
+    const uri = await pickImageFromStorage();
+    if (uri) {
+      setStudioMobileImg(uri);
+      showToast("Mobile view image selected");
+    }
+    setIsPickingBannerImg(null);
+  };
+
+  const handlePublishStudioSlide = async () => {
+    if (!studioDesktopImg && !studioMobileImg) {
+      showToast("Please select at least one image (Desktop or Mobile)");
+      return;
+    }
+
+    setStudioIsUploading(true);
+    try {
+      const now = Date.now();
+      const finalDesktop = studioDesktopImg || studioMobileImg;
+      const finalMobile = studioMobileImg || studioDesktopImg;
+
+      const newSlide: AppBanner = {
+        id: `banner-${now}`,
+        title: studioTitle.trim() || `Banner Slide ${banners.length + 1}`,
+        subtitle: "Website Slideshow Banner",
+        tag: studioTag.trim().toUpperCase() || "PROMO",
+        target: "all",
+        viewMode: "all",
+        desktopImage: finalDesktop,
+        mobileImage: finalMobile,
+        ctaText: studioCta.trim() || "Call: 0755984984",
+        isActive: true,
+        createdAt: now,
+      };
+
+      await saveAdminBanner(newSlide);
+      setStudioDesktopImg("");
+      setStudioMobileImg("");
+      setStudioTitle("");
+      setStudioTag("PROMO");
+      setStudioCta("Call: 0755984984");
+      showToast("✓ Slide added to website slideshow successfully!");
+    } catch (err) {
+      console.warn("Failed to publish slide:", err);
+      showToast("Failed to upload slide");
+    } finally {
+      setStudioIsUploading(false);
+    }
+  };
+
   // Real-time synchronization of banners (Firestore + Local storage)
   useEffect(() => {
     const unsubscribe = subscribeAdminBanners((bannerList) => {
@@ -472,11 +666,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
       newStatus === "a" ? "approved" : "rejected",
       currentReq
         ? {
-            ownerName: currentReq.customer.split(" (")[0],
-            vehicleNumber: currentReq.to,
-            vehicleType: currentReq.vehicle,
-            capacity: currentReq.load,
-          }
+          ownerName: currentReq.customer.split(" (")[0],
+          vehicleNumber: currentReq.to,
+          vehicleType: currentReq.vehicle,
+          capacity: currentReq.load,
+        }
         : undefined
     );
     showToast(newStatus === "a" ? "Vehicle request approved & registered" : "Vehicle request rejected");
@@ -751,8 +945,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
 
         // Sync deletion
         const lorryId = `lorry-${plate.replace(/[^A-Z0-9]/gi, "").toLowerCase()}`;
-        deleteLorryFromFleet(lorryId).catch(() => {});
-        deleteAdminVehicle(plate).catch(() => {});
+        deleteLorryFromFleet(lorryId).catch(() => { });
+        deleteAdminVehicle(plate).catch(() => { });
 
         showToast(`Vehicle ${plate} deleted`);
       }
@@ -916,8 +1110,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   {loadingLorries
                     ? "Connecting live GPS..."
                     : lorries.length > 0
-                    ? `${lorries.length} online · View map →`
-                    : "No lorries online · View map →"}
+                      ? `${lorries.length} online · View map →`
+                      : "No lorries online · View map →"}
                 </Text>
               </TouchableOpacity>
 
@@ -1687,12 +1881,177 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                     Create announcements, offers, or service alerts for riders & customers
                   </Text>
                 </View>
+                <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+                  <TouchableOpacity
+                    style={[styles.directUploadHeaderBtn, directUploadingBanner && { opacity: 0.7 }]}
+                    onPress={handleDirectUploadBanner}
+                    disabled={directUploadingBanner}
+                    activeOpacity={0.8}
+                  >
+                    {directUploadingBanner ? (
+                      <ActivityIndicator size="small" color="#FFC20E" />
+                    ) : (
+                      <Text style={styles.directUploadHeaderBtnText}>📤 Upload Banner</Text>
+                    )}
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.addBannerBtn}
+                    onPress={() => setAddBannerModal(true)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.addBannerBtnText}>+ Add Banner</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {/* DEDICATED SLIDESHOW BANNER UPLOAD STUDIO */}
+              <View style={styles.studioCard}>
+                <View style={styles.studioHeader}>
+                  <View style={{ flex: 1, paddingRight: 8 }}>
+                    <Text style={styles.studioTitle}>🖼️ Website Banner Slideshow Studio</Text>
+                    <Text style={styles.studioSub}>
+                      Select Desktop View and Mobile View images separately from local storage to create a new slide.
+                    </Text>
+                  </View>
+                  <View style={styles.studioCounterBadge}>
+                    <Text style={styles.studioCounterText}>
+                      {banners.filter((b) => b.isActive).length} Slides Live
+                    </Text>
+                  </View>
+                </View>
+
+                {/* DUAL IMAGE SELECTION SLOTS */}
+                <View style={styles.studioSlotsContainer}>
+                  {/* SLOT 1: DESKTOP VIEW */}
+                  <View style={styles.studioSlotBox}>
+                    <View style={styles.studioSlotHeader}>
+                      <Text style={styles.studioSlotTitle}>💻 Desktop View Image</Text>
+                      <Text style={styles.studioSlotHint}>Length වැඩි / Ultra-Wide (1024×168)</Text>
+                    </View>
+
+                    {studioDesktopImg ? (
+                      <View style={styles.studioImageSelectedBox}>
+                        <Image
+                          source={{ uri: resolveBannerImageUri(studioDesktopImg) }}
+                          style={styles.studioImagePreviewDesktop}
+                          resizeMode="cover"
+                        />
+                        <View style={styles.studioImageActionsRow}>
+                          <TouchableOpacity
+                            style={styles.studioChangeBtn}
+                            onPress={handlePickStudioDesktop}
+                          >
+                            <Text style={styles.studioChangeBtnText}>🔄 Change</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.studioRemoveBtn}
+                            onPress={() => setStudioDesktopImg("")}
+                          >
+                            <Text style={styles.studioRemoveBtnText}>✕ Remove</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ) : (
+                      <TouchableOpacity
+                        style={styles.studioDropzone}
+                        onPress={handlePickStudioDesktop}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={styles.studioDropzoneIcon}>💻</Text>
+                        <Text style={styles.studioDropzoneText}>Select Desktop Image</Text>
+                        <Text style={styles.studioDropzoneSubText}>Tap to pick from device gallery / storage</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
+                  {/* SLOT 2: MOBILE VIEW */}
+                  <View style={styles.studioSlotBox}>
+                    <View style={styles.studioSlotHeader}>
+                      <Text style={styles.studioSlotTitle}>📱 Mobile View Image</Text>
+                      <Text style={styles.studioSlotHint}>Compact / Mobile Ratio (1024×420)</Text>
+                    </View>
+
+                    {studioMobileImg ? (
+                      <View style={styles.studioImageSelectedBox}>
+                        <Image
+                          source={{ uri: resolveBannerImageUri(studioMobileImg) }}
+                          style={styles.studioImagePreviewMobile}
+                          resizeMode="cover"
+                        />
+                        <View style={styles.studioImageActionsRow}>
+                          <TouchableOpacity
+                            style={styles.studioChangeBtn}
+                            onPress={handlePickStudioMobile}
+                          >
+                            <Text style={styles.studioChangeBtnText}>🔄 Change</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.studioRemoveBtn}
+                            onPress={() => setStudioMobileImg("")}
+                          >
+                            <Text style={styles.studioRemoveBtnText}>✕ Remove</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ) : (
+                      <TouchableOpacity
+                        style={styles.studioDropzone}
+                        onPress={handlePickStudioMobile}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={styles.studioDropzoneIcon}>📱</Text>
+                        <Text style={styles.studioDropzoneText}>Select Mobile Image</Text>
+                        <Text style={styles.studioDropzoneSubText}>Tap to pick from device gallery / storage</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+
+                {/* OPTIONAL SLIDE DETAILS */}
+                <View style={styles.studioFormRow}>
+                  <View style={{ flex: 2 }}>
+                    <Text style={styles.studioInputLabel}>Banner Slide Title (Optional)</Text>
+                    <TextInput
+                      style={styles.studioFormInput}
+                      placeholder="e.g. Sithumina Express Logistics"
+                      placeholderTextColor="#8C877A"
+                      value={studioTitle}
+                      onChangeText={setStudioTitle}
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.studioInputLabel}>Tag</Text>
+                    <TextInput
+                      style={styles.studioFormInput}
+                      placeholder="PROMO"
+                      placeholderTextColor="#8C877A"
+                      value={studioTag}
+                      onChangeText={setStudioTag}
+                    />
+                  </View>
+                </View>
+
+                {/* PUBLISH TO SLIDESHOW BUTTON */}
                 <TouchableOpacity
-                  style={styles.addBannerBtn}
-                  onPress={() => setAddBannerModal(true)}
-                  activeOpacity={0.8}
+                  style={[
+                    styles.studioPublishBtn,
+                    (!studioDesktopImg && !studioMobileImg) && styles.studioPublishBtnDisabled,
+                    studioIsUploading && { opacity: 0.7 },
+                  ]}
+                  onPress={handlePublishStudioSlide}
+                  disabled={studioIsUploading || (!studioDesktopImg && !studioMobileImg)}
+                  activeOpacity={0.85}
                 >
-                  <Text style={styles.addBannerBtnText}>+ Add Banner</Text>
+                  {studioIsUploading ? (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <ActivityIndicator size="small" color="#26231B" />
+                      <Text style={styles.studioPublishBtnText}>Publishing Slide to Slideshow...</Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.studioPublishBtnText}>
+                      🚀 Publish Slide to Website Slideshow
+                    </Text>
+                  )}
                 </TouchableOpacity>
               </View>
 
@@ -1732,16 +2091,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                               b.target === "riders"
                                 ? styles.targetRiders
                                 : b.target === "customers"
-                                ? styles.targetCust
-                                : styles.targetAll,
+                                  ? styles.targetCust
+                                  : styles.targetAll,
                             ]}
                           >
                             <Text style={styles.bannerTargetText}>
                               {b.target === "all"
                                 ? "👥 All Users"
                                 : b.target === "riders"
-                                ? "🚚 Riders Only"
-                                : "👤 Customers Only"}
+                                  ? "🚚 Riders Only"
+                                  : "👤 Customers Only"}
                             </Text>
                           </View>
                           <View
@@ -1750,16 +2109,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                               b.viewMode === "mobile"
                                 ? styles.viewModeMobileBadge
                                 : b.viewMode === "desktop"
-                                ? styles.viewModeDesktopBadge
-                                : styles.viewModeAllBadge,
+                                  ? styles.viewModeDesktopBadge
+                                  : styles.viewModeAllBadge,
                             ]}
                           >
                             <Text style={styles.bannerViewModeBadgeText}>
                               {b.viewMode === "mobile"
                                 ? "📱 Mobile View"
                                 : b.viewMode === "desktop"
-                                ? "💻 Desktop View"
-                                : "🌐 All Devices"}
+                                  ? "💻 Desktop View"
+                                  : "🌐 All Devices"}
                             </Text>
                           </View>
                         </View>
@@ -1785,6 +2144,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                       {b.subtitle ? (
                         <Text style={styles.bannerCardSub}>{b.subtitle}</Text>
                       ) : null}
+
+                      {/* Dual Thumbnails: Desktop & Mobile Views */}
+                      <View style={styles.bannerDualThumbRow}>
+                        <View style={styles.bannerThumbCol}>
+                          <View style={styles.bannerThumbHeaderRow}>
+                            <Text style={styles.bannerThumbBadge}>💻 Desktop View (Ultra-Wide)</Text>
+                          </View>
+                          {b.desktopImage ? (
+                            <Image
+                              source={{ uri: resolveBannerImageUri(b.desktopImage) }}
+                              style={styles.bannerThumbImgDesktop}
+                              resizeMode="cover"
+                            />
+                          ) : (
+                            <View style={styles.bannerThumbEmpty}>
+                              <Text style={styles.bannerThumbEmptyText}>No Desktop Image</Text>
+                            </View>
+                          )}
+                        </View>
+                        <View style={styles.bannerThumbCol}>
+                          <View style={styles.bannerThumbHeaderRow}>
+                            <Text style={styles.bannerThumbBadge}>📱 Mobile View (Compact)</Text>
+                          </View>
+                          {b.mobileImage ? (
+                            <Image
+                              source={{ uri: resolveBannerImageUri(b.mobileImage) }}
+                              style={styles.bannerThumbImgMobile}
+                              resizeMode="cover"
+                            />
+                          ) : (
+                            <View style={styles.bannerThumbEmpty}>
+                              <Text style={styles.bannerThumbEmptyText}>No Mobile Image</Text>
+                            </View>
+                          )}
+                        </View>
+                      </View>
 
                       <View style={styles.bannerCardFooter}>
                         <Text style={styles.bannerDateText}>
@@ -2284,13 +2679,41 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
 
               {/* IMAGE URLS & PRESETS */}
               <Text style={styles.inputLabel}>Desktop Banner Image (16:9 Widescreen)</Text>
-              <TextInput
-                style={styles.formInput}
-                placeholder="/banner-desktop.jpg or https://..."
-                placeholderTextColor="#8C877A"
-                value={bannerDesktopImg}
-                onChangeText={setBannerDesktopImg}
-              />
+              <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+                <TextInput
+                  style={[styles.formInput, { flex: 1 }]}
+                  placeholder="/banner-desktop.jpg or https://..."
+                  placeholderTextColor="#8C877A"
+                  value={bannerDesktopImg.startsWith("data:") ? "[Image selected from local storage]" : bannerDesktopImg}
+                  onChangeText={setBannerDesktopImg}
+                />
+                <TouchableOpacity
+                  style={styles.uploadPickBtn}
+                  onPress={handlePickBannerDesktopImage}
+                  disabled={isPickingBannerImg === "desktop"}
+                  activeOpacity={0.8}
+                >
+                  {isPickingBannerImg === "desktop" ? (
+                    <ActivityIndicator size="small" color="#26231B" />
+                  ) : (
+                    <Text style={styles.uploadPickBtnText}>📁 Upload</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+              {bannerDesktopImg ? (
+                <View style={styles.uploadedImgThumbRow}>
+                  <Image source={{ uri: bannerDesktopImg }} style={styles.uploadedImgThumb} resizeMode="cover" />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.uploadedImgThumbTitle}>✓ Desktop Image Attached</Text>
+                    <Text style={styles.uploadedImgThumbSub} numberOfLines={1}>
+                      {bannerDesktopImg.startsWith("data:") ? "Local Storage Image Ready" : bannerDesktopImg}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setBannerDesktopImg("")}>
+                    <Text style={{ color: "#E03131", fontWeight: "700", fontSize: 13 }}>Remove</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
               <View style={styles.presetBtnsRow}>
                 <TouchableOpacity
                   style={styles.presetBtn}
@@ -2307,13 +2730,41 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               </View>
 
               <Text style={styles.inputLabel}>Mobile Banner Image (Vertical / Compact)</Text>
-              <TextInput
-                style={styles.formInput}
-                placeholder="/banner-mobile.jpg or https://..."
-                placeholderTextColor="#8C877A"
-                value={bannerMobileImg}
-                onChangeText={setBannerMobileImg}
-              />
+              <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+                <TextInput
+                  style={[styles.formInput, { flex: 1 }]}
+                  placeholder="/banner-mobile.jpg or https://..."
+                  placeholderTextColor="#8C877A"
+                  value={bannerMobileImg.startsWith("data:") ? "[Image selected from local storage]" : bannerMobileImg}
+                  onChangeText={setBannerMobileImg}
+                />
+                <TouchableOpacity
+                  style={styles.uploadPickBtn}
+                  onPress={handlePickBannerMobileImage}
+                  disabled={isPickingBannerImg === "mobile"}
+                  activeOpacity={0.8}
+                >
+                  {isPickingBannerImg === "mobile" ? (
+                    <ActivityIndicator size="small" color="#26231B" />
+                  ) : (
+                    <Text style={styles.uploadPickBtnText}>📁 Upload</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+              {bannerMobileImg ? (
+                <View style={styles.uploadedImgThumbRow}>
+                  <Image source={{ uri: bannerMobileImg }} style={styles.uploadedImgThumb} resizeMode="cover" />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.uploadedImgThumbTitle}>✓ Mobile Image Attached</Text>
+                    <Text style={styles.uploadedImgThumbSub} numberOfLines={1}>
+                      {bannerMobileImg.startsWith("data:") ? "Local Storage Image Ready" : bannerMobileImg}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setBannerMobileImg("")}>
+                    <Text style={{ color: "#E03131", fontWeight: "700", fontSize: 13 }}>Remove</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
               <View style={styles.presetBtnsRow}>
                 <TouchableOpacity
                   style={styles.presetBtn}
@@ -2397,26 +2848,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   </View>
 
                   {/* Mobile Banner Card Inside Phone */}
-                  <View style={styles.phoneBannerCard}>
-                    <View style={styles.phoneBannerTagRow}>
-                      <View style={styles.previewTagBadge}>
-                        <Text style={styles.previewTagText}>{bannerTag || "PROMO"}</Text>
+                  {bannerMobileImg || bannerDesktopImg ? (
+                    <View style={styles.phoneBannerImageWrap}>
+                      <Image
+                        source={{ uri: resolveBannerImageUri(bannerMobileImg || bannerDesktopImg) }}
+                        style={styles.phoneBannerImage}
+                        resizeMode="cover"
+                      />
+                      <View style={styles.phoneBannerImageOverlay}>
+                        <View style={styles.previewTagBadge}>
+                          <Text style={styles.previewTagText}>{bannerTag || "PROMO"}</Text>
+                        </View>
+                        {bannerCtaText ? (
+                          <View style={styles.phoneCtaBtnMini}>
+                            <Text style={styles.phoneCtaBtnTextMini}>{bannerCtaText} ➔</Text>
+                          </View>
+                        ) : null}
                       </View>
-                      <Text style={styles.phoneBannerFormatLabel}>📱 Mobile Header Banner</Text>
                     </View>
-                    <Text style={styles.phoneBannerTitle}>
-                      {bannerTitle || "Special Cargo Promotion"}
-                    </Text>
-                    <Text style={styles.phoneBannerSub}>
-                      {bannerSub || "Fast & Reliable Island-wide Transport Service"}
-                    </Text>
-                    <View style={styles.phoneCtaBtn}>
-                      <Text style={styles.phoneCtaBtnText}>{bannerCtaText || "Book Now"} ➔</Text>
+                  ) : (
+                    <View style={styles.phoneBannerCard}>
+                      <View style={styles.phoneBannerTagRow}>
+                        <View style={styles.previewTagBadge}>
+                          <Text style={styles.previewTagText}>{bannerTag || "PROMO"}</Text>
+                        </View>
+                        <Text style={styles.phoneBannerFormatLabel}>📱 Mobile Header Banner</Text>
+                      </View>
+                      <Text style={styles.phoneBannerTitle}>
+                        {bannerTitle || "Special Cargo Promotion"}
+                      </Text>
+                      <Text style={styles.phoneBannerSub}>
+                        {bannerSub || "Fast & Reliable Island-wide Transport Service"}
+                      </Text>
+                      <View style={styles.phoneCtaBtn}>
+                        <Text style={styles.phoneCtaBtnText}>{bannerCtaText || "Book Now"} ➔</Text>
+                      </View>
                     </View>
-                    {bannerMobileImg ? (
-                      <Text style={styles.phoneAssetHint}>🖼️ Asset: {bannerMobileImg}</Text>
-                    ) : null}
-                  </View>
+                  )}
 
                   {/* Phone Home Bar */}
                   <View style={styles.phoneHomeBar} />
@@ -2438,34 +2906,41 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   </View>
 
                   {/* Desktop Widescreen Hero Banner */}
-                  <View style={styles.desktopBannerContainer}>
-                    <View style={styles.desktopBannerContentCol}>
-                      <View style={styles.previewTagBadge}>
-                        <Text style={styles.previewTagText}>{bannerTag || "PROMO"}</Text>
-                      </View>
-                      <Text style={styles.desktopBannerTitle}>
-                        {bannerTitle || "Reliable Heavy Transport Across Sri Lanka"}
-                      </Text>
-                      <Text style={styles.desktopBannerSub}>
-                        {bannerSub || "Colombo • Kandy • Galle • Anuradhapura • Island-wide Fleet"}
-                      </Text>
-                      <View style={styles.desktopCtaRow}>
-                        <View style={styles.desktopCtaBtn}>
-                          <Text style={styles.desktopCtaBtnText}>{bannerCtaText || "Book Vehicle Now"} ➔</Text>
+                  {bannerDesktopImg || bannerMobileImg ? (
+                    <View style={styles.desktopBannerImageWrap}>
+                      <Image
+                        source={{ uri: resolveBannerImageUri(bannerDesktopImg || bannerMobileImg) }}
+                        style={styles.desktopBannerImage}
+                        resizeMode="cover"
+                      />
+                    </View>
+                  ) : (
+                    <View style={styles.desktopBannerContainer}>
+                      <View style={styles.desktopBannerContentCol}>
+                        <View style={styles.previewTagBadge}>
+                          <Text style={styles.previewTagText}>{bannerTag || "PROMO"}</Text>
                         </View>
-                        <Text style={styles.desktopHotlineText}>📞 075 598 4984</Text>
+                        <Text style={styles.desktopBannerTitle}>
+                          {bannerTitle || "Reliable Heavy Transport Across Sri Lanka"}
+                        </Text>
+                        <Text style={styles.desktopBannerSub}>
+                          {bannerSub || "Colombo • Kandy • Galle • Anuradhapura • Island-wide Fleet"}
+                        </Text>
+                        <View style={styles.desktopCtaRow}>
+                          <View style={styles.desktopCtaBtn}>
+                            <Text style={styles.desktopCtaBtnText}>{bannerCtaText || "Book Vehicle Now"} ➔</Text>
+                          </View>
+                          <Text style={styles.desktopHotlineText}>📞 075 598 4984</Text>
+                        </View>
+                      </View>
+
+                      <View style={styles.desktopFleetBadgeBox}>
+                        <Text style={{ fontSize: 24, textAlign: "center" }}>🚚</Text>
+                        <Text style={styles.desktopFleetBadgeTitle}>10ft • 14ft • 20ft</Text>
+                        <Text style={styles.desktopFleetBadgeSub}>Available 24/7</Text>
                       </View>
                     </View>
-
-                    <View style={styles.desktopFleetBadgeBox}>
-                      <Text style={{ fontSize: 24, textAlign: "center" }}>🚚</Text>
-                      <Text style={styles.desktopFleetBadgeTitle}>10ft • 14ft • 20ft</Text>
-                      <Text style={styles.desktopFleetBadgeSub}>Available 24/7</Text>
-                    </View>
-                  </View>
-                  {bannerDesktopImg ? (
-                    <Text style={styles.desktopAssetHint}>🖼️ Desktop Asset: {bannerDesktopImg}</Text>
-                  ) : null}
+                  )}
                 </View>
               )}
 
@@ -2554,24 +3029,41 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                       </View>
                     </View>
 
-                    <View style={styles.phoneBannerCard}>
-                      <View style={styles.phoneBannerTagRow}>
-                        <View style={styles.previewTagBadge}>
-                          <Text style={styles.previewTagText}>{selectedBannerForInspect.tag}</Text>
+                    {selectedBannerForInspect.mobileImage || selectedBannerForInspect.desktopImage ? (
+                      <View style={styles.phoneBannerImageWrap}>
+                        <Image
+                          source={{ uri: resolveBannerImageUri(selectedBannerForInspect.mobileImage || selectedBannerForInspect.desktopImage) }}
+                          style={styles.phoneBannerImage}
+                          resizeMode="cover"
+                        />
+                        <View style={styles.phoneBannerImageOverlay}>
+                          <View style={styles.previewTagBadge}>
+                            <Text style={styles.previewTagText}>{selectedBannerForInspect.tag || "PROMO"}</Text>
+                          </View>
+                          {selectedBannerForInspect.ctaText ? (
+                            <View style={styles.phoneCtaBtnMini}>
+                              <Text style={styles.phoneCtaBtnTextMini}>{selectedBannerForInspect.ctaText} ➔</Text>
+                            </View>
+                          ) : null}
                         </View>
-                        <Text style={styles.phoneBannerFormatLabel}>📱 Mobile App Banner</Text>
                       </View>
-                      <Text style={styles.phoneBannerTitle}>{selectedBannerForInspect.title}</Text>
-                      {selectedBannerForInspect.subtitle ? (
-                        <Text style={styles.phoneBannerSub}>{selectedBannerForInspect.subtitle}</Text>
-                      ) : null}
-                      <View style={styles.phoneCtaBtn}>
-                        <Text style={styles.phoneCtaBtnText}>{selectedBannerForInspect.ctaText || "Book Now"} ➔</Text>
+                    ) : (
+                      <View style={styles.phoneBannerCard}>
+                        <View style={styles.phoneBannerTagRow}>
+                          <View style={styles.previewTagBadge}>
+                            <Text style={styles.previewTagText}>{selectedBannerForInspect.tag}</Text>
+                          </View>
+                          <Text style={styles.phoneBannerFormatLabel}>📱 Mobile App Banner</Text>
+                        </View>
+                        <Text style={styles.phoneBannerTitle}>{selectedBannerForInspect.title}</Text>
+                        {selectedBannerForInspect.subtitle ? (
+                          <Text style={styles.phoneBannerSub}>{selectedBannerForInspect.subtitle}</Text>
+                        ) : null}
+                        <View style={styles.phoneCtaBtn}>
+                          <Text style={styles.phoneCtaBtnText}>{selectedBannerForInspect.ctaText || "Book Now"} ➔</Text>
+                        </View>
                       </View>
-                      {selectedBannerForInspect.mobileImage ? (
-                        <Text style={styles.phoneAssetHint}>🖼️ Asset: {selectedBannerForInspect.mobileImage}</Text>
-                      ) : null}
-                    </View>
+                    )}
 
                     <View style={styles.phoneHomeBar} />
                   </View>
@@ -2590,32 +3082,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                       <Text style={{ fontSize: 9, color: "#8C877A", fontWeight: "700" }}>DESKTOP</Text>
                     </View>
 
-                    <View style={styles.desktopBannerContainer}>
-                      <View style={styles.desktopBannerContentCol}>
-                        <View style={styles.previewTagBadge}>
-                          <Text style={styles.previewTagText}>{selectedBannerForInspect.tag}</Text>
-                        </View>
-                        <Text style={styles.desktopBannerTitle}>{selectedBannerForInspect.title}</Text>
-                        {selectedBannerForInspect.subtitle ? (
-                          <Text style={styles.desktopBannerSub}>{selectedBannerForInspect.subtitle}</Text>
-                        ) : null}
-                        <View style={styles.desktopCtaRow}>
-                          <View style={styles.desktopCtaBtn}>
-                            <Text style={styles.desktopCtaBtnText}>{selectedBannerForInspect.ctaText || "Book Vehicle Now"} ➔</Text>
+                    {selectedBannerForInspect.desktopImage || selectedBannerForInspect.mobileImage ? (
+                      <View style={styles.desktopBannerImageWrap}>
+                        <Image
+                          source={{ uri: resolveBannerImageUri(selectedBannerForInspect.desktopImage || selectedBannerForInspect.mobileImage) }}
+                          style={styles.desktopBannerImage}
+                          resizeMode="cover"
+                        />
+                      </View>
+                    ) : (
+                      <View style={styles.desktopBannerContainer}>
+                        <View style={styles.desktopBannerContentCol}>
+                          <View style={styles.previewTagBadge}>
+                            <Text style={styles.previewTagText}>{selectedBannerForInspect.tag}</Text>
                           </View>
-                          <Text style={styles.desktopHotlineText}>📞 075 598 4984</Text>
+                          <Text style={styles.desktopBannerTitle}>{selectedBannerForInspect.title}</Text>
+                          {selectedBannerForInspect.subtitle ? (
+                            <Text style={styles.desktopBannerSub}>{selectedBannerForInspect.subtitle}</Text>
+                          ) : null}
+                          <View style={styles.desktopCtaRow}>
+                            <View style={styles.desktopCtaBtn}>
+                              <Text style={styles.desktopCtaBtnText}>{selectedBannerForInspect.ctaText || "Book Vehicle Now"} ➔</Text>
+                            </View>
+                            <Text style={styles.desktopHotlineText}>📞 075 598 4984</Text>
+                          </View>
+                        </View>
+
+                        <View style={styles.desktopFleetBadgeBox}>
+                          <Text style={{ fontSize: 24, textAlign: "center" }}>🚚</Text>
+                          <Text style={styles.desktopFleetBadgeTitle}>10ft • 14ft • 20ft</Text>
+                          <Text style={styles.desktopFleetBadgeSub}>Available 24/7</Text>
                         </View>
                       </View>
-
-                      <View style={styles.desktopFleetBadgeBox}>
-                        <Text style={{ fontSize: 24, textAlign: "center" }}>🚚</Text>
-                        <Text style={styles.desktopFleetBadgeTitle}>10ft • 14ft • 20ft</Text>
-                        <Text style={styles.desktopFleetBadgeSub}>Available 24/7</Text>
-                      </View>
-                    </View>
-                    {selectedBannerForInspect.desktopImage ? (
-                      <Text style={styles.desktopAssetHint}>🖼️ Desktop Asset: {selectedBannerForInspect.desktopImage}</Text>
-                    ) : null}
+                    )}
                   </View>
                 )}
 
@@ -3896,6 +4395,333 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: "#26231B",
   },
+  directUploadHeaderBtn: {
+    backgroundColor: "#26231B",
+    borderWidth: 1,
+    borderColor: "#FFC20E",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  directUploadHeaderBtnText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#FFC20E",
+  },
+  directUploadBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: "#FFFCF2",
+    borderWidth: 1.5,
+    borderColor: "#FFC20E",
+    borderStyle: "dashed",
+    borderRadius: 14,
+    padding: 14,
+    marginTop: 14,
+    marginBottom: 8,
+  },
+  directUploadIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: "#26231B",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  directUploadIcon: {
+    fontSize: 22,
+  },
+  directUploadBoxTitle: {
+    fontSize: 13.5,
+    fontWeight: "800",
+    color: "#26231B",
+  },
+  directUploadBoxSub: {
+    fontSize: 11.5,
+    color: "#6F6A5A",
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  directUploadBoxAction: {
+    backgroundColor: "#FFC20E",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  directUploadBoxActionText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#26231B",
+  },
+  uploadPickBtn: {
+    backgroundColor: "#FFC20E",
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  uploadPickBtnText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#26231B",
+  },
+  uploadedImgThumbRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#FFF9E6",
+    borderWidth: 1,
+    borderColor: "#FFE082",
+    borderRadius: 10,
+    padding: 8,
+    marginTop: 4,
+  },
+  uploadedImgThumb: {
+    width: 52,
+    height: 36,
+    borderRadius: 6,
+    backgroundColor: "#E0E0E0",
+  },
+  uploadedImgThumbTitle: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#26231B",
+  },
+  uploadedImgThumbSub: {
+    fontSize: 11,
+    color: "#7A6B3A",
+  },
+  /* Dedicated Slideshow Studio Styles */
+  studioCard: {
+    backgroundColor: "#FFFCF2",
+    borderWidth: 1.5,
+    borderColor: "#FFC20E",
+    borderRadius: 16,
+    padding: 16,
+    marginTop: 14,
+    marginBottom: 16,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  studioHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    marginBottom: 14,
+  },
+  studioTitle: {
+    fontSize: 15,
+    fontWeight: "900",
+    color: "#26231B",
+  },
+  studioSub: {
+    fontSize: 11.5,
+    color: "#6F6A5A",
+    marginTop: 3,
+    lineHeight: 16,
+  },
+  studioCounterBadge: {
+    backgroundColor: "#26231B",
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#FFC20E",
+  },
+  studioCounterText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#FFC20E",
+  },
+  studioSlotsContainer: {
+    gap: 12,
+    marginBottom: 14,
+  },
+  studioSlotBox: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#E8E2D2",
+    padding: 12,
+  },
+  studioSlotHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  studioSlotTitle: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#26231B",
+  },
+  studioSlotHint: {
+    fontSize: 10.5,
+    color: "#8C877A",
+    fontWeight: "600",
+  },
+  studioDropzone: {
+    borderWidth: 1.5,
+    borderColor: "#FFC20E",
+    borderStyle: "dashed",
+    borderRadius: 10,
+    paddingVertical: 18,
+    paddingHorizontal: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#FFFDF6",
+  },
+  studioDropzoneIcon: {
+    fontSize: 24,
+    marginBottom: 4,
+  },
+  studioDropzoneText: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#26231B",
+  },
+  studioDropzoneSubText: {
+    fontSize: 11,
+    color: "#8C877A",
+    marginTop: 2,
+  },
+  studioImageSelectedBox: {
+    borderRadius: 8,
+    overflow: "hidden",
+    backgroundColor: "#161512",
+    borderWidth: 1,
+    borderColor: "#3D392B",
+  },
+  studioImagePreviewDesktop: {
+    width: "100%",
+    height: 90,
+  },
+  studioImagePreviewMobile: {
+    width: "100%",
+    height: 115,
+  },
+  studioImageActionsRow: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 8,
+    padding: 6,
+    backgroundColor: "#201E17",
+  },
+  studioChangeBtn: {
+    backgroundColor: "#FFC20E",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  studioChangeBtnText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#26231B",
+  },
+  studioRemoveBtn: {
+    backgroundColor: "rgba(224, 49, 49, 0.2)",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  studioRemoveBtnText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#FF8787",
+  },
+  studioFormRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 14,
+  },
+  studioInputLabel: {
+    fontSize: 11.5,
+    fontWeight: "700",
+    color: "#4A4538",
+    marginBottom: 4,
+  },
+  studioFormInput: {
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#D8D2C2",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontSize: 12.5,
+    color: "#26231B",
+  },
+  studioPublishBtn: {
+    backgroundColor: "#FFC20E",
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  studioPublishBtnDisabled: {
+    backgroundColor: "#E0DAC9",
+    opacity: 0.7,
+  },
+  studioPublishBtnText: {
+    fontSize: 13.5,
+    fontWeight: "900",
+    color: "#26231B",
+  },
+  bannerDualThumbRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginVertical: 8,
+  },
+  bannerThumbCol: {
+    flex: 1,
+    backgroundColor: "#161512",
+    borderRadius: 8,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "#3D392B",
+  },
+  bannerThumbHeaderRow: {
+    backgroundColor: "#201E17",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: "#332F23",
+  },
+  bannerThumbBadge: {
+    fontSize: 9.5,
+    fontWeight: "800",
+    color: "#FFC20E",
+  },
+  bannerThumbImgDesktop: {
+    width: "100%",
+    height: 65,
+  },
+  bannerThumbImgMobile: {
+    width: "100%",
+    height: 65,
+  },
+  bannerThumbEmpty: {
+    height: 65,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#201E17",
+  },
+  bannerThumbEmptyText: {
+    fontSize: 10,
+    color: "#6F6A5A",
+  },
   emptyBannerState: {
     alignItems: "center",
     justifyContent: "center",
@@ -4500,5 +5326,67 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingBottom: 8,
     fontStyle: "italic",
+  },
+  phoneBannerImageWrap: {
+    width: "100%",
+    height: 125,
+    borderRadius: 14,
+    overflow: "hidden",
+    backgroundColor: "#0c2444",
+    borderWidth: 1.5,
+    borderColor: "#FFC20E",
+    position: "relative",
+    marginVertical: 4,
+  },
+  phoneBannerImage: {
+    width: "100%",
+    height: "100%",
+  },
+  phoneBannerImageOverlay: {
+    position: "absolute",
+    bottom: 6,
+    left: 6,
+    right: 6,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  phoneCtaBtnMini: {
+    backgroundColor: "#FFC20E",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  phoneCtaBtnTextMini: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: "#26231B",
+  },
+  desktopBannerImageWrap: {
+    width: "100%",
+    height: 100,
+    borderRadius: 8,
+    overflow: "hidden",
+    backgroundColor: "#0c2444",
+    borderWidth: 1.5,
+    borderColor: "#FFC20E",
+  },
+  desktopBannerImage: {
+    width: "100%",
+    height: "100%",
+  },
+  bannerCardImageWrap: {
+    width: "100%",
+    height: 95,
+    borderRadius: 10,
+    overflow: "hidden",
+    backgroundColor: "#161512",
+    marginVertical: 8,
+    borderWidth: 1,
+    borderColor: "#E7E2D0",
+  },
+  bannerCardImage: {
+    width: "100%",
+    height: "100%",
   },
 });

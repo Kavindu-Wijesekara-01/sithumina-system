@@ -65,6 +65,15 @@
   ],
   "customers": [
     {
+      "id": "CUST-0764011509",
+      "name": "lashmitha paga",
+      "phone": "0764011509",
+      "email": "",
+      "city": "",
+      "createdAt": 1794293577970,
+      "lastLoginAt": 1794294586127
+    },
+    {
       "id": "CUST-0771112233",
       "name": "Indiv Cash Customer",
       "phone": "0771112233",
