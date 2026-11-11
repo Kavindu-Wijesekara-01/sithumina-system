@@ -2,6 +2,7 @@
   "expo": {
     "name": "sithumina driver",
     "slug": "sithumina-driver",
+    "owner": "sithuminadrivers-team",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/app-icon.png",
@@ -44,6 +45,11 @@
           "backgroundColor": "#FFC20E"
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "9fdcd0c9-3dff-400a-8530-d33b3aabc114"
+      }
+    }
   }
 }
