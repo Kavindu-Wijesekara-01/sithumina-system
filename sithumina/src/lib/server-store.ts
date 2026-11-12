@@ -103,10 +103,13 @@ export interface StoredBooking {
   deliveryLng?: number;
   date: string;
   dates?: string[];
+  startTime?: string;
+  endTime?: string;
   vehicleType: string;
   packageDetails?: string;
   status: BookingStatusValue;
   assignedLorryId?: string;
+  assignedDriverId?: string;
   assignedDriverName?: string;
   assignedDriverPhone?: string;
   assignedPlate?: string;
@@ -130,6 +133,7 @@ export interface StoredBooking {
   paymentRejectReason?: string;
   paymentApprovedAt?: number;
   paymentSlipDeletedAt?: number;
+  customerArchived?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -206,15 +210,18 @@ function normalizeLorry(l: any, index: number): StoredLorry {
   };
 }
 
-let inMemoryStore: FleetStoreData | null = null;
-let writeStoreTimeout: NodeJS.Timeout | null = null;
+const globalForStore = globalThis as typeof globalThis & {
+  __sithuminaFleetStore?: FleetStoreData | null;
+  __sithuminaFleetStoreMtime?: number;
+  __sithuminaWriteTimeout?: NodeJS.Timeout | null;
+};
 
 function readStore(): FleetStoreData {
-  if (inMemoryStore) {
-    return inMemoryStore;
-  }
   try {
     if (!fs.existsSync(STORE_PATH)) {
+      if (globalForStore.__sithuminaFleetStore) {
+        return globalForStore.__sithuminaFleetStore;
+      }
       const initial: FleetStoreData = {
         drivers: [],
         lorries: DEFAULT_LORRIES_SEED,
@@ -228,12 +235,22 @@ function readStore(): FleetStoreData {
         const dir = path.dirname(STORE_PATH);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(STORE_PATH, JSON.stringify(initial, null, 2), "utf8");
+        globalForStore.__sithuminaFleetStoreMtime = fs.statSync(STORE_PATH).mtimeMs;
       } catch {
         // Read-only serverless environment (e.g. Vercel / AWS Lambda)
       }
-      inMemoryStore = initial;
+      globalForStore.__sithuminaFleetStore = initial;
       return initial;
     }
+
+    const stat = fs.statSync(STORE_PATH);
+    if (
+      globalForStore.__sithuminaFleetStore &&
+      globalForStore.__sithuminaFleetStoreMtime === stat.mtimeMs
+    ) {
+      return globalForStore.__sithuminaFleetStore;
+    }
+
     const raw = fs.readFileSync(STORE_PATH, "utf8");
     const parsed = JSON.parse(raw);
     const rawLorries = Array.isArray(parsed.lorries)
@@ -249,10 +266,14 @@ function readStore(): FleetStoreData {
       inquiries: Array.isArray(parsed.inquiries) ? parsed.inquiries : [],
       reviews: Array.isArray(parsed.reviews) ? parsed.reviews : [],
     };
-    inMemoryStore = store;
+    globalForStore.__sithuminaFleetStore = store;
+    globalForStore.__sithuminaFleetStoreMtime = stat.mtimeMs;
     return store;
   } catch (err) {
     console.warn("Could not read fleet-store.json, initializing default:", err);
+    if (globalForStore.__sithuminaFleetStore) {
+      return globalForStore.__sithuminaFleetStore;
+    }
     const fallback: FleetStoreData = {
       drivers: [],
       lorries: DEFAULT_LORRIES_SEED,
@@ -262,13 +283,13 @@ function readStore(): FleetStoreData {
       inquiries: [],
       reviews: DEFAULT_REVIEWS_SEED,
     };
-    inMemoryStore = fallback;
+    globalForStore.__sithuminaFleetStore = fallback;
     return fallback;
   }
 }
 
 function writeStore(data: FleetStoreData, immediate = false): void {
-  inMemoryStore = data;
+  globalForStore.__sithuminaFleetStore = data;
   const doWrite = () => {
     try {
       const dir = path.dirname(STORE_PATH);
@@ -276,6 +297,7 @@ function writeStore(data: FleetStoreData, immediate = false): void {
         fs.mkdirSync(dir, { recursive: true });
       }
       fs.writeFileSync(STORE_PATH, JSON.stringify(data, null, 2), "utf8");
+      globalForStore.__sithuminaFleetStoreMtime = fs.statSync(STORE_PATH).mtimeMs;
     } catch {
       // Expected in serverless hosts like Vercel with read-only filesystems.
       // Firestore acts as the primary cloud database.
@@ -283,16 +305,16 @@ function writeStore(data: FleetStoreData, immediate = false): void {
   };
 
   if (immediate) {
-    if (writeStoreTimeout) {
-      clearTimeout(writeStoreTimeout);
-      writeStoreTimeout = null;
+    if (globalForStore.__sithuminaWriteTimeout) {
+      clearTimeout(globalForStore.__sithuminaWriteTimeout);
+      globalForStore.__sithuminaWriteTimeout = null;
     }
     doWrite();
   } else {
-    if (!writeStoreTimeout) {
-      writeStoreTimeout = setTimeout(() => {
-        writeStoreTimeout = null;
-        if (inMemoryStore) doWrite();
+    if (!globalForStore.__sithuminaWriteTimeout) {
+      globalForStore.__sithuminaWriteTimeout = setTimeout(() => {
+        globalForStore.__sithuminaWriteTimeout = null;
+        if (globalForStore.__sithuminaFleetStore) doWrite();
       }, 3000);
     }
   }
@@ -769,6 +791,61 @@ export function upsertCustomerInStore(input: {
   return customer;
 }
 
+export function deleteCustomerFromStore(idOrPhone: string, phone?: string): boolean {
+  const store = readStore();
+  const cleanId = (idOrPhone || "").trim().toLowerCase();
+  const lookupPhone = (phone || "").trim() || (idOrPhone || "").trim();
+  const initialLen = store.customers.length;
+
+  store.customers = store.customers.filter((c) => {
+    const cId = (c.id || "").trim().toLowerCase();
+    const matchById = Boolean(cleanId && cId === cleanId);
+    const matchByPhone = Boolean(lookupPhone && c.phone && phonesMatch(c.phone, lookupPhone));
+    return !matchById && !matchByPhone;
+  });
+
+  if (store.customers.length !== initialLen) {
+    writeStore(store, true);
+    return true;
+  }
+  return false;
+}
+
+export function archiveOrDeleteCustomerBookingsInStore(
+  phone: string,
+  deleteBookings: boolean
+): number {
+  const cleanPhone = (phone || "").trim();
+  if (!cleanPhone) return 0;
+  const store = readStore();
+  let affected = 0;
+
+  if (deleteBookings) {
+    const remaining: StoredBooking[] = [];
+    for (const b of store.bookings) {
+      if (b.customerPhone && phonesMatch(b.customerPhone, cleanPhone)) {
+        affected += 1;
+      } else {
+        remaining.push(b);
+      }
+    }
+    store.bookings = remaining;
+  } else {
+    for (const b of store.bookings) {
+      if (b.customerPhone && phonesMatch(b.customerPhone, cleanPhone)) {
+        b.customerArchived = true;
+        b.updatedAt = Date.now();
+        affected += 1;
+      }
+    }
+  }
+
+  if (affected > 0) {
+    writeStore(store, true);
+  }
+  return affected;
+}
+
 /* ============================================================
  * BOOKINGS
  * ============================================================ */
@@ -834,10 +911,15 @@ export function createBookingInStore(input: {
   deliveryLng?: number;
   date: string;
   dates?: string[];
+  startTime?: string;
+  endTime?: string;
   vehicleType: string;
   packageDetails?: string;
   assignedPlate?: string;
   assignedLorryId?: string;
+  assignedDriverId?: string;
+  assignedDriverName?: string;
+  assignedDriverPhone?: string;
   bookingType?: "individual_vehicle" | "live_lorry";
   cargoNature?: string;
   daysNeeded?: number | string;
@@ -886,11 +968,16 @@ export function createBookingInStore(input: {
     deliveryLng: input.deliveryLng,
     date: resolvedDates[0],
     dates: resolvedDates,
+    startTime: input.startTime?.trim() || undefined,
+    endTime: input.endTime?.trim() || undefined,
     vehicleType: input.vehicleType.trim(),
     packageDetails: input.packageDetails?.trim() || "",
     status: input.status || "pending",
     assignedPlate: input.assignedPlate?.trim(),
     assignedLorryId: input.assignedLorryId?.trim(),
+    assignedDriverId: input.assignedDriverId?.trim(),
+    assignedDriverName: input.assignedDriverName?.trim(),
+    assignedDriverPhone: input.assignedDriverPhone?.trim(),
     bookingType: input.bookingType || (input.assignedPlate ? "individual_vehicle" : "individual_vehicle"),
     cargoNature: input.cargoNature?.trim(),
     daysNeeded: input.daysNeeded,
@@ -932,9 +1019,14 @@ export function updateBookingStatusInStore(
   status: BookingStatusValue,
   assignment?: {
     assignedLorryId?: string;
+    assignedDriverId?: string;
     assignedDriverName?: string;
     assignedDriverPhone?: string;
     assignedPlate?: string;
+    date?: string;
+    dates?: string[];
+    startTime?: string;
+    endTime?: string;
   },
   paymentMeta?: {
     quotedAmount?: number;
@@ -964,6 +1056,9 @@ export function updateBookingStatusInStore(
     if (assignment.assignedLorryId) {
       store.bookings[idx].assignedLorryId = assignment.assignedLorryId;
     }
+    if (assignment.assignedDriverId !== undefined && assignment.assignedDriverId.trim() !== "") {
+      store.bookings[idx].assignedDriverId = assignment.assignedDriverId.trim();
+    }
     const cleanAssignDriver = String(assignment.assignedDriverName || "").trim();
     if (cleanAssignDriver && cleanAssignDriver !== "Driver" && cleanAssignDriver !== "Unassigned") {
       store.bookings[idx].assignedDriverName = cleanAssignDriver;
@@ -978,6 +1073,23 @@ export function updateBookingStatusInStore(
     }
     if (assignment.assignedPlate) {
       store.bookings[idx].assignedPlate = assignment.assignedPlate;
+    }
+    if (assignment.date && assignment.date.trim()) {
+      const cleanDate = assignment.date.trim();
+      store.bookings[idx].date = cleanDate;
+      store.bookings[idx].dates =
+        Array.isArray(assignment.dates) && assignment.dates.length > 0
+          ? assignment.dates
+          : [cleanDate];
+    } else if (Array.isArray(assignment.dates) && assignment.dates.length > 0) {
+      store.bookings[idx].dates = assignment.dates;
+      store.bookings[idx].date = assignment.dates[0];
+    }
+    if (assignment.startTime !== undefined && assignment.startTime.trim() !== "") {
+      store.bookings[idx].startTime = assignment.startTime.trim();
+    }
+    if (assignment.endTime !== undefined && assignment.endTime.trim() !== "") {
+      store.bookings[idx].endTime = assignment.endTime.trim();
     }
   }
 

@@ -7,15 +7,11 @@ import { useLanguage } from "@/context/LanguageContext";
 import { useAuth } from "@/context/AuthContext";
 import { Lorry } from "@/lib/mock-lorries";
 import { Booking, subscribeFleetVehicles } from "@/lib/db-services";
-import { db } from "@/lib/firebase";
-import { collection, onSnapshot } from "firebase/firestore";
 import {
   createBookingAction,
   trackBookingAction,
-  getLorryBookedDatesAction,
 } from "@/actions";
-import { normalizePhoneNumber, normalizePlate } from "@/lib/phone-utils";
-import { BookingCalendar } from "@/components/BookingCalendar";
+import { normalizePhoneNumber } from "@/lib/phone-utils";
 import { findNearestSriLankanCity } from "@/lib/geo-utils";
 
 type ViewState = "fleet" | "detail" | "booking-form" | "booking-success" | "track";
@@ -262,11 +258,6 @@ function BookVehicleContent() {
   const [selectedVehicle, setSelectedVehicle] = useState<Lorry | null>(null);
   const [activePhotoIdx, setActivePhotoIdx] = useState(0);
 
-  // Booked dates for selected vehicle
-  const [bookedDates, setBookedDates] = useState<string[]>([]);
-  const [bookingsByDate, setBookingsByDate] = useState<Record<string, any>>({});
-  const [loadingBookedDates, setLoadingBookedDates] = useState(false);
-
   // GPS State for customer live location
   const [isLocating, setIsLocating] = useState(false);
   const [gpsCoords, setGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
@@ -359,113 +350,6 @@ function BookVehicleContent() {
     }
   }, [fleet, queryPlate, queryLorryId]);
 
-  // Subscribe to real-time booked dates whenever selected vehicle changes
-  useEffect(() => {
-    if (!selectedVehicle) {
-      setBookedDates([]);
-      setBookingsByDate({});
-      setLoadingBookedDates(false);
-      return;
-    }
-
-    let isMounted = true;
-    setLoadingBookedDates(true);
-    const targetPlateNorm = normalizePlate(selectedVehicle.plate);
-    const targetId = (selectedVehicle.id || "").trim().toUpperCase();
-
-    const fallbackToServer = async () => {
-      try {
-        const res = await getLorryBookedDatesAction(selectedVehicle.plate || selectedVehicle.id);
-        if (!isMounted) return;
-        if (res.success && res.data) {
-          setBookedDates(res.data.bookedDates || []);
-          setBookingsByDate(res.data.bookingsByDate || {});
-        } else {
-          setBookedDates([]);
-          setBookingsByDate({});
-        }
-      } catch {
-        if (!isMounted) return;
-        setBookedDates([]);
-        setBookingsByDate({});
-      } finally {
-        if (isMounted) setLoadingBookedDates(false);
-      }
-    };
-
-    let unsub = () => {};
-    try {
-      const colRef = collection(db, "bookings");
-      unsub = onSnapshot(
-        colRef,
-        (snap) => {
-          if (!isMounted) return;
-          const byDate: Record<string, any> = {};
-          const dates: string[] = [];
-          const seenIds = new Set<string>();
-
-          snap.forEach((docSnap) => {
-            const data = docSnap.data();
-            const resolvedId = String(data.id || data.trackingId || docSnap.id);
-            if (seenIds.has(resolvedId)) return;
-            seenIds.add(resolvedId);
-
-            const plateValRaw = String(data.assignedPlate || data.selectedVehiclePlate || "").trim().toUpperCase();
-            const plateValNorm = normalizePlate(plateValRaw);
-            const idVal = String(data.assignedLorryId || "").trim().toUpperCase();
-            const plateMatch = Boolean(targetPlateNorm && plateValNorm === targetPlateNorm);
-            const idMatch = Boolean(targetId && idVal === targetId);
-            const isConfirmed = ["accepted", "assigned", "in_transit", "delivered", "booked"].includes(
-              String(data.status || "pending")
-            );
-
-            if ((plateMatch || idMatch) && isConfirmed) {
-              const rawDates: string[] =
-                Array.isArray(data.dates) && data.dates.length > 0
-                  ? data.dates
-                  : data.date
-                  ? [data.date]
-                  : [];
-              rawDates.forEach((d) => {
-                if (d) {
-                  dates.push(d);
-                  byDate[d] = {
-                    bookingId: resolvedId,
-                    customerName: data.customerName || data.name || "Customer",
-                    customerPhone: data.customerPhone || data.phone || "",
-                    pickupCity: data.pickupCity || data.pickup || "",
-                    deliveryCity: data.deliveryCity || data.destination || "",
-                    cargoNature: data.cargoNature || data.packageDetails || data.notes || "",
-                    daysNeeded: rawDates.length || data.daysNeeded || 1,
-                    packageDetails: data.packageDetails || data.notes || "",
-                    date: d,
-                    vehicleType: data.vehicleType || "Lorry",
-                    status: data.status || "accepted",
-                    assignedPlate: plateValRaw || selectedVehicle.plate || "",
-                  };
-                }
-              });
-            }
-          });
-
-          setBookedDates(Array.from(new Set(dates)));
-          setBookingsByDate(byDate);
-          setLoadingBookedDates(false);
-        },
-        () => {
-          void fallbackToServer();
-        }
-      );
-    } catch {
-      void fallbackToServer();
-    }
-
-    return () => {
-      isMounted = false;
-      unsub();
-    };
-  }, [selectedVehicle]);
-
   // Customer Live Location (GPS) capture
   const handleCaptureLiveLocation = () => {
     if (typeof window === "undefined" || !navigator.geolocation) {
@@ -540,24 +424,14 @@ function BookVehicleContent() {
       return;
     }
 
-    const primaryDate = form.dates[0] || form.date;
-    const allSelectedDates = form.dates.length > 0 ? form.dates : (form.date ? [form.date] : []);
+    const primaryDate = form.date || form.dates[0];
+    const allSelectedDates = primaryDate ? [primaryDate] : [];
 
-    if (allSelectedDates.length === 0) {
+    if (!primaryDate) {
       alert(
         locale === "en"
-          ? "Please choose at least one available date from the calendar."
-          : "කරුණාකර කැලැන්ඩරයෙන් දිනයක් හෝ දින කිහිපයක් තෝරන්න."
-      );
-      return;
-    }
-
-    const conflict = allSelectedDates.find((d) => bookedDates.includes(d));
-    if (conflict) {
-      alert(
-        locale === "en"
-          ? `The date ${conflict} is already booked for this lorry. Please choose another date.`
-          : `${conflict} දිනය දැනටමත් මෙම ලොරිය සඳහා වෙන්කර ඇත. කරුණාකර වෙනත් දිනයක් තෝරන්න.`
+          ? "Please select a booking date."
+          : "කරුණාකර වෙන්කරන දිනය තෝරන්න."
       );
       return;
     }
@@ -683,8 +557,8 @@ function BookVehicleContent() {
           </h1>
           <p className="text-xs text-[var(--mut)] mt-0.5">
             {locale === "en"
-              ? "Reserve specific lorries with live GPS pickup navigation & real-time calendar availability."
-              : "සජීවී GPS ස්ථාන සහ දින කැලැන්ඩරය සමඟින් තනි ලොරි රථ වෙන්කරවා ගැනීමේ පහසුකම."}
+              ? "Reserve specific lorries with simple date selection & Admin-scheduled dispatch times."
+              : "සරල දින තේරීමක් සහ Admin මගින් වේලාව වෙන් කිරීමේ පහසුකම සමඟින් තනි ලොරි රථ වෙන්කරවා ගැනීම."}
           </p>
         </div>
 
@@ -1156,101 +1030,61 @@ function BookVehicleContent() {
             </div>
           </div>
 
-          {/* Interactive Date Calendar with RED Booked Dates */}
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-black text-[var(--ink)]">
-                  {locale === "en" ? "Booking Date & Vehicle Availability" : "වෙන්කරන දිනය සහ ලබාගත හැකි බව"}
-                </h3>
-                <p className="text-xs text-[var(--mut)]">
-                  {locale === "en"
-                    ? "Dates marked in RED are already booked for this lorry and cannot be selected."
-                    : "රතු පැහැයෙන් සලකුණු කර ඇති දින දැනටමත් මෙම ලොරියට වෙන්කර ඇති බැවින් තෝරාගත නොහැක."}
-                </p>
-              </div>
-              {loadingBookedDates && (
-                <span className="text-[11px] text-[var(--mut)] font-bold">
-                  {locale === "en" ? "Checking dates..." : "දින පරීක්ෂා කරමින්..."}
-                </span>
-              )}
+          {/* Simple Booking Date Input (No calendar or date locking — Admin allocates exact time & rider on review) */}
+          <div className="p-5 rounded-2xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-3">
+            <div>
+              <h3 className="text-sm font-black text-[var(--ink)]">
+                {locale === "en" ? "Booking Date *" : "වෙන්කරන දිනය *"}
+              </h3>
+              <p className="text-xs text-[var(--mut)] mt-0.5">
+                {locale === "en"
+                  ? "Select your preferred trip date. Head Office will review your request and allocate the exact time duration and rider."
+                  : "ඔබට අවශ්‍ය ගමන් දිනය තෝරා එවන්න. ප්‍රධාන කාර්යාලය මඟින් පරීක්ෂා කර සුදුසු වේලාව සහ රියදුරෙකු වෙන්කර දෙනු ඇත."}
+              </p>
             </div>
 
-            {loadingBookedDates ? (
-              <div className="p-8 text-center bg-white rounded-2xl border border-[var(--line)]">
-                <span className="text-xs font-bold text-[var(--mut)]">
-                  {locale === "en" ? "Loading vehicle availability calendar..." : "වාහනයේ දින දර්ශනය පරීක්ෂා කරමින්..."}
-                </span>
-              </div>
-            ) : (
-              <BookingCalendar
-                selectedDate={form.date}
-                selectedDates={form.dates}
-                onSelectDate={(d) => {
-                  setForm((prev) => {
-                    const exists = prev.dates.includes(d);
-                    const next = exists ? prev.dates.filter((x) => x !== d) : [...prev.dates, d].sort();
-                    return {
-                      ...prev,
-                      dates: next,
-                      date: next[0] || "",
-                      daysNeeded: String(Math.max(1, next.length)),
-                    };
-                  });
-                }}
-                onToggleDate={(d) => {
-                  setForm((prev) => {
-                    const exists = prev.dates.includes(d);
-                    const next = exists ? prev.dates.filter((x) => x !== d) : [...prev.dates, d].sort();
-                    return {
-                      ...prev,
-                      dates: next,
-                      date: next[0] || "",
-                      daysNeeded: String(Math.max(1, next.length)),
-                    };
-                  });
-                }}
-                bookedDates={bookedDates}
-                bookingsByDate={bookingsByDate}
-                locale={locale}
-              />
-            )}
-
-            {form.dates.length > 0 ? (
-              <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex flex-wrap items-center justify-between gap-2 text-xs">
-                <div>
-                  <span className="font-bold text-amber-950">
-                    {locale === "en" ? "Selected Booking Dates:" : "තෝරාගත් දින:"}{" "}
-                  </span>
-                  <span className="font-mono font-black text-amber-900">
-                    {form.dates.join(", ")}
-                  </span>
-                  <span className="ml-1 text-[#6F6A5A] font-bold">
-                    ({form.dates.length} {locale === "en" ? (form.dates.length === 1 ? "Day" : "Days") : (form.dates.length === 1 ? "දිනයයි" : "දින")})
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setForm((prev) => ({ ...prev, dates: [], date: "" }))}
-                  className="text-[11px] font-bold text-red-600 hover:underline cursor-pointer"
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+              <div>
+                <label
+                  htmlFor="individual-booking-date"
+                  className="block text-xs font-bold text-[var(--ink)] mb-1.5"
                 >
-                  {locale === "en" ? "Clear" : "ඉවත් කරන්න"}
-                </button>
+                  {locale === "en" ? "Preferred Trip Date *" : "අවශ්‍ය දිනය *"}
+                </label>
+                <input
+                  id="individual-booking-date"
+                  type="date"
+                  required
+                  min={new Date().toISOString().split("T")[0]}
+                  value={form.date}
+                  onChange={(e) => {
+                    const nextDate = e.target.value;
+                    setForm((prev) => ({
+                      ...prev,
+                      date: nextDate,
+                      dates: nextDate ? [nextDate] : [],
+                    }));
+                  }}
+                  className="w-full px-4 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm font-mono font-bold text-[var(--ink)] focus:outline-none focus:border-[var(--ink)]"
+                />
               </div>
-            ) : form.date ? (
-              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-between text-xs">
-                <span className="font-bold text-amber-900">
-                  {locale === "en" ? "Selected Booking Date:" : "තෝරාගත් දිනය:"}{" "}
-                  <span className="font-mono font-black">{form.date}</span>
-                </span>
-                <span className="inline-flex items-center gap-1 text-green-700 font-bold">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
-                  <span>{locale === "en" ? "Available" : "ලබාගත හැක"}</span>
-                </span>
-              </div>
-            ) : null}
+
+              {form.date && (
+                <div className="px-3.5 py-2.5 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-between gap-2 text-xs">
+                  <span className="font-bold text-amber-950">
+                    {locale === "en" ? "Selected Date:" : "තෝරාගත් දිනය:"}{" "}
+                    <span className="font-mono font-black text-[#26231B]">{form.date}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setForm((prev) => ({ ...prev, date: "", dates: [] }))}
+                    className="text-[11px] font-bold text-red-600 hover:underline cursor-pointer"
+                  >
+                    {locale === "en" ? "Clear" : "ඉවත් කරන්න"}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Customer Contact & Cargo Notes */}
@@ -1525,12 +1359,12 @@ function BookVehicleContent() {
                       : "ගෙවීම් Slip පරීක්ෂා කරමින්"
                     : res.status === "accepted" || res.status === "booked" || res.status === "confirmed"
                     ? locale === "en"
-                      ? "Approved (Date Locked)"
-                      : "අනුමත කළා (දිනය වෙන්කළා)"
+                      ? "Approved"
+                      : "අනුමත කළා"
                     : res.status === "assigned"
                     ? locale === "en"
-                      ? "Driver Assigned"
-                      : "රියදුරු වෙන්කළා"
+                      ? "Rider Assigned"
+                      : "රයිඩර් වෙන්කළා"
                     : res.status === "in_transit"
                     ? locale === "en"
                       ? "In Transit"

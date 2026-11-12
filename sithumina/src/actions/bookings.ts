@@ -16,7 +16,14 @@ import {
   normalizePhoneNumber,
   phonesMatch,
   normalizePlate,
+  getCanonicalCustomerId,
 } from "@/lib/phone-utils";
+import {
+  cleanRiderName,
+  findBookingScheduleConflict,
+  hasAssignedRider,
+  validateTimeRange,
+} from "@/lib/booking-schedule";
 import { ActionResult, BookingActionInput } from "./types";
 import { db } from "@/lib/firebase";
 import {
@@ -63,10 +70,13 @@ function mapFirestoreBooking(
     deliveryLng: data.deliveryLng,
     date: resolvedDate,
     dates: resolvedDates,
+    startTime: data.startTime ? String(data.startTime).trim() : "",
+    endTime: data.endTime ? String(data.endTime).trim() : "",
     vehicleType: data.vehicleType || "Lorry",
     packageDetails: data.packageDetails || data.notes || "",
     status: data.status || "pending",
     assignedLorryId: data.assignedLorryId || "",
+    assignedDriverId: data.assignedDriverId ? String(data.assignedDriverId).trim() : "",
     assignedDriverName: isRealDriverName(data.assignedDriverName),
     assignedDriverPhone: String(data.assignedDriverPhone || "").trim(),
     assignedPlate: data.assignedPlate || data.selectedVehiclePlate || "",
@@ -415,6 +425,75 @@ export async function createBookingAction(
       return { success: false, error: "A valid phone number (at least 8-10 digits) is required." };
     }
 
+    const bookingType = input.bookingType || "individual_vehicle";
+    const initialStatus: BookingStatusValue = input.status || "pending";
+    const resolvedInputDriverName = cleanRiderName(input.assignedDriverName);
+    const resolvedInputDriverPhone = String(input.assignedDriverPhone || "").trim();
+    const resolvedInputDriverId = String(input.assignedDriverId || "").trim();
+
+    let cleanStartTime = String(input.startTime || "").trim();
+    let cleanEndTime = String(input.endTime || "").trim();
+
+    // When creating an already-scheduled / manual Individual booking (time provided or approved/assigned status),
+    // require a valid time duration, mandatory Rider, and zero schedule overlap for Lorry or Rider.
+    const requiresScheduleValidation =
+      bookingType !== "live_lorry" &&
+      (Boolean(cleanStartTime || cleanEndTime) ||
+        ["accepted", "booked", "assigned", "in_transit"].includes(initialStatus));
+
+    if (requiresScheduleValidation) {
+      const timeCheck = validateTimeRange(cleanStartTime, cleanEndTime);
+      if (!timeCheck.valid) {
+        return { success: false, error: timeCheck.error };
+      }
+      cleanStartTime = timeCheck.startTime;
+      cleanEndTime = timeCheck.endTime;
+
+      if (
+        !hasAssignedRider({
+          assignedDriverId: resolvedInputDriverId,
+          assignedDriverName: resolvedInputDriverName,
+          assignedDriverPhone: resolvedInputDriverPhone,
+        })
+      ) {
+        return {
+          success: false,
+          error: "A Rider must be assigned to this booking.",
+        };
+      }
+
+      const [cloudBookings, storeBookings] = await Promise.all([
+        fetchBookingsAuthoritative().catch(() => [] as StoredBooking[]),
+        Promise.resolve(getAllStoredBookings()),
+      ]);
+      const combinedMap = new Map<string, StoredBooking>();
+      cloudBookings.forEach((b) => combinedMap.set(b.id, b));
+      storeBookings.forEach((b) => combinedMap.set(b.id, b));
+
+      const conflict = findBookingScheduleConflict(
+        {
+          date,
+          dates: input.dates && input.dates.length > 0 ? input.dates : [date],
+          startTime: cleanStartTime,
+          endTime: cleanEndTime,
+          assignedPlate: input.assignedPlate?.trim(),
+          assignedLorryId: input.assignedLorryId?.trim(),
+          assignedDriverId: resolvedInputDriverId,
+          assignedDriverName: resolvedInputDriverName,
+          assignedDriverPhone: resolvedInputDriverPhone,
+          bookingType,
+        },
+        Array.from(combinedMap.values())
+      );
+
+      if (conflict.hasConflict) {
+        return {
+          success: false,
+          error: conflict.message || "Schedule conflict detected for this lorry or rider.",
+        };
+      }
+    }
+
     // 2. Atomic store creation in server memory + file persistence
     const booking = createBookingInStore({
       customerName,
@@ -427,19 +506,27 @@ export async function createBookingAction(
       deliveryLng: input.deliveryLng,
       date,
       dates: input.dates,
+      startTime: cleanStartTime || undefined,
+      endTime: cleanEndTime || undefined,
       vehicleType,
       packageDetails,
       assignedPlate: input.assignedPlate?.trim(),
       assignedLorryId: input.assignedLorryId?.trim(),
-      bookingType: input.bookingType || (input.assignedPlate ? "individual_vehicle" : "individual_vehicle"),
+      assignedDriverId: resolvedInputDriverId || undefined,
+      assignedDriverName: resolvedInputDriverName || undefined,
+      assignedDriverPhone: resolvedInputDriverPhone || undefined,
+      bookingType,
       cargoNature: input.cargoNature?.trim(),
       daysNeeded: input.daysNeeded,
       cargoWeight: input.cargoWeight?.trim() || input.weight?.trim(),
       helpersCount: input.helpersCount,
-      status: input.status || "pending",
+      status: initialStatus,
       quotedAmount: input.quotedAmount,
       quotedAt: input.quotedAmount !== undefined ? Date.now() : undefined,
       quoteNote: input.quoteNote,
+      paymentMethod: input.paymentMethod,
+      paymentSlipStatus: input.paymentSlipStatus,
+      paymentApprovedAt: input.paymentApprovedAt,
     });
 
     // 3. Synchronized authoritative cloud Firestore persistence with deterministic ID
@@ -453,7 +540,8 @@ export async function createBookingAction(
       } = {};
       if (
         (booking.assignedLorryId || booking.assignedPlate) &&
-        (booking.bookingType === "live_lorry" || booking.status === "assigned")
+        (booking.bookingType === "live_lorry" ||
+          (booking.status === "assigned" && !resolvedInputDriverName))
       ) {
         resolvedDriverMeta = await resolveDriverMetadataForDispatch(
           booking.assignedLorryId,
@@ -477,13 +565,16 @@ export async function createBookingAction(
         deliveryLng: input.deliveryLng ?? null,
         date: booking.date,
         dates: booking.dates || (input.dates && input.dates.length > 0 ? input.dates : [date]),
+        startTime: cleanStartTime || "",
+        endTime: cleanEndTime || "",
         vehicleType,
         packageDetails,
         notes: packageDetails,
         assignedPlate: input.assignedPlate?.trim() || resolvedDriverMeta.resolvedPlate || "",
         assignedLorryId: input.assignedLorryId?.trim() || resolvedDriverMeta.resolvedLorryId || "",
-        assignedDriverName: resolvedDriverMeta.driverName || "",
-        assignedDriverPhone: resolvedDriverMeta.driverPhone || "",
+        assignedDriverId: resolvedInputDriverId || resolvedDriverMeta.driverId || "",
+        assignedDriverName: resolvedInputDriverName || resolvedDriverMeta.driverName || "",
+        assignedDriverPhone: resolvedInputDriverPhone || resolvedDriverMeta.driverPhone || "",
         bookingType: booking.bookingType,
         cargoNature: booking.cargoNature || "",
         daysNeeded: booking.daysNeeded || 1,
@@ -497,12 +588,38 @@ export async function createBookingAction(
       if (booking.quotedAmount !== undefined) bookingPayload.quotedAmount = booking.quotedAmount;
       if (booking.quotedAt !== undefined) bookingPayload.quotedAt = booking.quotedAt;
       if (booking.quoteNote) bookingPayload.quoteNote = booking.quoteNote;
+      if (booking.paymentMethod) bookingPayload.paymentMethod = booking.paymentMethod;
+      if (booking.paymentApprovedAt) bookingPayload.paymentApprovedAt = booking.paymentApprovedAt;
       if (resolvedDriverMeta.driverName || resolvedDriverMeta.driverPhone) {
         booking.assignedDriverName = resolvedDriverMeta.driverName || booking.assignedDriverName;
         booking.assignedDriverPhone = resolvedDriverMeta.driverPhone || booking.assignedDriverPhone;
         upsertBookingInStore(booking);
       }
       await setDoc(doc(db, "bookings", booking.id), bookingPayload);
+
+      // Ensure customer is persisted in Firestore users collection as well as local store
+      const isGenericCustName =
+        !customerName ||
+        customerName === "Customer" ||
+        customerName === "Valued Customer" ||
+        customerName.startsWith("Customer (");
+      const custPhoneNorm = normalizePhoneNumber(booking.customerPhone || phone);
+      if (custPhoneNorm) {
+        const custId = getCanonicalCustomerId(custPhoneNorm);
+        const nowTs = Date.now();
+        await setDoc(
+          doc(db, "users", custId),
+          {
+            uid: custId,
+            phone: custPhoneNorm,
+            ...(!isGenericCustName ? { name: customerName } : {}),
+            ...(pickup ? { city: pickup } : {}),
+            role: "customer",
+            lastLoginAt: nowTs,
+          },
+          { merge: true }
+        );
+      }
 
       // Notify rider dispatch deterministically ONLY when live_lorry booking is confirmed/accepted/assigned
       if (
@@ -745,9 +862,14 @@ export async function updateBookingStatusAction(
   status: BookingStatusValue,
   assignment?: {
     assignedLorryId?: string;
+    assignedDriverId?: string;
     assignedDriverName?: string;
     assignedDriverPhone?: string;
     assignedPlate?: string;
+    date?: string;
+    dates?: string[];
+    startTime?: string;
+    endTime?: string;
   },
   paymentMeta?: {
     quotedAmount?: number;
@@ -774,10 +896,101 @@ export async function updateBookingStatusAction(
     const sanitizedAssignment = assignment
       ? {
           ...assignment,
+          assignedDriverId: assignment.assignedDriverId?.trim() || undefined,
           assignedDriverName: isRealDriverName(assignment.assignedDriverName) || undefined,
           assignedDriverPhone: assignment.assignedDriverPhone?.trim() || undefined,
+          date: assignment.date?.trim() || undefined,
+          dates: Array.isArray(assignment.dates) && assignment.dates.length > 0 ? assignment.dates : undefined,
+          startTime: assignment.startTime?.trim() || undefined,
+          endTime: assignment.endTime?.trim() || undefined,
         }
       : undefined;
+
+    // Fetch existing booking state (local store + Firestore) to validate time-slot & rider constraints before mutating
+    const [cloudBookings, storeBookings] = await Promise.all([
+      fetchBookingsAuthoritative().catch(() => [] as StoredBooking[]),
+      Promise.resolve(getAllStoredBookings()),
+    ]);
+    const combinedMap = new Map<string, StoredBooking>();
+    cloudBookings.forEach((b) => combinedMap.set(b.id, b));
+    storeBookings.forEach((b) => combinedMap.set(b.id, b));
+
+    const existingBooking = combinedMap.get(id);
+    const isIndividual = (existingBooking?.bookingType || "individual_vehicle") !== "live_lorry";
+
+    if (isIndividual && status !== "cancelled" && status !== "delivered") {
+      const mergedDate =
+        sanitizedAssignment?.date ||
+        (sanitizedAssignment?.dates && sanitizedAssignment.dates[0]) ||
+        existingBooking?.date ||
+        "";
+      const mergedDates =
+        sanitizedAssignment?.dates ||
+        (sanitizedAssignment?.date ? [sanitizedAssignment.date] : existingBooking?.dates) ||
+        (mergedDate ? [mergedDate] : []);
+      const mergedStartTime = sanitizedAssignment?.startTime || existingBooking?.startTime || "";
+      const mergedEndTime = sanitizedAssignment?.endTime || existingBooking?.endTime || "";
+      const mergedPlate = sanitizedAssignment?.assignedPlate || existingBooking?.assignedPlate || "";
+      const mergedLorryId = sanitizedAssignment?.assignedLorryId || existingBooking?.assignedLorryId || "";
+      const mergedDriverId = sanitizedAssignment?.assignedDriverId || existingBooking?.assignedDriverId || "";
+      const mergedDriverName =
+        sanitizedAssignment?.assignedDriverName || isRealDriverName(existingBooking?.assignedDriverName);
+      const mergedDriverPhone =
+        sanitizedAssignment?.assignedDriverPhone || existingBooking?.assignedDriverPhone || "";
+
+      const schedulingActive =
+        Boolean(sanitizedAssignment?.startTime || sanitizedAssignment?.endTime) ||
+        Boolean(mergedStartTime || mergedEndTime) ||
+        ["accepted", "booked", "assigned", "in_transit"].includes(status);
+
+      if (schedulingActive) {
+        const timeCheck = validateTimeRange(mergedStartTime, mergedEndTime);
+        if (!timeCheck.valid) {
+          return { success: false, error: timeCheck.error };
+        }
+        if (sanitizedAssignment) {
+          sanitizedAssignment.startTime = timeCheck.startTime;
+          sanitizedAssignment.endTime = timeCheck.endTime;
+        }
+
+        if (
+          !hasAssignedRider({
+            assignedDriverId: mergedDriverId,
+            assignedDriverName: mergedDriverName,
+            assignedDriverPhone: mergedDriverPhone,
+          })
+        ) {
+          return {
+            success: false,
+            error: "A Rider must be assigned to this booking.",
+          };
+        }
+
+        const conflict = findBookingScheduleConflict(
+          {
+            excludeBookingId: id,
+            date: mergedDate,
+            dates: mergedDates,
+            startTime: timeCheck.startTime,
+            endTime: timeCheck.endTime,
+            assignedPlate: mergedPlate,
+            assignedLorryId: mergedLorryId,
+            assignedDriverId: mergedDriverId,
+            assignedDriverName: mergedDriverName,
+            assignedDriverPhone: mergedDriverPhone,
+            bookingType: existingBooking?.bookingType || "individual_vehicle",
+          },
+          Array.from(combinedMap.values())
+        );
+
+        if (conflict.hasConflict) {
+          return {
+            success: false,
+            error: conflict.message || "Schedule conflict detected for this lorry or rider.",
+          };
+        }
+      }
+    }
 
     let updatedLocal = updateBookingStatusInStore(id, status, sanitizedAssignment, paymentMeta);
 
@@ -799,9 +1012,14 @@ export async function updateBookingStatusAction(
             ...fsData,
             status,
             ...(sanitizedAssignment?.assignedLorryId ? { assignedLorryId: sanitizedAssignment.assignedLorryId } : {}),
+            ...(sanitizedAssignment?.assignedDriverId ? { assignedDriverId: sanitizedAssignment.assignedDriverId } : {}),
             ...(sanitizedAssignment?.assignedDriverName ? { assignedDriverName: sanitizedAssignment.assignedDriverName } : {}),
             ...(sanitizedAssignment?.assignedDriverPhone ? { assignedDriverPhone: sanitizedAssignment.assignedDriverPhone } : {}),
             ...(sanitizedAssignment?.assignedPlate ? { assignedPlate: sanitizedAssignment.assignedPlate } : {}),
+            ...(sanitizedAssignment?.date ? { date: sanitizedAssignment.date } : {}),
+            ...(sanitizedAssignment?.dates ? { dates: sanitizedAssignment.dates } : {}),
+            ...(sanitizedAssignment?.startTime ? { startTime: sanitizedAssignment.startTime } : {}),
+            ...(sanitizedAssignment?.endTime ? { endTime: sanitizedAssignment.endTime } : {}),
             ...(paymentMeta || {}),
             updatedAt: Date.now(),
           });
@@ -868,6 +1086,9 @@ export async function updateBookingStatusAction(
       if (effectiveAssignment.assignedLorryId !== undefined && effectiveAssignment.assignedLorryId !== "") {
         updateFields.assignedLorryId = effectiveAssignment.assignedLorryId;
       }
+      if ("assignedDriverId" in effectiveAssignment && effectiveAssignment.assignedDriverId) {
+        updateFields.assignedDriverId = effectiveAssignment.assignedDriverId;
+      }
       const finalDriverName = isRealDriverName(effectiveAssignment.assignedDriverName);
       if (finalDriverName) {
         updateFields.assignedDriverName = finalDriverName;
@@ -877,6 +1098,22 @@ export async function updateBookingStatusAction(
       }
       if (effectiveAssignment.assignedPlate !== undefined && effectiveAssignment.assignedPlate !== "") {
         updateFields.assignedPlate = effectiveAssignment.assignedPlate;
+      }
+      if ("date" in effectiveAssignment && effectiveAssignment.date) {
+        updateFields.date = effectiveAssignment.date;
+        updateFields.dates =
+          "dates" in effectiveAssignment && Array.isArray(effectiveAssignment.dates) && effectiveAssignment.dates.length > 0
+            ? effectiveAssignment.dates
+            : [effectiveAssignment.date];
+      } else if ("dates" in effectiveAssignment && Array.isArray(effectiveAssignment.dates) && effectiveAssignment.dates.length > 0) {
+        updateFields.dates = effectiveAssignment.dates;
+        updateFields.date = effectiveAssignment.dates[0];
+      }
+      if ("startTime" in effectiveAssignment && effectiveAssignment.startTime) {
+        updateFields.startTime = effectiveAssignment.startTime;
+      }
+      if ("endTime" in effectiveAssignment && effectiveAssignment.endTime) {
+        updateFields.endTime = effectiveAssignment.endTime;
       }
 
       if (paymentMeta) {

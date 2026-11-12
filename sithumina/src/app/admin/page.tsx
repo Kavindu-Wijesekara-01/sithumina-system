@@ -12,6 +12,13 @@ import {
 } from "@/lib/server-store";
 import { normalizePlate, normalizePhoneNumber, phonesMatch } from "@/lib/phone-utils";
 import {
+  cleanRiderName,
+  findBookingScheduleConflict,
+  formatTimeDurationLabel,
+  hasAssignedRider,
+  validateTimeRange,
+} from "@/lib/booking-schedule";
+import {
   BankAccountSetting,
   PaymentSlipRecord,
   subscribePaymentBankAccounts,
@@ -40,12 +47,10 @@ import {
   AdminDriverRecord,
 } from "@/lib/db-services";
 import { Lorry } from "@/lib/mock-lorries";
-import { BookingCalendar } from "@/components/BookingCalendar";
 import {
   createBookingAction,
   updateBookingStatusAction,
   deleteBookingAction,
-  BookedDateDetail,
   getAllBookingsAction,
   getAllRegistrationsAction,
   updateRegistrationStatusAction,
@@ -53,6 +58,8 @@ import {
   getAllInquiriesAction,
   updateInquiryStatusAction,
   getCustomersAction,
+  registerCustomerAction,
+  deleteCustomerAction,
 } from "@/actions";
 
 const ADMIN_PIN = process.env.NEXT_PUBLIC_ADMIN_PIN || "ST@2024";
@@ -95,20 +102,42 @@ type StatusFilter = "all" | "pending" | "awaiting_payment" | "payment_submitted"
 interface AssignModalState {
   booking: StoredBooking;
   lorryId: string;
+  driverId: string;
   driverName: string;
   driverPhone: string;
   plate: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+}
+
+interface ScheduleDraft {
+  date: string;
+  startTime: string;
+  endTime: string;
+  plate: string;
+  lorryId: string;
+  driverId: string;
+  driverName: string;
+  driverPhone: string;
 }
 
 interface ManualBookingForm {
   plate: string;
   vehicleType: string;
+  driverId: string;
+  driverName: string;
+  driverPhone: string;
   customerName: string;
   customerPhone: string;
   pickupCity: string;
   deliveryCity: string;
   date: string;
-  dates: string[];
+  startTime: string;
+  endTime: string;
+  quotedAmount: string;
+  paymentStatusMode: "pending" | "success";
+  paymentNote: string;
   cargoNature: string;
   cargoWeight: string;
   helpersCount: string;
@@ -230,8 +259,8 @@ export default function MasterAdminDashboard() {
   const [expandedIndividualBookings, setExpandedIndividualBookings] = useState<Record<string, boolean>>({});
   const [onlineSearch, setOnlineSearch] = useState("");
   const [expandedOnlineBookings, setExpandedOnlineBookings] = useState<Record<string, boolean>>({});
-  const [bookingViewSubTab, setBookingViewSubTab] = useState<"list" | "calendar">("list");
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [scheduleDrafts, setScheduleDrafts] = useState<Record<string, ScheduleDraft>>({});
 
   // ---- Revenue Analytics State ----
   const [revenueFilter, setRevenueFilter] = useState<RevenueTimeFilter>("today");
@@ -246,8 +275,8 @@ export default function MasterAdminDashboard() {
   const [registeredUsers, setRegisteredUsers] = useState<StoredCustomer[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(true);
   const [customerSearch, setCustomerSearch] = useState("");
-  const [customerTierFilter, setCustomerTierFilter] = useState<"all" | "vip" | "repeat" | "active" | "registered">("all");
-  const [customerSort, setCustomerSort] = useState<"bookings" | "revenue" | "recent" | "name">("bookings");
+  const [customerTierFilter, setCustomerTierFilter] = useState<"all" | "active" | "registered">("all");
+  const [customerSort, setCustomerSort] = useState<"recent" | "name" | "bookings">("recent");
   const [expandedCustomers, setExpandedCustomers] = useState<Record<string, boolean>>({});
 
   const toggleCustomerExpanded = (customerId: string) => {
@@ -347,105 +376,127 @@ export default function MasterAdminDashboard() {
   const [manualForm, setManualForm] = useState<ManualBookingForm>({
     plate: "",
     vehicleType: "",
+    driverId: "",
+    driverName: "",
+    driverPhone: "",
     customerName: "",
     customerPhone: "",
     pickupCity: "",
     deliveryCity: "",
     date: new Date().toISOString().split("T")[0],
-    dates: [new Date().toISOString().split("T")[0]],
+    startTime: "08:00",
+    endTime: "12:00",
+    quotedAmount: "",
+    paymentStatusMode: "pending",
+    paymentNote: "",
     cargoNature: CARGO_NATURE_OPTIONS[0],
     cargoWeight: "",
     helpersCount: "0",
     notes: "",
   });
   const [manualSubmitting, setManualSubmitting] = useState(false);
-  const [modalBookedDates, setModalBookedDates] = useState<string[]>([]);
-  const [modalBookingsByDate, setModalBookingsByDate] = useState<Record<string, BookedDateDetail>>({});
-  const [modalCalendarLoading, setModalCalendarLoading] = useState(false);
+  const [manualRegisteringClient, setManualRegisteringClient] = useState(false);
+  const manualAutoFilledNameRef = useRef<string>("");
+  const deletedCustomerKeysRef = useRef<Map<string, number>>(new Map());
+  const [deletingCustomerId, setDeletingCustomerId] = useState<string | null>(null);
+  const [deleteCustomerModal, setDeleteCustomerModal] = useState<{
+    id: string;
+    name: string;
+    phone: string;
+    totalBookings: number;
+    totalRevenue: number;
+    deleteBookings: boolean;
+  } | null>(null);
 
-  const loadModalBookedDates = useCallback((plate: string) => {
-    const cleanNorm = normalizePlate(plate);
-    if (!cleanNorm) {
-      setModalBookedDates([]);
-      setModalBookingsByDate({});
-      setModalCalendarLoading(false);
-      return;
-    }
-    if (loadingBookings) {
-      setModalCalendarLoading(true);
-      return;
-    }
-    const byDate: Record<string, BookedDateDetail> = {};
-    const dates: string[] = [];
-    bookings.forEach((b) => {
-      const pMatch = b.assignedPlate && normalizePlate(b.assignedPlate) === cleanNorm;
-      const isConfirmed = ["accepted", "assigned", "in_transit", "delivered", "booked"].includes(b.status);
-      if (pMatch && isConfirmed) {
-        const rawDates = Array.isArray(b.dates) && b.dates.length > 0 ? b.dates : (b.date ? [b.date] : []);
-        rawDates.forEach((d) => {
-          if (d) {
-            dates.push(d);
-            byDate[d] = {
-              bookingId: b.id,
-              customerName: b.customerName,
-              customerPhone: b.customerPhone,
-              pickupCity: b.pickupCity,
-              deliveryCity: b.deliveryCity,
-              cargoNature: b.cargoNature || b.packageDetails,
-              daysNeeded: rawDates.length || b.daysNeeded || 1,
-              packageDetails: b.packageDetails,
-              date: d,
-              vehicleType: b.vehicleType,
-              status: b.status,
-              assignedPlate: b.assignedPlate,
-            };
-          }
+  const isRealCustomerName = useCallback((raw?: string) => {
+    const t = String(raw || "").trim();
+    return Boolean(t && t !== "Customer" && t !== "Valued Customer" && !t.startsWith("Customer ("));
+  }, []);
+
+  const mergeRegisteredCustomerList = useCallback(
+    (incoming: StoredCustomer[], prev: StoredCustomer[] = []): StoredCustomer[] => {
+      const byKey = new Map<string, StoredCustomer>();
+      const push = (item: StoredCustomer) => {
+        const norm = normalizePhoneNumber(item.phone) || item.phone.trim();
+        const key = norm || item.id;
+        if (!key) return;
+        const deletedAt =
+          deletedCustomerKeysRef.current.get(key) ??
+          (item.id ? deletedCustomerKeysRef.current.get(item.id) : undefined);
+        if (deletedAt !== undefined) {
+          const itemTs = Math.max(item.lastLoginAt || 0, item.createdAt || 0);
+          if (itemTs <= deletedAt) return;
+          deletedCustomerKeysRef.current.delete(key);
+          if (item.id) deletedCustomerKeysRef.current.delete(item.id);
+        }
+        const old = byKey.get(key);
+        if (!old) {
+          byKey.set(key, item);
+          return;
+        }
+        const resolvedName = isRealCustomerName(item.name)
+          ? item.name.trim()
+          : isRealCustomerName(old.name)
+          ? old.name.trim()
+          : item.name || old.name;
+        byKey.set(key, {
+          ...old,
+          ...item,
+          name: resolvedName,
+          phone: old.phone || item.phone,
+          email: item.email || old.email || "",
+          city: item.city || old.city || "",
+          createdAt:
+            old.createdAt && item.createdAt
+              ? Math.min(old.createdAt, item.createdAt)
+              : old.createdAt || item.createdAt,
+          lastLoginAt: Math.max(old.lastLoginAt || 0, item.lastLoginAt || 0),
         });
-      }
-    });
-    setModalBookedDates(Array.from(new Set(dates)));
-    setModalBookingsByDate(byDate);
-    setModalCalendarLoading(false);
-  }, [bookings, loadingBookings]);
-
-  useEffect(() => {
-    if (showManualModal && manualForm.plate) {
-      loadModalBookedDates(manualForm.plate);
-    }
-  }, [showManualModal, manualForm.plate, loadModalBookedDates]);
+      };
+      prev.forEach(push);
+      incoming.forEach(push);
+      return Array.from(byKey.values()).sort(
+        (a, b) => (b.lastLoginAt || 0) - (a.lastLoginAt || 0)
+      );
+    },
+    [isRealCustomerName]
+  );
 
   const handleOpenManualModal = () => {
-    const defaultPlate = selectedCalendarVehicle?.plate || fleetVehicles[0]?.plate || "";
-    const matched = fleetVehicles.find((v) => v.plate === defaultPlate);
+    const defaultVehicle = fleetVehicles[0] || null;
+    const defaultPlate = defaultVehicle?.plate || "";
+    const defaultDriver =
+      drivers.find(
+        (d) =>
+          (defaultPlate && normalizePlate(d.plate) === normalizePlate(defaultPlate)) ||
+          (defaultVehicle?.driverId && d.driverId === defaultVehicle.driverId)
+      ) ||
+      drivers[0] ||
+      null;
+    manualAutoFilledNameRef.current = "";
     setManualForm({
       plate: defaultPlate,
-      vehicleType: (matched && matched.vehicleType) ? matched.vehicleType : "Lorry",
+      vehicleType: defaultVehicle?.vehicleType || "Lorry",
+      driverId: defaultDriver?.driverId || "",
+      driverName: defaultDriver?.name || "",
+      driverPhone: defaultDriver?.phone || "",
       customerName: "",
       customerPhone: "",
       pickupCity: "",
       deliveryCity: "",
-      date: "",
-      dates: [],
+      date: new Date().toISOString().split("T")[0],
+      startTime: "08:00",
+      endTime: "12:00",
+      quotedAmount: "",
+      paymentStatusMode: "pending",
+      paymentNote: "",
       cargoNature: CARGO_NATURE_OPTIONS[0],
       cargoWeight: "",
       helpersCount: "0",
       notes: "",
     });
-    if (defaultPlate) {
-      loadModalBookedDates(defaultPlate);
-    } else {
-      setModalBookedDates([]);
-      setModalBookingsByDate({});
-    }
     setShowManualModal(true);
   };
-
-  // ---- Calendar Selected Vehicle ----
-  const [selectedCalendarVehicle, setSelectedCalendarVehicle] = useState<Lorry | null>(null);
-  const [calendarSelectedDate, setCalendarSelectedDate] = useState<string>(new Date().toISOString().split("T")[0]);
-  const [vehicleBookedDates, setVehicleBookedDates] = useState<string[]>([]);
-  const [vehicleBookingsByDate, setVehicleBookingsByDate] = useState<Record<string, BookedDateDetail>>({});
-  const [calendarLoading, setCalendarLoading] = useState(false);
 
   const unsubBookingsRef = useRef<(() => void) | null>(null);
 
@@ -461,7 +512,6 @@ export default function MasterAdminDashboard() {
     setRegistrations([]);
     setInquiries([]);
     setRegisteredUsers([]);
-    setSelectedCalendarVehicle(null);
     setLoadingBookings(true);
     setLoadingFleet(true);
     setLoadingDrivers(true);
@@ -484,7 +534,6 @@ export default function MasterAdminDashboard() {
       setRegistrations([]);
       setInquiries([]);
       setRegisteredUsers([]);
-      setSelectedCalendarVehicle(null);
       setLoadingFleet(true);
       setLoadingDrivers(true);
       setLoadingRegistrations(true);
@@ -501,7 +550,7 @@ export default function MasterAdminDashboard() {
 
     getCustomersAction().then((res) => {
       if (res.success && Array.isArray(res.data)) {
-        setRegisteredUsers(res.data);
+        setRegisteredUsers((prev) => mergeRegisteredCustomerList(res.data || [], prev));
       }
       setLoadingUsers(false);
     }).catch(() => setLoadingUsers(false));
@@ -524,7 +573,7 @@ export default function MasterAdminDashboard() {
           });
         });
         if (list.length > 0) {
-          setRegisteredUsers(list);
+          setRegisteredUsers((prev) => mergeRegisteredCustomerList(list, prev));
         }
         setLoadingUsers(false);
       },
@@ -535,11 +584,6 @@ export default function MasterAdminDashboard() {
 
     const unsubFleet = subscribeFleetVehicles((vehicles) => {
       setFleetVehicles(vehicles);
-      setSelectedCalendarVehicle((prev) =>
-        prev
-          ? vehicles.find((v) => v.plate === prev.plate) || vehicles[0] || null
-          : vehicles[0] || null
-      );
       setLoadingFleet(false);
     });
 
@@ -680,6 +724,8 @@ export default function MasterAdminDashboard() {
             deliveryLng: data.deliveryLng,
             date: resolvedDate,
             dates: resolvedDates,
+            startTime: data.startTime ? String(data.startTime).trim() : "",
+            endTime: data.endTime ? String(data.endTime).trim() : "",
             vehicleType: data.vehicleType || "Lorry",
             bookingType: (data.bookingType as "individual_vehicle" | "live_lorry") || "live_lorry",
             cargoNature: data.cargoNature || "",
@@ -689,6 +735,7 @@ export default function MasterAdminDashboard() {
             packageDetails: data.packageDetails || data.notes || "",
             status: (data.status as BookingStatus) || "pending",
             assignedLorryId: data.assignedLorryId || "",
+            assignedDriverId: data.assignedDriverId ? String(data.assignedDriverId).trim() : "",
             assignedDriverName:
               data.assignedDriverName &&
               data.assignedDriverName !== "Driver" &&
@@ -714,6 +761,7 @@ export default function MasterAdminDashboard() {
             paymentRejectReason: data.paymentRejectReason ? String(data.paymentRejectReason) : "",
             paymentApprovedAt: Number(data.paymentApprovedAt) || undefined,
             paymentSlipDeletedAt: Number(data.paymentSlipDeletedAt) || undefined,
+            customerArchived: Boolean(data.customerArchived),
             createdAt: Number(data.createdAt) || 0,
             updatedAt: Number(data.updatedAt) || Number(data.createdAt) || 0,
           });
@@ -741,57 +789,123 @@ export default function MasterAdminDashboard() {
     };
   }, [authed, subscribeBookingsRealtime]);
 
-  // ---- Vehicle Calendar Loader (Reactive + Manual Sync) ----
-  const refreshVehicleCalendar = useCallback(async (plate?: string) => {
-    const targetPlateNorm = normalizePlate(plate || selectedCalendarVehicle?.plate);
-    if (!targetPlateNorm) return;
-    if (loadingBookings) {
-      setCalendarLoading(true);
-      return;
-    }
+  // ---- Schedule Draft & Conflict Validation Helper ----
+  const getScheduleDraft = useCallback(
+    (b: StoredBooking): ScheduleDraft => {
+      if (scheduleDrafts[b.id]) return scheduleDrafts[b.id];
+      const bPlateNorm = normalizePlate(b.assignedPlate);
+      const bLorryId = (b.assignedLorryId || "").trim().toLowerCase();
+      const matchedVehicle =
+        fleetVehicles.find(
+          (v) =>
+            (bPlateNorm && normalizePlate(v.plate) === bPlateNorm) ||
+            (bLorryId && (v.id || "").toLowerCase() === bLorryId)
+        ) || null;
+      const existingDriverName = cleanRiderName(b.assignedDriverName);
+      const matchedDriver =
+        drivers.find(
+          (d) =>
+            (b.assignedDriverId && d.driverId === b.assignedDriverId) ||
+            (b.assignedDriverPhone && phonesMatch(d.phone, b.assignedDriverPhone)) ||
+            (existingDriverName && d.name.toLowerCase() === existingDriverName.toLowerCase())
+        ) || null;
+      return {
+        date: b.date || (Array.isArray(b.dates) && b.dates[0]) || new Date().toISOString().split("T")[0],
+        startTime: b.startTime || "",
+        endTime: b.endTime || "",
+        plate: b.assignedPlate || matchedVehicle?.plate || "",
+        lorryId: b.assignedLorryId || matchedVehicle?.id || "",
+        driverId: b.assignedDriverId || matchedDriver?.driverId || "",
+        driverName: existingDriverName || matchedDriver?.name || "",
+        driverPhone: b.assignedDriverPhone || matchedDriver?.phone || "",
+      };
+    },
+    [scheduleDrafts, fleetVehicles, drivers]
+  );
 
-    // Derive immediately from authoritative live bookings stream
-    const byDate: Record<string, BookedDateDetail> = {};
-    const dates: string[] = [];
-    bookings.forEach((b) => {
-      const pMatch = b.assignedPlate && normalizePlate(b.assignedPlate) === targetPlateNorm;
-      const isConfirmed = ["accepted", "assigned", "in_transit", "delivered", "booked"].includes(b.status);
-      if (pMatch && isConfirmed) {
-        const rawDates = Array.isArray(b.dates) && b.dates.length > 0 ? b.dates : (b.date ? [b.date] : []);
-        rawDates.forEach((d) => {
-          if (d) {
-            dates.push(d);
-            byDate[d] = {
-              bookingId: b.id,
-              customerName: b.customerName,
-              customerPhone: b.customerPhone,
-              pickupCity: b.pickupCity,
-              deliveryCity: b.deliveryCity,
-              cargoNature: b.cargoNature || b.packageDetails,
-              daysNeeded: rawDates.length || b.daysNeeded || 1,
-              packageDetails: b.packageDetails,
-              date: d,
-              vehicleType: b.vehicleType,
-              status: b.status,
-              assignedPlate: b.assignedPlate,
-            };
-          }
-        });
+  const updateScheduleDraft = useCallback(
+    (booking: StoredBooking, patch: Partial<ScheduleDraft>) => {
+      setScheduleDrafts((prev) => {
+        const base = prev[booking.id] || getScheduleDraft(booking);
+        return {
+          ...prev,
+          [booking.id]: {
+            ...base,
+            ...patch,
+          },
+        };
+      });
+    },
+    [getScheduleDraft]
+  );
+
+  const validateIndividualScheduleOrToast = useCallback(
+    (
+      bookingId: string,
+      draft: ScheduleDraft
+    ): { valid: true; assignment: NonNullable<Parameters<typeof updateBookingStatusAction>[2]> } | { valid: false } => {
+      if (!draft.date || !draft.date.trim()) {
+        showToast("Please select a Trip Date before allocating a schedule.", "error");
+        return { valid: false };
       }
-    });
-    setVehicleBookedDates(Array.from(new Set(dates)));
-    setVehicleBookingsByDate(byDate);
-    setCalendarLoading(false);
-  }, [selectedCalendarVehicle?.plate, bookings, loadingBookings]);
+      const timeCheck = validateTimeRange(draft.startTime, draft.endTime);
+      if (!timeCheck.valid) {
+        showToast(timeCheck.error, "error");
+        return { valid: false };
+      }
+      if (!draft.plate.trim()) {
+        showToast("Please select a fleet lorry for this booking.", "error");
+        return { valid: false };
+      }
+      if (
+        !hasAssignedRider({
+          assignedDriverId: draft.driverId,
+          assignedDriverName: draft.driverName,
+          assignedDriverPhone: draft.driverPhone,
+        })
+      ) {
+        showToast("Assigning a Rider is mandatory for every booking.", "error");
+        return { valid: false };
+      }
 
-  useEffect(() => {
-    if (!selectedCalendarVehicle?.plate) return;
-    if (loadingBookings) {
-      setCalendarLoading(true);
-      return;
-    }
-    refreshVehicleCalendar(selectedCalendarVehicle.plate);
-  }, [selectedCalendarVehicle?.plate, bookings, loadingBookings, refreshVehicleCalendar]);
+      const conflict = findBookingScheduleConflict(
+        {
+          excludeBookingId: bookingId,
+          date: draft.date.trim(),
+          dates: [draft.date.trim()],
+          startTime: timeCheck.startTime,
+          endTime: timeCheck.endTime,
+          assignedPlate: draft.plate.trim(),
+          assignedLorryId: draft.lorryId.trim() || `lorry-${normalizePlate(draft.plate).toLowerCase()}`,
+          assignedDriverId: draft.driverId.trim(),
+          assignedDriverName: draft.driverName.trim(),
+          assignedDriverPhone: draft.driverPhone.trim(),
+          bookingType: "individual_vehicle",
+        },
+        bookings
+      );
+      if (conflict.hasConflict) {
+        showToast(conflict.message || "Schedule overlap detected for lorry or rider.", "error");
+        return { valid: false };
+      }
+
+      return {
+        valid: true,
+        assignment: {
+          date: draft.date.trim(),
+          dates: [draft.date.trim()],
+          startTime: timeCheck.startTime,
+          endTime: timeCheck.endTime,
+          assignedPlate: draft.plate.trim(),
+          assignedLorryId: draft.lorryId.trim() || `lorry-${normalizePlate(draft.plate).toLowerCase()}`,
+          assignedDriverId: draft.driverId.trim() || undefined,
+          assignedDriverName: draft.driverName.trim(),
+          assignedDriverPhone: draft.driverPhone.trim() || undefined,
+        },
+      };
+    },
+    [bookings]
+  );
 
   // ---- Update Booking Status ----
   const updateBooking = useCallback(
@@ -800,9 +914,14 @@ export default function MasterAdminDashboard() {
       status: BookingStatus,
       assignment?: {
         assignedLorryId?: string;
+        assignedDriverId?: string;
         assignedDriverName?: string;
         assignedDriverPhone?: string;
         assignedPlate?: string;
+        date?: string;
+        dates?: string[];
+        startTime?: string;
+        endTime?: string;
       },
       paymentMeta?: {
         quotedAmount?: number;
@@ -814,18 +933,18 @@ export default function MasterAdminDashboard() {
         paymentApprovedAt?: number;
         paymentSlipDeletedAt?: number;
       }
-    ) => {
+    ): Promise<boolean> => {
       setActionLoading(id);
       try {
         const existingBooking = bookings.find((b) => b.id === id);
         let effectiveAssignment = assignment;
 
-        // Only enrich driver details when assigning a driver or approving live_lorry bookings
+        // Enrich missing lorry/driver metadata only for live_lorry bookings when assignment wasn't explicitly passed
         if (
           !effectiveAssignment &&
           existingBooking &&
-          (status === "assigned" ||
-            (status === "accepted" && existingBooking.bookingType === "live_lorry"))
+          existingBooking.bookingType === "live_lorry" &&
+          (status === "assigned" || status === "accepted")
         ) {
           const bPlateNorm = normalizePlate(existingBooking.assignedPlate);
           const bLorryId = (existingBooking.assignedLorryId || "").trim().toLowerCase();
@@ -840,21 +959,9 @@ export default function MasterAdminDashboard() {
               (matchedFleet?.driverId && d.driverId === matchedFleet.driverId) ||
               (matchedFleet?.driverName && d.name === matchedFleet.driverName)
           );
-          const cleanExistingDriver =
-            existingBooking.assignedDriverName &&
-            existingBooking.assignedDriverName !== "Driver" &&
-            existingBooking.assignedDriverName !== "Unassigned"
-              ? existingBooking.assignedDriverName
-              : "";
-          const cleanFleetDriver =
-            matchedFleet?.driverName &&
-            matchedFleet.driverName !== "Driver" &&
-            matchedFleet.driverName !== "Unassigned"
-              ? matchedFleet.driverName
-              : "";
           const resolvedDriverName =
-            cleanExistingDriver ||
-            cleanFleetDriver ||
+            cleanRiderName(existingBooking.assignedDriverName) ||
+            cleanRiderName(matchedFleet?.driverName) ||
             matchedDriver?.name ||
             "";
           const resolvedDriverPhone =
@@ -866,6 +973,7 @@ export default function MasterAdminDashboard() {
             effectiveAssignment = {
               assignedLorryId: existingBooking.assignedLorryId || matchedFleet?.id || "",
               assignedPlate: existingBooking.assignedPlate || matchedFleet?.plate || "",
+              assignedDriverId: existingBooking.assignedDriverId || matchedDriver?.driverId || "",
               assignedDriverName: resolvedDriverName,
               assignedDriverPhone: resolvedDriverPhone,
             };
@@ -875,26 +983,11 @@ export default function MasterAdminDashboard() {
         const actionRes = await updateBookingStatusAction(id, status, effectiveAssignment, paymentMeta);
 
         if (!actionRes.success) {
-          try {
-            const docRef = doc(db, "bookings", id);
-            await setDoc(
-              docRef,
-              {
-                id,
-                trackingId: id,
-                status,
-                ...(effectiveAssignment || {}),
-                ...(paymentMeta || {}),
-                updatedAt: Date.now(),
-              },
-              { merge: true }
-            );
-          } catch {
-            throw new Error(actionRes.error || "Failed to update booking.");
-          }
+          showToast(actionRes.error || "Failed to update booking schedule.", "error");
+          return false;
         }
 
-        const updatedFromServer = actionRes.success ? actionRes.data : null;
+        const updatedFromServer = actionRes.data;
         setBookings((prev) =>
           prev.map((b) =>
             b.id === id
@@ -910,10 +1003,6 @@ export default function MasterAdminDashboard() {
           )
         );
 
-        if (selectedCalendarVehicle?.plate) {
-          refreshVehicleCalendar(selectedCalendarVehicle.plate);
-        }
-
         setManualStageDraft((prev) => {
           if (!(id in prev)) return prev;
           const next = { ...prev };
@@ -923,32 +1012,43 @@ export default function MasterAdminDashboard() {
 
         showToast(
           status === "awaiting_payment"
-            ? "Amount quote sent to customer. Calendar remains open until payment is approved."
+            ? "Amount quote sent to customer."
             : status === "accepted"
-            ? "Payment approved! Calendar date is now locked RED."
+            ? "Payment approved and schedule slot allocated."
             : status === "assigned"
-            ? "Driver assigned. Rider phone number is now visible to customer."
+            ? "Schedule duration & Rider assigned successfully."
             : status === "in_transit"
             ? "Booking marked In Transit."
             : status === "delivered"
             ? "Booking marked Delivered."
             : status === "cancelled"
-            ? "Booking cancelled and calendar date freed."
-            : "Booking status updated."
+            ? "Booking cancelled and time slot released."
+            : "Booking updated successfully."
         );
+        return true;
       } catch {
         showToast("Failed to update booking. Please retry.", "error");
+        return false;
       } finally {
         setActionLoading(null);
       }
     },
-    [bookings, fleetVehicles, drivers, selectedCalendarVehicle?.plate, refreshVehicleCalendar]
+    [bookings, fleetVehicles, drivers]
   );
+
+  const handleSaveBookingSchedule = async (booking: StoredBooking) => {
+    const draft = getScheduleDraft(booking);
+    const check = validateIndividualScheduleOrToast(booking.id, draft);
+    if (!check.valid) return;
+    const nextStatus: BookingStatus =
+      booking.status === "accepted" || booking.status === "booked" ? "assigned" : booking.status;
+    await updateBooking(booking.id, nextStatus, check.assignment);
+  };
 
   const handleDeleteBooking = async (bookingId: string) => {
     if (
       !confirm(
-        `Are you sure you want to permanently delete booking #${bookingId}? This will remove it from the system, Firestore database, and release any calendar dates.`
+        `Are you sure you want to permanently delete booking #${bookingId}? This will remove it from the system and Firestore database.`
       )
     ) {
       return;
@@ -958,9 +1058,6 @@ export default function MasterAdminDashboard() {
       const res = await deleteBookingAction(bookingId);
       if (res.success) {
         setBookings((prev) => prev.filter((b) => b.id !== bookingId));
-        if (selectedCalendarVehicle?.plate) {
-          refreshVehicleCalendar(selectedCalendarVehicle.plate);
-        }
         showToast(`Booking #${bookingId} deleted permanently.`, "success");
       } else {
         showToast(res.error || "Failed to delete booking.", "error");
@@ -1042,14 +1139,25 @@ export default function MasterAdminDashboard() {
   };
 
   const handleApproveSlipPayment = async (booking: StoredBooking) => {
-    await updateBooking(booking.id, "accepted", undefined, {
+    let scheduleAssignment: Parameters<typeof updateBookingStatusAction>[2] | undefined;
+    if (booking.bookingType !== "live_lorry") {
+      const draft = getScheduleDraft(booking);
+      const check = validateIndividualScheduleOrToast(booking.id, draft);
+      if (!check.valid) return;
+      scheduleAssignment = check.assignment;
+    }
+    const targetStatus: BookingStatus =
+      booking.bookingType !== "live_lorry" ? "assigned" : "accepted";
+    const ok = await updateBooking(booking.id, targetStatus, scheduleAssignment, {
       paymentMethod: "bank_slip",
       paymentSlipStatus: "approved",
       paymentApprovedAt: Date.now(),
       paymentRejectReason: "",
     });
-    setManualStageDraft((prev) => ({ ...prev, [booking.id]: "accepted" }));
-    closeReviewModal();
+    if (ok) {
+      setManualStageDraft((prev) => ({ ...prev, [booking.id]: targetStatus }));
+      closeReviewModal();
+    }
   };
 
   const handleManualApprovePayment = async (booking: StoredBooking) => {
@@ -1066,13 +1174,24 @@ export default function MasterAdminDashboard() {
       showToast("Please enter the Rs. amount first to manually approve cash payment.", "error");
       return;
     }
+
+    let scheduleAssignment: Parameters<typeof updateBookingStatusAction>[2] | undefined;
+    if (booking.bookingType !== "live_lorry") {
+      const draft = getScheduleDraft(booking);
+      const check = validateIndividualScheduleOrToast(booking.id, draft);
+      if (!check.valid) return;
+      scheduleAssignment = check.assignment;
+    }
+
     const draftNote = (entry?.note || "").trim();
     const resolvedNote =
       draftNote ||
       booking.quoteNote ||
       (hasSlip ? "" : "Cash / Direct payment approved manually by Head Office");
 
-    await updateBooking(booking.id, "accepted", undefined, {
+    const targetStatus: BookingStatus =
+      booking.bookingType !== "live_lorry" ? "assigned" : "accepted";
+    const ok = await updateBooking(booking.id, targetStatus, scheduleAssignment, {
       ...(finalAmount !== undefined
         ? { quotedAmount: finalAmount, quotedAt: booking.quotedAt || Date.now() }
         : {}),
@@ -1082,8 +1201,10 @@ export default function MasterAdminDashboard() {
       paymentApprovedAt: Date.now(),
       paymentRejectReason: "",
     });
-    setEditingQuoteId(null);
-    setManualStageDraft((prev) => ({ ...prev, [booking.id]: "accepted" }));
+    if (ok) {
+      setEditingQuoteId(null);
+      setManualStageDraft((prev) => ({ ...prev, [booking.id]: targetStatus }));
+    }
   };
 
   const handleManualProgressUpdate = async (booking: StoredBooking) => {
@@ -1122,8 +1243,29 @@ export default function MasterAdminDashboard() {
     }
 
     if (targetStatus === "assigned") {
+      if (booking.bookingType !== "live_lorry") {
+        const draft = getScheduleDraft(booking);
+        const check = validateIndividualScheduleOrToast(booking.id, draft);
+        if (!check.valid) {
+          return;
+        }
+        const hasSlip = Boolean(booking.paymentSlipId && booking.paymentSlipStatus !== "deleted");
+        await updateBooking(
+          booking.id,
+          "assigned",
+          check.assignment,
+          !booking.paymentApprovedAt
+            ? {
+                paymentMethod: hasSlip ? "bank_slip" : "cash_manual",
+                paymentSlipStatus: hasSlip ? "approved" : "manual_approved",
+                paymentApprovedAt: Date.now(),
+              }
+            : undefined
+        );
+        return;
+      }
       const hasRealDriver =
-        Boolean(booking.assignedDriverName && booking.assignedDriverName !== "Driver" && booking.assignedDriverName !== "Unassigned") &&
+        Boolean(cleanRiderName(booking.assignedDriverName)) &&
         Boolean(booking.assignedDriverPhone);
       if (!hasRealDriver) {
         openAssignModal(booking);
@@ -1151,11 +1293,18 @@ export default function MasterAdminDashboard() {
     }
 
     if (targetStatus === "in_transit" || targetStatus === "delivered") {
+      let scheduleAssignment: Parameters<typeof updateBookingStatusAction>[2] | undefined;
+      if (booking.bookingType !== "live_lorry" && targetStatus === "in_transit") {
+        const draft = getScheduleDraft(booking);
+        const check = validateIndividualScheduleOrToast(booking.id, draft);
+        if (!check.valid) return;
+        scheduleAssignment = check.assignment;
+      }
       const hasSlip = Boolean(booking.paymentSlipId && booking.paymentSlipStatus !== "deleted");
       await updateBooking(
         booking.id,
         targetStatus,
-        undefined,
+        scheduleAssignment,
         !booking.paymentApprovedAt
           ? {
               paymentMethod: hasSlip ? "bank_slip" : "cash_manual",
@@ -1238,8 +1387,9 @@ export default function MasterAdminDashboard() {
 
   // ---- Assign Modal Handlers ----
   const openAssignModal = (booking: StoredBooking) => {
-    const bPlateNorm = normalizePlate(booking.assignedPlate);
-    const bLorryId = (booking.assignedLorryId || "").trim().toLowerCase();
+    const draft = getScheduleDraft(booking);
+    const bPlateNorm = normalizePlate(draft.plate || booking.assignedPlate);
+    const bLorryId = (draft.lorryId || booking.assignedLorryId || "").trim().toLowerCase();
     const targetLorry =
       fleetVehicles.find(
         (v) =>
@@ -1250,52 +1400,83 @@ export default function MasterAdminDashboard() {
       null;
     const matchedDriver = drivers.find(
       (d) =>
-        (targetLorry?.plate && normalizePlate(d.plate) === normalizePlate(targetLorry.plate)) ||
+        (draft.driverId && d.driverId === draft.driverId) ||
+        (draft.driverName && d.name === draft.driverName) ||
         (targetLorry?.driverId && d.driverId === targetLorry.driverId) ||
-        (targetLorry?.driverName && d.name === targetLorry.driverName)
+        (targetLorry?.plate && normalizePlate(d.plate) === normalizePlate(targetLorry.plate))
     );
-    const cleanBookingDriver =
-      booking.assignedDriverName &&
-      booking.assignedDriverName !== "Driver" &&
-      booking.assignedDriverName !== "Unassigned"
-        ? booking.assignedDriverName
-        : "";
-    const cleanLorryDriver =
-      targetLorry?.driverName &&
-      targetLorry.driverName !== "Driver" &&
-      targetLorry.driverName !== "Unassigned"
-        ? targetLorry.driverName
-        : "";
-    const resolvedAssignDriverName =
-      cleanBookingDriver ||
-      cleanLorryDriver ||
-      matchedDriver?.name ||
-      drivers[0]?.name ||
-      "";
-    const resolvedAssignDriverPhone =
-      booking.assignedDriverPhone ||
-      targetLorry?.driverPhone ||
-      matchedDriver?.phone ||
-      (resolvedAssignDriverName === drivers[0]?.name ? drivers[0]?.phone : "") ||
-      "";
+    const resolvedDriverId = draft.driverId || matchedDriver?.driverId || "";
+    const resolvedDriverName = draft.driverName || matchedDriver?.name || "";
+    const resolvedDriverPhone = draft.driverPhone || matchedDriver?.phone || "";
     setAssignModal({
       booking,
-      lorryId: targetLorry?.id || booking.assignedLorryId || "",
-      driverName: resolvedAssignDriverName,
-      driverPhone: resolvedAssignDriverPhone,
-      plate: targetLorry?.plate || booking.assignedPlate || matchedDriver?.plate || "",
+      lorryId: targetLorry?.id || draft.lorryId || booking.assignedLorryId || "",
+      driverId: resolvedDriverId,
+      driverName: resolvedDriverName,
+      driverPhone: resolvedDriverPhone,
+      plate: targetLorry?.plate || draft.plate || booking.assignedPlate || "",
+      date: draft.date || booking.date || new Date().toISOString().split("T")[0],
+      startTime: draft.startTime || booking.startTime || "08:00",
+      endTime: draft.endTime || booking.endTime || "12:00",
     });
   };
 
   const confirmAssign = async () => {
     if (!assignModal) return;
     const b = assignModal.booking;
+    if (b.bookingType !== "live_lorry") {
+      const check = validateIndividualScheduleOrToast(b.id, {
+        date: assignModal.date,
+        startTime: assignModal.startTime,
+        endTime: assignModal.endTime,
+        plate: assignModal.plate,
+        lorryId: assignModal.lorryId,
+        driverId: assignModal.driverId,
+        driverName: assignModal.driverName,
+        driverPhone: assignModal.driverPhone,
+      });
+      if (!check.valid) return;
+
+      const hasSlip = Boolean(b.paymentSlipId && b.paymentSlipStatus !== "deleted");
+      const ok = await updateBooking(
+        b.id,
+        "assigned",
+        check.assignment,
+        !b.paymentApprovedAt
+          ? {
+              paymentMethod: hasSlip ? "bank_slip" : "cash_manual",
+              paymentSlipStatus: hasSlip ? "approved" : "manual_approved",
+              paymentApprovedAt: Date.now(),
+            }
+          : undefined
+      );
+      if (ok) {
+        setScheduleDrafts((prev) => ({
+          ...prev,
+          [b.id]: {
+            date: assignModal.date,
+            startTime: check.assignment.startTime || assignModal.startTime,
+            endTime: check.assignment.endTime || assignModal.endTime,
+            plate: assignModal.plate,
+            lorryId: assignModal.lorryId,
+            driverId: assignModal.driverId,
+            driverName: assignModal.driverName,
+            driverPhone: assignModal.driverPhone,
+          },
+        }));
+        setManualStageDraft((prev) => ({ ...prev, [b.id]: "assigned" }));
+        setAssignModal(null);
+      }
+      return;
+    }
+
     const hasSlip = Boolean(b.paymentSlipId && b.paymentSlipStatus !== "deleted");
-    await updateBooking(
+    const ok = await updateBooking(
       b.id,
       "assigned",
       {
         assignedLorryId: assignModal.lorryId,
+        assignedDriverId: assignModal.driverId,
         assignedDriverName: assignModal.driverName,
         assignedDriverPhone: assignModal.driverPhone,
         assignedPlate: assignModal.plate,
@@ -1308,8 +1489,172 @@ export default function MasterAdminDashboard() {
           }
         : undefined
     );
-    setManualStageDraft((prev) => ({ ...prev, [b.id]: "assigned" }));
-    setAssignModal(null);
+    if (ok) {
+      setManualStageDraft((prev) => ({ ...prev, [b.id]: "assigned" }));
+      setAssignModal(null);
+    }
+  };
+
+  // ---- Manual Booking Client Lookup & Registration ----
+  const lookupManualClientByPhone = useCallback(
+    (rawPhone: string) => {
+      const digits = String(rawPhone || "").replace(/[^0-9]/g, "");
+      if (digits.length < 9) return null;
+
+      const regMatch = registeredUsers.find((u) => phonesMatch(u.phone, rawPhone));
+      const matchedBookings = bookings.filter(
+        (b) => !b.customerArchived && phonesMatch(b.customerPhone, rawPhone)
+      );
+      const bookingWithRealName = matchedBookings.find((b) => isRealCustomerName(b.customerName));
+
+      const resolvedName =
+        regMatch && isRealCustomerName(regMatch.name)
+          ? regMatch.name.trim()
+          : bookingWithRealName
+          ? bookingWithRealName.customerName.trim()
+          : "";
+
+      if (!regMatch && matchedBookings.length === 0) {
+        return null;
+      }
+
+      return {
+        id: regMatch?.id || `CUST-${normalizePhoneNumber(rawPhone) || digits}`,
+        name: resolvedName,
+        phone: regMatch?.phone || matchedBookings[0]?.customerPhone || rawPhone,
+        city: regMatch?.city || bookingWithRealName?.pickupCity || "",
+        bookingsCount: matchedBookings.length,
+        isRegisteredInUsers: Boolean(regMatch && isRealCustomerName(regMatch.name)),
+      };
+    },
+    [registeredUsers, bookings, isRealCustomerName]
+  );
+
+  const handleManualPhoneChange = (rawPhone: string) => {
+    const matched = lookupManualClientByPhone(rawPhone);
+    if (matched && matched.name) {
+      manualAutoFilledNameRef.current = matched.name;
+      setManualForm((p) => ({
+        ...p,
+        customerPhone: rawPhone,
+        customerName: matched.name,
+      }));
+      return;
+    }
+
+    const prevAutoName = manualAutoFilledNameRef.current;
+    manualAutoFilledNameRef.current = "";
+    setManualForm((p) => {
+      const shouldClearOldAuto = Boolean(prevAutoName) && p.customerName === prevAutoName;
+      return {
+        ...p,
+        customerPhone: rawPhone,
+        ...(shouldClearOldAuto ? { customerName: "" } : {}),
+      };
+    });
+  };
+
+  const handleManualRegisterClient = async () => {
+    const phoneClean = String(manualForm.customerPhone || "").replace(/[^0-9]/g, "");
+    if (phoneClean.length < 9) {
+      showToast("Please enter a valid customer mobile number first.", "error");
+      return;
+    }
+    const cleanName = manualForm.customerName.trim();
+    if (cleanName.length < 2) {
+      showToast("Please enter the customer's full name to register this number.", "error");
+      return;
+    }
+
+    setManualRegisteringClient(true);
+    try {
+      const regRes = await registerCustomerAction({
+        phone: manualForm.customerPhone.trim(),
+        name: cleanName,
+        city: manualForm.pickupCity.trim() || undefined,
+      });
+      if (regRes.success) {
+        if (regRes.data) {
+          const normKey = normalizePhoneNumber(regRes.data.phone) || regRes.data.phone.trim();
+          if (normKey) deletedCustomerKeysRef.current.delete(normKey);
+          if (regRes.data.id) deletedCustomerKeysRef.current.delete(regRes.data.id);
+          setRegisteredUsers((prev) => mergeRegisteredCustomerList([regRes.data!], prev));
+          manualAutoFilledNameRef.current = regRes.data.name;
+          setManualForm((p) => ({
+            ...p,
+            customerPhone: regRes.data!.phone || p.customerPhone,
+            customerName: regRes.data!.name || p.customerName,
+          }));
+          showToast(`Client "${regRes.data.name}" registered and added to Customers list.`);
+        }
+      } else {
+        showToast(regRes.error || "Failed to register new client.", "error");
+      }
+    } catch {
+      showToast("Error registering client.", "error");
+    } finally {
+      setManualRegisteringClient(false);
+    }
+  };
+
+  const handleConfirmDeleteCustomer = async () => {
+    if (!deleteCustomerModal) return;
+    const target = deleteCustomerModal;
+    const normKey = normalizePhoneNumber(target.phone) || target.phone.trim();
+    setDeletingCustomerId(target.id);
+    try {
+      const res = await deleteCustomerAction({
+        customerId: target.id,
+        phone: target.phone,
+        deleteBookings: target.deleteBookings,
+      });
+      if (!res.success) {
+        showToast(res.error || "Failed to delete customer.", "error");
+        return;
+      }
+
+      const nowDeletedAt = Date.now();
+      if (normKey) deletedCustomerKeysRef.current.set(normKey, nowDeletedAt);
+      if (target.id) deletedCustomerKeysRef.current.set(target.id, nowDeletedAt);
+
+      setRegisteredUsers((prev) =>
+        prev.filter((u) => {
+          const idMatch = u.id === target.id;
+          const phoneMatch = Boolean(target.phone && u.phone && phonesMatch(u.phone, target.phone));
+          return !idMatch && !phoneMatch;
+        })
+      );
+
+      if (target.phone) {
+        setBookings((prev) =>
+          target.deleteBookings
+            ? prev.filter((b) => !phonesMatch(b.customerPhone, target.phone))
+            : prev.map((b) =>
+                phonesMatch(b.customerPhone, target.phone)
+                  ? { ...b, customerArchived: true }
+                  : b
+              )
+        );
+      }
+
+      setExpandedCustomers((prev) => {
+        if (!(target.id in prev)) return prev;
+        const next = { ...prev };
+        delete next[target.id];
+        return next;
+      });
+
+      setDeleteCustomerModal(null);
+      showToast(
+        target.deleteBookings && target.totalBookings > 0
+          ? `Customer "${target.name}" and ${target.totalBookings} booking(s) deleted permanently.`
+          : `Customer "${target.name}" deleted from Customers directory.`
+      );
+    } catch {
+      showToast("Error deleting customer. Please retry.", "error");
+    } finally {
+      setDeletingCustomerId(null);
+    }
   };
 
   // ---- Manual Booking Creation ----
@@ -1328,14 +1673,67 @@ export default function MasterAdminDashboard() {
       showToast("Pickup and delivery locations are required.", "error");
       return;
     }
-    if (manualForm.dates.length === 0) {
-      showToast("Please select at least one booking date.", "error");
+    if (!manualForm.date.trim()) {
+      showToast("Please select a booking date.", "error");
       return;
     }
 
-    const resolvedPlate = manualForm.plate || (selectedCalendarVehicle?.plate || fleetVehicles[0]?.plate || "");
+    const resolvedPlate = manualForm.plate || fleetVehicles[0]?.plate || "";
     const matchedVehicle = fleetVehicles.find((v) => v.plate === resolvedPlate);
     const resolvedType = matchedVehicle?.vehicleType || manualForm.vehicleType || "Lorry";
+    const resolvedLorryId =
+      matchedVehicle?.id || `lorry-${String(resolvedPlate || "").toLowerCase().replace(/[^a-z0-9]/g, "")}`;
+
+    if (!resolvedPlate) {
+      showToast("Please select a fleet lorry.", "error");
+      return;
+    }
+
+    const timeCheck = validateTimeRange(manualForm.startTime, manualForm.endTime);
+    if (!timeCheck.valid) {
+      showToast(timeCheck.error, "error");
+      return;
+    }
+
+    if (
+      !hasAssignedRider({
+        assignedDriverId: manualForm.driverId,
+        assignedDriverName: manualForm.driverName,
+        assignedDriverPhone: manualForm.driverPhone,
+      })
+    ) {
+      showToast("Assigning a Rider is mandatory for manual bookings.", "error");
+      return;
+    }
+
+    const conflict = findBookingScheduleConflict(
+      {
+        date: manualForm.date.trim(),
+        dates: [manualForm.date.trim()],
+        startTime: timeCheck.startTime,
+        endTime: timeCheck.endTime,
+        assignedPlate: resolvedPlate,
+        assignedLorryId: resolvedLorryId,
+        assignedDriverId: manualForm.driverId.trim(),
+        assignedDriverName: manualForm.driverName.trim(),
+        assignedDriverPhone: manualForm.driverPhone.trim(),
+        bookingType: "individual_vehicle",
+      },
+      bookings
+    );
+    if (conflict.hasConflict) {
+      showToast(conflict.message || "Schedule overlap detected for this lorry or rider.", "error");
+      return;
+    }
+
+    const parsedAmount = Number(String(manualForm.quotedAmount || "").replace(/[^0-9.]/g, ""));
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      showToast("Please enter a valid booking amount (LKR).", "error");
+      return;
+    }
+
+    const isPaymentSuccess = manualForm.paymentStatusMode === "success";
+    const paymentNoteClean = manualForm.paymentNote.trim();
 
     setManualSubmitting(true);
     try {
@@ -1344,45 +1742,88 @@ export default function MasterAdminDashboard() {
         phone: manualForm.customerPhone.trim(),
         pickup: manualForm.pickupCity.trim(),
         destination: manualForm.deliveryCity.trim(),
-        date: manualForm.dates[0],
-        dates: manualForm.dates,
+        date: manualForm.date.trim(),
+        dates: [manualForm.date.trim()],
+        startTime: timeCheck.startTime,
+        endTime: timeCheck.endTime,
         vehicleType: resolvedType,
         assignedPlate: resolvedPlate,
-        assignedLorryId: `lorry-${String(resolvedPlate || "").toLowerCase().replace(/[^a-z0-9]/g, "")}`,
+        assignedLorryId: resolvedLorryId,
+        assignedDriverId: manualForm.driverId.trim() || undefined,
+        assignedDriverName: manualForm.driverName.trim(),
+        assignedDriverPhone: manualForm.driverPhone.trim() || undefined,
         bookingType: "individual_vehicle",
         cargoNature: manualForm.cargoNature,
-        daysNeeded: manualForm.dates.length,
+        daysNeeded: 1,
         cargoWeight: manualForm.cargoWeight.trim() || undefined,
         helpersCount: Number(manualForm.helpersCount) || 0,
-        status: "accepted",
+        status: isPaymentSuccess ? "assigned" : "awaiting_payment",
+        quotedAmount: parsedAmount,
+        quoteNote:
+          paymentNoteClean ||
+          (isPaymentSuccess ? "Cash / Direct payment approved manually" : undefined),
+        ...(isPaymentSuccess
+          ? {
+              paymentMethod: "cash_manual" as const,
+              paymentSlipStatus: "manual_approved" as const,
+              paymentApprovedAt: Date.now(),
+            }
+          : {
+              paymentSlipStatus: "none" as const,
+            }),
         notes: manualForm.notes.trim() || undefined,
       });
 
       if (res.success) {
+        // Ensure customer profile is registered & immediately reflected in Customers list
+        const regRes = await registerCustomerAction({
+          phone: manualForm.customerPhone.trim(),
+          name: manualForm.customerName.trim(),
+          city: manualForm.pickupCity.trim() || undefined,
+        }).catch(() => null);
+        if (regRes?.success && regRes.data) {
+          const normKey = normalizePhoneNumber(regRes.data.phone) || regRes.data.phone.trim();
+          if (normKey) deletedCustomerKeysRef.current.delete(normKey);
+          if (regRes.data.id) deletedCustomerKeysRef.current.delete(regRes.data.id);
+          setRegisteredUsers((prev) => mergeRegisteredCustomerList([regRes.data!], prev));
+        }
+
         if (res.data?.booking) {
           const createdB = res.data.booking;
           setBookings((prev) => [createdB, ...prev.filter((b) => b.id !== createdB.id)]);
         }
-        showToast(`Manual booking created successfully. ${manualForm.dates.length} date(s) locked on calendar.`);
+        showToast(
+          `Manual booking created (Rs. ${parsedAmount.toLocaleString()} · ${
+            isPaymentSuccess ? "Payment Success" : "Payment Pending"
+          }) for ${manualForm.date} (${formatTimeDurationLabel(
+            timeCheck.startTime,
+            timeCheck.endTime
+          )}) with ${manualForm.driverName}.`
+        );
         setShowManualModal(false);
+        manualAutoFilledNameRef.current = "";
         const todayStr = new Date().toISOString().split("T")[0];
         setManualForm({
           plate: resolvedPlate,
           vehicleType: resolvedType,
+          driverId: manualForm.driverId,
+          driverName: manualForm.driverName,
+          driverPhone: manualForm.driverPhone,
           customerName: "",
           customerPhone: "",
           pickupCity: "",
           deliveryCity: "",
           date: todayStr,
-          dates: [todayStr],
+          startTime: "08:00",
+          endTime: "12:00",
+          quotedAmount: "",
+          paymentStatusMode: "pending",
+          paymentNote: "",
           cargoNature: CARGO_NATURE_OPTIONS[0],
           cargoWeight: "",
           helpersCount: "0",
           notes: "",
         });
-        if (resolvedPlate) {
-          refreshVehicleCalendar(resolvedPlate);
-        }
       } else {
         showToast(res.error || "Failed to create manual booking.", "error");
       }
@@ -1491,9 +1932,6 @@ export default function MasterAdminDashboard() {
     try {
       await deleteAdminFleetVehicle(plate);
       showToast(`Vehicle ${plate} removed from fleet.`);
-      if (selectedCalendarVehicle?.plate === plate) {
-        setSelectedCalendarVehicle(null);
-      }
     } catch {
       showToast("Failed to delete vehicle.", "error");
     }
@@ -2140,6 +2578,16 @@ export default function MasterAdminDashboard() {
           existing.city = b.pickupCity;
         }
       } else {
+        if (b.customerArchived) return;
+        const deletedAt =
+          deletedCustomerKeysRef.current.get(key) ??
+          (phoneNorm ? deletedCustomerKeysRef.current.get(phoneNorm) : undefined);
+        if (deletedAt !== undefined) {
+          const bTs = Math.max(bUpdatedAt, bCreatedAt);
+          if (bTs <= deletedAt) return;
+          deletedCustomerKeysRef.current.delete(key);
+          if (phoneNorm) deletedCustomerKeysRef.current.delete(phoneNorm);
+        }
         custMap.set(key, {
           id: `CUST-${phoneNorm || b.id}`,
           name: isRealName ? bName : (phoneNorm ? `Customer (${phoneNorm.slice(-4)})` : "Valued Customer"),
@@ -2244,31 +2692,13 @@ export default function MasterAdminDashboard() {
       });
     });
 
-    return list.sort((a, b) => {
-      if (b.totalBookings !== a.totalBookings) {
-        return b.totalBookings - a.totalBookings;
-      }
-      return b.totalRevenue - a.totalRevenue;
-    });
+    return list.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
   }, [registeredUsers, bookings]);
 
-  // Top 10 clients who have actually placed bookings
-  const top10Customers = useMemo(() => {
-    return customersWithMetrics
-      .filter((c) => c.totalBookings > 0)
-      .slice(0, 10);
-  }, [customersWithMetrics]);
-
-  // Filtered & sorted customers for the Complete Directory
+  // Filtered & sorted customers for the Customer List
   const filteredCustomers = useMemo(() => {
     return customersWithMetrics
       .filter((c) => {
-        if (customerTierFilter === "vip" && c.status !== "vip" && c.status !== "gold") {
-          return false;
-        }
-        if (customerTierFilter === "repeat" && c.totalBookings < 2) {
-          return false;
-        }
         if (customerTierFilter === "active" && c.totalBookings < 1) {
           return false;
         }
@@ -2282,16 +2712,12 @@ export default function MasterAdminDashboard() {
           c.name.toLowerCase().includes(q) ||
           c.phone.toLowerCase().includes(q) ||
           (c.city && c.city.toLowerCase().includes(q)) ||
-          (c.email && c.email.toLowerCase().includes(q)) ||
-          c.frequentRoutes.some((r) => r.toLowerCase().includes(q))
+          (c.email && c.email.toLowerCase().includes(q))
         );
       })
       .sort((a, b) => {
         if (customerSort === "bookings") {
-          return b.totalBookings - a.totalBookings || b.totalRevenue - a.totalRevenue;
-        }
-        if (customerSort === "revenue") {
-          return b.totalRevenue - a.totalRevenue || b.totalBookings - a.totalBookings;
+          return b.totalBookings - a.totalBookings || b.lastActiveAt - a.lastActiveAt;
         }
         if (customerSort === "recent") {
           return b.lastActiveAt - a.lastActiveAt;
@@ -2303,61 +2729,62 @@ export default function MasterAdminDashboard() {
       });
   }, [customersWithMetrics, customerTierFilter, customerSearch, customerSort]);
 
-  const totalClientsRevenue = useMemo(
-    () => customersWithMetrics.reduce((sum, c) => sum + c.totalRevenue, 0),
-    [customersWithMetrics]
-  );
-  const totalClientBookingsCount = useMemo(
-    () => customersWithMetrics.reduce((sum, c) => sum + c.totalBookings, 0),
-    [customersWithMetrics]
-  );
-  const repeatClientsCount = useMemo(
-    () => customersWithMetrics.filter((c) => c.totalBookings >= 2).length,
-    [customersWithMetrics]
-  );
-  const activeInTransitClientsCount = useMemo(
-    () => customersWithMetrics.filter((c) => c.activeBookings > 0).length,
-    [customersWithMetrics]
-  );
-  const vipGoldClientsCount = useMemo(
-    () => customersWithMetrics.filter((c) => c.status === "vip" || c.status === "gold").length,
+  const bookedCustomersCount = useMemo(
+    () => customersWithMetrics.filter((c) => c.totalBookings > 0).length,
     [customersWithMetrics]
   );
   const registeredOnlyClientsCount = useMemo(
     () => customersWithMetrics.filter((c) => c.totalBookings === 0).length,
     [customersWithMetrics]
   );
-  const overallAverageOrderValue = useMemo(() => {
-    const billable = customersWithMetrics.reduce((sum, c) => sum + c.completedBookings + c.activeBookings, 0);
-    return billable > 0 ? Math.round(totalClientsRevenue / billable) : 0;
-  }, [customersWithMetrics, totalClientsRevenue]);
 
   // ---- Status Badge Component ----
   const StatusBadge = ({ status }: { status: string }) => {
     const map: Record<string, { cls: string; label: string }> = {
-      pending: { cls: "bg-amber-50 text-amber-800 border-amber-200", label: "Pending Quote" },
-      awaiting_payment: { cls: "bg-sky-50 text-sky-800 border-sky-200", label: "Awaiting Payment" },
-      payment_submitted: { cls: "bg-purple-50 text-purple-800 border-purple-300 font-bold", label: "Slip Submitted — Review" },
-      accepted: { cls: "bg-emerald-50 text-emerald-800 border-emerald-300 font-bold", label: "Approved" },
-      booked: { cls: "bg-emerald-50 text-emerald-800 border-emerald-300 font-bold", label: "Booked" },
-      assigned: { cls: "bg-green-50 text-green-800 border-green-200", label: "Driver Assigned" },
-      goods_collected: { cls: "bg-teal-50 text-teal-900 border-teal-300 font-bold", label: "📦 Goods Collected by Rider" },
-      in_transit: { cls: "bg-blue-50 text-blue-800 border-blue-200", label: "In Transit" },
-      delivered: { cls: "bg-gray-100 text-gray-700 border-gray-200", label: "Delivered" },
-      cancelled: { cls: "bg-red-50 text-red-700 border-red-200", label: "Cancelled" },
+      pending: {
+        cls: "bg-amber-50 text-amber-900 border-amber-300",
+        label: "Pending Quote",
+      },
+      awaiting_payment: {
+        cls: "bg-gray-100 text-gray-800 border-gray-300",
+        label: "Awaiting Payment",
+      },
+      payment_submitted: {
+        cls: "bg-gray-900 text-white border-gray-900",
+        label: "Slip Review",
+      },
+      accepted: {
+        cls: "bg-green-50 text-green-800 border-green-300",
+        label: "Approved",
+      },
+      booked: {
+        cls: "bg-green-50 text-green-800 border-green-300",
+        label: "Booked",
+      },
+      assigned: {
+        cls: "bg-green-50 text-green-800 border-green-300",
+        label: "Rider Assigned",
+      },
+      goods_collected: {
+        cls: "bg-gray-100 text-gray-900 border-gray-300",
+        label: "Goods Collected",
+      },
+      in_transit: {
+        cls: "bg-gray-100 text-gray-900 border-gray-300",
+        label: "In Transit",
+      },
+      delivered: {
+        cls: "bg-gray-100 text-gray-700 border-gray-300",
+        label: "Delivered",
+      },
+      cancelled: {
+        cls: "bg-red-50 text-red-800 border-red-300",
+        label: "Cancelled",
+      },
     };
     const s = map[status] || map.pending;
     return (
-      <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${s.cls}`}>
-        <span
-          className={`w-1.5 h-1.5 rounded-full ${
-            status === "in_transit" || status === "payment_submitted"
-              ? "animate-pulse bg-current"
-              : status === "accepted" || status === "booked"
-              ? "bg-emerald-600"
-              : "bg-current"
-          }`}
-        />
+      <span className={`inline-flex items-center px-2.5 py-1 rounded-md text-xs font-semibold border whitespace-nowrap ${s.cls}`}>
         {s.label}
       </span>
     );
@@ -2513,7 +2940,7 @@ export default function MasterAdminDashboard() {
               </div>
               {!loadingBookings && totalPendingCount > 0 && (
                 <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold ${
-                  activeNav === "overview" ? "bg-[#26231B] text-[#FFC20E]" : "bg-amber-400 text-[#26231B] animate-pulse"
+                  activeNav === "overview" ? "bg-[#26231B] text-[#FFC20E]" : "bg-amber-400 text-[#26231B]"
                 }`}>
                   {totalPendingCount}
                 </span>
@@ -2543,7 +2970,7 @@ export default function MasterAdminDashboard() {
               </div>
               {!loadingBookings && pendingIndividualCount > 0 && (
                 <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold ${
-                  activeNav === "individual_bookings" ? "bg-[#26231B] text-[#FFC20E]" : "bg-amber-400 text-[#26231B] animate-pulse"
+                  activeNav === "individual_bookings" ? "bg-[#26231B] text-[#FFC20E]" : "bg-amber-400 text-[#26231B]"
                 }`}>
                   {pendingIndividualCount}
                 </span>
@@ -2581,7 +3008,7 @@ export default function MasterAdminDashboard() {
               )}
             </button>
 
-            {/* Customers & Top Clients */}
+            {/* Customers */}
             <button
               onClick={() => {
                 setActiveNav("customers");
@@ -2600,7 +3027,7 @@ export default function MasterAdminDashboard() {
                   <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
                   <path d="M16 3.13a4 4 0 0 1 0 7.75" />
                 </svg>
-                <span>Customers &amp; Top Clients</span>
+                <span>Customers</span>
               </div>
               <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
                 activeNav === "customers" ? "bg-[#26231B] text-white" : "bg-white/15 text-white/80"
@@ -2659,7 +3086,7 @@ export default function MasterAdminDashboard() {
               </div>
               {!loadingRegistrations && pendingRegistrationsCount > 0 ? (
                 <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold ${
-                  activeNav === "vehicle_registrations" ? "bg-[#26231B] text-[#FFC20E]" : "bg-amber-400 text-[#26231B] animate-pulse"
+                  activeNav === "vehicle_registrations" ? "bg-[#26231B] text-[#FFC20E]" : "bg-amber-400 text-[#26231B]"
                 }`}>
                   {pendingRegistrationsCount}
                 </span>
@@ -2692,7 +3119,7 @@ export default function MasterAdminDashboard() {
               </div>
               {!loadingInquiries && unreadInquiriesCount > 0 ? (
                 <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold ${
-                  activeNav === "contact_submissions" ? "bg-[#26231B] text-[#FFC20E]" : "bg-amber-400 text-[#26231B] animate-pulse"
+                  activeNav === "contact_submissions" ? "bg-[#26231B] text-[#FFC20E]" : "bg-amber-400 text-[#26231B]"
                 }`}>
                   {unreadInquiriesCount}
                 </span>
@@ -2753,7 +3180,7 @@ export default function MasterAdminDashboard() {
                   <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
                   <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
                 </svg>
-                <span>Riders & Drivers</span>
+                <span>Riders</span>
               </div>
               <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
                 activeNav === "riders" ? "bg-[#26231B] text-white" : "bg-white/15 text-white/80"
@@ -2825,20 +3252,20 @@ export default function MasterAdminDashboard() {
             </button>
             <div>
               <h1 className="text-base font-black text-[#26231B] tracking-tight">
-                {activeNav === "overview" && "Executive Dashboard Overview"}
+                {activeNav === "overview" && "Dashboard Overview"}
                 {activeNav === "individual_bookings" && "Individual Vehicle Bookings"}
                 {activeNav === "online_bookings" && "Online / Live Lorry Bookings"}
-                {activeNav === "customers" && "Registered Customers & Top Clients"}
+                {activeNav === "customers" && "Customers"}
                 {activeNav === "revenue" && "Revenue"}
                 {activeNav === "vehicle_registrations" && "Vehicle & Partner Registrations"}
                 {activeNav === "contact_submissions" && "Contact Inquiries & Support"}
                 {activeNav === "fleet" && "Fleet Lorries Management"}
-                {activeNav === "riders" && "Riders & Drivers Registry"}
+                {activeNav === "riders" && "Riders Registry"}
                 {activeNav === "settings" && "System & Payment Settings"}
               </h1>
               <p className="text-[11px] text-[#6F6A5A]">
                 {activeNav === "customers"
-                  ? "Directory of all registered clients, Top 10 loyal client ranking, and customer lifetime revenue analytics"
+                  ? "Simple list of all registered and booked customers"
                   : activeNav === "revenue"
                   ? "Individual & Live Lorry · Resets daily at 12:00 AM"
                   : activeNav === "vehicle_registrations"
@@ -2855,7 +3282,7 @@ export default function MasterAdminDashboard() {
             {activeNav === "customers" && (
               <div className="flex items-center gap-2">
                 <span className="px-3 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-xs font-mono font-bold text-[#26231B] whitespace-nowrap shrink-0">
-                  {customersWithMetrics.length} Clients Total
+                  {customersWithMetrics.length} Customers
                 </span>
               </div>
             )}
@@ -2925,27 +3352,23 @@ export default function MasterAdminDashboard() {
           {/* HIGH-VISIBILITY ALERT BANNER FOR NEW BOOKINGS             */}
           {/* ========================================================= */}
           {!loadingBookings && totalPendingCount > 0 && (
-            <div className="p-4 rounded-2xl bg-amber-500/10 border-2 border-amber-500/40 flex flex-wrap items-center justify-between gap-3 shadow-xs">
-              <div className="flex items-center gap-3">
-                <span className="w-3.5 h-3.5 rounded-full bg-amber-500 animate-ping" />
-                <div>
-                  <h3 className="text-sm font-black text-[#26231B]">
-                    Action Required ({totalPendingCount} Pending)
-                  </h3>
-                  <p className="text-xs text-[#6F6A5A]">
-                    Quote pending booking requests or review uploaded customer payment slips to lock dates.
-                  </p>
-                </div>
+            <div className="px-4 py-3.5 rounded-lg bg-white border border-gray-300 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-gray-900">
+                  Action Required ({totalPendingCount} Pending)
+                </h3>
+                <p className="text-sm text-gray-600 mt-0.5">
+                  Allocate trip time, assign a rider, send a quote, or check payment slips.
+                </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 {slipReviewCount > 0 && (
                   <button
                     onClick={() => {
                       setActiveNav("individual_bookings");
-                      setBookingViewSubTab("list");
                       setStatusFilter("payment_submitted");
                     }}
-                    className="px-3 py-1.5 rounded-xl bg-purple-700 text-white text-xs font-bold hover:bg-purple-800 transition-colors cursor-pointer"
+                    className="px-3.5 py-2 rounded-md bg-gray-900 text-white text-sm font-semibold hover:bg-gray-800 cursor-pointer"
                   >
                     Review Payment Slips ({slipReviewCount})
                   </button>
@@ -2954,10 +3377,9 @@ export default function MasterAdminDashboard() {
                   <button
                     onClick={() => {
                       setActiveNav("individual_bookings");
-                      setBookingViewSubTab("list");
                       setStatusFilter("pending");
                     }}
-                    className="px-3 py-1.5 rounded-xl bg-[#26231B] text-white text-xs font-bold hover:bg-[#FFC20E] hover:text-[#26231B] transition-colors cursor-pointer"
+                    className="px-3.5 py-2 rounded-md border border-gray-300 bg-white text-gray-900 text-sm font-semibold hover:bg-gray-50 cursor-pointer"
                   >
                     Pending Quotes ({individualBookings.filter((b) => b.status === "pending").length})
                   </button>
@@ -2968,9 +3390,9 @@ export default function MasterAdminDashboard() {
                       setActiveNav("online_bookings");
                       setStatusFilter("pending");
                     }}
-                    className="px-3 py-1.5 rounded-xl bg-[#26231B] text-white text-xs font-bold hover:bg-[#FFC20E] hover:text-[#26231B] transition-colors cursor-pointer"
+                    className="px-3.5 py-2 rounded-md border border-gray-300 bg-white text-gray-900 text-sm font-semibold hover:bg-gray-50 cursor-pointer"
                   >
-                    View Online ({pendingOnlineCount})
+                    View Live Bookings ({pendingOnlineCount})
                   </button>
                 )}
               </div>
@@ -2978,233 +3400,98 @@ export default function MasterAdminDashboard() {
           )}
 
           {/* ========================================================= */}
-          {/* TAB 1: OVERVIEW & COMMAND CENTER                          */}
+          {/* TAB 1: DASHBOARD OVERVIEW                                 */}
           {/* ========================================================= */}
           {activeNav === "overview" && (
-            <div className="flex flex-col gap-6">
-              {/* Metric Cards */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
-                <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
-                  <span className="text-[11px] font-bold text-[#6F6A5A] uppercase block">Total Bookings</span>
-                  <span className="text-2xl font-black text-[#26231B] mt-1 block font-mono">
-                    {loadingBookings ? "..." : bookings.length}
+            <div className="flex flex-col gap-5">
+              {/* Today's Revenue Summary Card */}
+              <div className="bg-white border border-gray-300 rounded-lg p-5 sm:p-6">
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-4 border-b border-gray-200">
+                  <div>
+                    <h2 className="text-base font-bold text-gray-900">Today&apos;s Revenue</h2>
+                    <p className="text-sm text-gray-600 mt-0.5">
+                      Paid bookings today • Resets daily at 12:00 AM
+                    </p>
+                  </div>
+                  <span className="px-3 py-1 rounded-md bg-gray-100 border border-gray-300 text-sm font-mono font-semibold text-gray-900">
+                    {revenueData.todayDateStr}
                   </span>
                 </div>
-                <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
-                  <span className="text-[11px] font-bold text-amber-700 uppercase block">Pending Bookings</span>
-                  <span className="text-2xl font-black text-amber-800 mt-1 block font-mono">
-                    {loadingBookings ? "..." : totalPendingCount}
-                  </span>
-                </div>
-                <div
-                  onClick={() => setActiveNav("customers")}
-                  className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs cursor-pointer hover:border-[#FFC20E] transition-all"
-                >
-                  <span className="text-[11px] font-bold text-amber-700 uppercase block">Total Clients</span>
-                  <span className="text-2xl font-black text-[#26231B] mt-1 block font-mono">
-                    {loadingUsers ? "..." : customersWithMetrics.length}
-                  </span>
-                </div>
-                <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
-                  <span className="text-[11px] font-bold text-amber-700 uppercase block">Pending Regs</span>
-                  <span className="text-2xl font-black text-amber-800 mt-1 block font-mono">
-                    {loadingRegistrations ? "..." : pendingRegistrationsCount}
-                  </span>
-                </div>
-                <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
-                  <span className="text-[11px] font-bold text-purple-700 uppercase block">Unread Inquiries</span>
-                  <span className="text-2xl font-black text-purple-800 mt-1 block font-mono">
-                    {loadingInquiries ? "..." : unreadInquiriesCount}
-                  </span>
-                </div>
-                <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
-                  <span className="text-[11px] font-bold text-emerald-700 uppercase block">Fleet Vehicles</span>
-                  <span className="text-2xl font-black text-emerald-800 mt-1 block font-mono">
-                    {loadingFleet ? "..." : fleetVehicles.length}
-                  </span>
-                </div>
-                <div className="p-4 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs">
-                  <span className="text-[11px] font-bold text-blue-700 uppercase block">Active Riders</span>
-                  <span className="text-2xl font-black text-blue-800 mt-1 block font-mono">
-                    {loadingDrivers ? "..." : drivers.filter((d) => d.active).length}
-                  </span>
+
+                <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div>
+                    <div className="text-sm font-medium text-gray-600">Today&apos;s Total</div>
+                    <div className="text-3xl font-bold text-gray-900 font-mono mt-1">
+                      Rs. {loadingBookings ? "..." : revenueData.todayRevenue.toLocaleString()}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-gray-600">Paid Trips Today</div>
+                    <div className="text-2xl font-bold text-gray-900 font-mono mt-1">
+                      {loadingBookings ? "..." : revenueData.todayBookingsCount}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-gray-600">This Month</div>
+                    <div className="text-2xl font-bold text-gray-900 font-mono mt-1">
+                      Rs. {loadingBookings ? "..." : revenueData.thisMonthRevenue.toLocaleString()}
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              {/* Quick Jump Modules */}
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {/* Revenue & Financials Quick Jump */}
-                <div className="p-5 rounded-3xl bg-gradient-to-br from-[#26231B] to-[#3A3529] text-white border border-[#FFC20E]/40 shadow-sm flex flex-col justify-between">
-                  <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <h2 className="text-base font-black text-white">Today&apos;s Revenue</h2>
-                      <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 text-[10px] font-bold">
-                        {revenueData.todayDateStr}
-                      </span>
-                    </div>
-                    <p className="text-2xl font-black text-[#FFC20E] font-mono mt-2">
-                      Rs. {loadingBookings ? "..." : revenueData.todayRevenue.toLocaleString()}
-                    </p>
-                    <p className="text-[11px] text-white/70 mt-1">
-                      Resets daily at 12:00 AM midnight • {revenueData.todayBookingsCount} paid today
-                    </p>
-                    <div className="mt-3 pt-3 border-t border-white/10 flex flex-wrap items-center gap-3 text-xs font-bold text-white/90">
-                      <span>This Month: Rs. {loadingBookings ? "..." : revenueData.thisMonthRevenue.toLocaleString()}</span>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => setActiveNav("revenue")}
-                    className="mt-5 w-full py-2.5 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] text-[#26231B] text-xs font-black transition-colors cursor-pointer shadow-xs"
-                  >
-                    Open Revenue & History →
-                  </button>
+              {/* Simple Overview Counts (Non-navigation summary list) */}
+              <div className="bg-white border border-gray-300 rounded-lg overflow-hidden">
+                <div className="px-5 py-4 border-b border-gray-200">
+                  <h2 className="text-base font-bold text-gray-900">Overview Summary</h2>
                 </div>
-
-                <div className="p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
-                  <div>
-                    <h2 className="text-base font-black text-[#26231B]">Individual Vehicle Bookings</h2>
-                    <p className="text-xs text-[#6F6A5A] mt-1">
-                      Quote requests, verify uploaded PDF/image slips, and lock calendar dates.
-                    </p>
-                    <div className="mt-4 flex flex-wrap items-center gap-3 text-xs font-bold text-[#26231B]">
-                      <span>Total: {loadingBookings ? "..." : individualBookings.length}</span>
-                      <span className="text-amber-700">
-                        Needs Quote: {loadingBookings ? "..." : individualBookings.filter((b) => b.status === "pending").length}
-                      </span>
-                      {slipReviewCount > 0 && (
-                        <span className="text-purple-700">
-                          Slips to Review: {slipReviewCount}
-                        </span>
-                      )}
+                <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-200">
+                  <dl className="divide-y divide-gray-200">
+                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
+                      <dt className="text-sm font-medium text-gray-700">Total Bookings</dt>
+                      <dd className="text-base font-bold text-gray-900 font-mono">
+                        {loadingBookings ? "..." : bookings.length}
+                      </dd>
                     </div>
-                  </div>
-                  <button
-                    onClick={() => setActiveNav("individual_bookings")}
-                    className="mt-5 w-full py-2.5 rounded-xl bg-[#26231B] hover:bg-[#FFC20E] hover:text-[#26231B] text-white text-xs font-black transition-colors cursor-pointer"
-                  >
-                    Open Individual Bookings →
-                  </button>
-                </div>
-
-                {/* Customers & Top Clients Quick Jump */}
-                <div className="p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
-                  <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <h2 className="text-base font-black text-[#26231B]">Customers &amp; Top Clients</h2>
-                      <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold">
-                        {top10Customers.length} Top Ranked
-                      </span>
+                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
+                      <dt className="text-sm font-medium text-gray-700">Pending Bookings</dt>
+                      <dd className="text-base font-bold text-gray-900 font-mono">
+                        {loadingBookings ? "..." : totalPendingCount}
+                      </dd>
                     </div>
-                    <p className="text-xs text-[#6F6A5A] mt-1">
-                      Directory of all registered clients, lifetime booking volumes, and Top 10 loyal client rankings.
-                    </p>
-                    <div className="mt-4 flex flex-wrap items-center gap-3 text-xs font-bold text-[#26231B]">
-                      <span>Total Clients: {loadingUsers ? "..." : customersWithMetrics.length}</span>
-                      <span className="text-emerald-700 font-mono">LTV: Rs. {totalClientsRevenue.toLocaleString()}</span>
+                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
+                      <dt className="text-sm font-medium text-gray-700">Customers</dt>
+                      <dd className="text-base font-bold text-gray-900 font-mono">
+                        {loadingUsers ? "..." : customersWithMetrics.length}
+                      </dd>
                     </div>
-                  </div>
-                  <button
-                    onClick={() => setActiveNav("customers")}
-                    className="mt-5 w-full py-2.5 rounded-xl bg-[#26231B] hover:bg-[#FFC20E] hover:text-[#26231B] text-white text-xs font-black transition-colors cursor-pointer shadow-xs"
-                  >
-                    View Top Clients &amp; Directory →
-                  </button>
-                </div>
-
-                {/* Vehicle Registrations Quick Jump */}
-                <div className="p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
-                  <div>
-                    <h2 className="text-base font-black text-[#26231B]">Vehicle Partner Registrations</h2>
-                    <p className="text-xs text-[#6F6A5A] mt-1">
-                      Incoming lorry owner applications from /register-vehicle. Approve to add directly to live fleet.
-                    </p>
-                    <div className="mt-4 flex flex-wrap items-center gap-3 text-xs font-bold text-[#26231B]">
-                      <span>Total: {loadingRegistrations ? "..." : registrations.length}</span>
-                      <span className="text-amber-700">
-                        Pending: {loadingRegistrations ? "..." : pendingRegistrationsCount}
-                      </span>
-                      <span className="text-emerald-700">
-                        Approved: {loadingRegistrations ? "..." : approvedRegistrationsCount}
-                      </span>
+                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
+                      <dt className="text-sm font-medium text-gray-700">Fleet Vehicles</dt>
+                      <dd className="text-base font-bold text-gray-900 font-mono">
+                        {loadingFleet ? "..." : fleetVehicles.length}
+                      </dd>
                     </div>
-                  </div>
-                  <button
-                    onClick={() => setActiveNav("vehicle_registrations")}
-                    className="mt-5 w-full py-2.5 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] text-[#26231B] text-xs font-black transition-colors cursor-pointer shadow-xs"
-                  >
-                    Review Registrations →
-                  </button>
-                </div>
-
-                {/* Contact Inquiries Quick Jump */}
-                <div className="p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
-                  <div>
-                    <h2 className="text-base font-black text-[#26231B]">Contact Inquiries & Support</h2>
-                    <p className="text-xs text-[#6F6A5A] mt-1">
-                      Customer questions, freight rate quotes, and message submissions from /contact.
-                    </p>
-                    <div className="mt-4 flex flex-wrap items-center gap-3 text-xs font-bold text-[#26231B]">
-                      <span>Total: {loadingInquiries ? "..." : inquiries.length}</span>
-                      <span className="text-purple-700">
-                        Unread: {loadingInquiries ? "..." : unreadInquiriesCount}
-                      </span>
-                      <span className="text-emerald-700">
-                        Resolved: {loadingInquiries ? "..." : resolvedInquiriesCount}
-                      </span>
+                  </dl>
+                  <dl className="divide-y divide-gray-200">
+                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
+                      <dt className="text-sm font-medium text-gray-700">Active Riders</dt>
+                      <dd className="text-base font-bold text-gray-900 font-mono">
+                        {loadingDrivers ? "..." : drivers.filter((d) => d.active).length}
+                      </dd>
                     </div>
-                  </div>
-                  <button
-                    onClick={() => setActiveNav("contact_submissions")}
-                    className="mt-5 w-full py-2.5 rounded-xl bg-[#26231B] hover:bg-[#FFC20E] hover:text-[#26231B] text-white text-xs font-black transition-colors cursor-pointer"
-                  >
-                    View Inquiries →
-                  </button>
-                </div>
-
-                <div className="p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
-                  <div>
-                    <h2 className="text-base font-black text-[#26231B]">Fleet & Riders Management</h2>
-                    <p className="text-xs text-[#6F6A5A] mt-1">
-                      Register and manage company lorries (3 photos) and drivers.
-                    </p>
-                    <div className="mt-4 flex items-center gap-3 text-xs font-bold text-[#26231B]">
-                      <span>Fleet: {loadingFleet ? "..." : fleetVehicles.length} Vehicles</span>
-                      <span>Drivers: {loadingDrivers ? "..." : drivers.length} Registered</span>
+                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
+                      <dt className="text-sm font-medium text-gray-700">Pending Vehicle Registrations</dt>
+                      <dd className="text-base font-bold text-gray-900 font-mono">
+                        {loadingRegistrations ? "..." : pendingRegistrationsCount}
+                      </dd>
                     </div>
-                  </div>
-                  <div className="mt-5 flex items-center gap-2">
-                    <button
-                      onClick={() => setActiveNav("fleet")}
-                      className="flex-1 py-2.5 rounded-xl bg-[#26231B] hover:bg-[#FFC20E] hover:text-[#26231B] text-white text-xs font-black transition-colors cursor-pointer"
-                    >
-                      Manage Fleet →
-                    </button>
-                    <button
-                      onClick={() => setActiveNav("riders")}
-                      className="flex-1 py-2.5 rounded-xl border border-[#E7E2D0] hover:bg-[#F7F5EE] text-[#26231B] text-xs font-bold transition-colors cursor-pointer"
-                    >
-                      Manage Riders →
-                    </button>
-                  </div>
-                </div>
-
-                <div className="p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
-                  <div>
-                    <h2 className="text-base font-black text-[#26231B]">Bank Accounts & Slips DB</h2>
-                    <p className="text-xs text-[#6F6A5A] mt-1">
-                      Manage customer payment bank account numbers and clean up reviewed DB slips.
-                    </p>
-                    <div className="mt-4 flex flex-wrap items-center gap-3 text-xs font-bold text-[#26231B]">
-                      <span>Active Accounts: {bankAccounts.filter((a) => a.active).length}</span>
-                      <span>Stored Slips: {storedSlips.length}</span>
+                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
+                      <dt className="text-sm font-medium text-gray-700">Unread Inquiries</dt>
+                      <dd className="text-base font-bold text-gray-900 font-mono">
+                        {loadingInquiries ? "..." : unreadInquiriesCount}
+                      </dd>
                     </div>
-                  </div>
-                  <button
-                    onClick={() => setActiveNav("settings")}
-                    className="mt-5 w-full py-2.5 rounded-xl border border-[#26231B] hover:bg-[#FFC20E] hover:border-[#FFC20E] text-[#26231B] text-xs font-black transition-colors cursor-pointer"
-                  >
-                    Open Settings →
-                  </button>
+                  </dl>
                 </div>
               </div>
             </div>
@@ -3214,167 +3501,133 @@ export default function MasterAdminDashboard() {
           {/* TAB 2: INDIVIDUAL VEHICLE BOOKINGS                        */}
           {/* ========================================================= */}
           {activeNav === "individual_bookings" && (
-            <div className="flex flex-col gap-5">
-              {/* Sub-view switcher, Status Filters & Search Bar */}
-              <div className="flex flex-col gap-3 bg-white p-3.5 sm:p-4 rounded-2xl border border-[#E7E2D0] shadow-xs">
+            <div className="flex flex-col gap-4">
+              {/* Filter & Search Bar */}
+              <div className="bg-white border border-gray-300 rounded-lg p-4 sm:p-5 flex flex-col gap-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={() => setBookingViewSubTab("list")}
-                      className={`px-3 sm:px-3.5 py-1.5 rounded-xl text-[11px] sm:text-xs font-black whitespace-nowrap transition-all cursor-pointer ${
-                        bookingViewSubTab === "list"
-                          ? "bg-[#26231B] text-white"
-                          : "text-[#6F6A5A] hover:bg-[#F7F5EE]"
-                      }`}
-                    >
-                      Booking Requests List
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setBookingViewSubTab("calendar")}
-                      className={`px-3 sm:px-3.5 py-1.5 rounded-xl text-[11px] sm:text-xs font-black whitespace-nowrap transition-all cursor-pointer ${
-                        bookingViewSubTab === "calendar"
-                          ? "bg-[#26231B] text-white"
-                          : "text-[#6F6A5A] hover:bg-[#F7F5EE]"
-                      }`}
-                    >
-                      Dedicated Vehicle Calendars
-                    </button>
+                  <div>
+                    <h2 className="text-base font-bold text-gray-900">
+                      Individual Bookings ({individualBookings.length})
+                    </h2>
+                    <p className="text-sm text-gray-600 mt-0.5">
+                      Review customer requests, assign a trip time slot and rider, and approve payment.
+                    </p>
                   </div>
 
-                  {/* Status Filter for list view */}
-                  {bookingViewSubTab === "list" && (
-                    <div className="flex flex-wrap items-center gap-1.5 text-xs font-bold">
-                      {([
-                        { key: "all", label: "All" },
-                        { key: "pending", label: "Pending Quote" },
-                        { key: "awaiting_payment", label: "Awaiting Pay" },
-                        { key: "payment_submitted", label: "Slip Review" },
-                        { key: "accepted", label: "Approved" },
-                        { key: "assigned", label: "Assigned" },
-                        { key: "completed", label: "Completed" },
-                      ] as { key: StatusFilter; label: string }[]).map((st) => (
-                        <button
-                          key={st.key}
-                          type="button"
-                          onClick={() => setStatusFilter(st.key)}
-                          className={`px-3 py-1 rounded-lg transition-all cursor-pointer ${
-                            statusFilter === st.key
-                              ? "bg-[#FFC20E] text-[#26231B] font-black"
-                              : "text-[#6F6A5A] hover:bg-[#F7F5EE]"
-                          }`}
-                        >
-                          {st.label}
-                          {st.key === "payment_submitted" && slipReviewCount > 0 ? ` (${slipReviewCount})` : ""}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  {/* Status Filter */}
+                  <div className="flex flex-wrap items-center gap-1.5 text-sm">
+                    {([
+                      { key: "all", label: "All" },
+                      { key: "pending", label: "Pending Quote" },
+                      { key: "awaiting_payment", label: "Awaiting Pay" },
+                      { key: "payment_submitted", label: "Slip Review" },
+                      { key: "accepted", label: "Approved" },
+                      { key: "assigned", label: "Assigned" },
+                      { key: "completed", label: "Completed" },
+                    ] as { key: StatusFilter; label: string }[]).map((st) => (
+                      <button
+                        key={st.key}
+                        type="button"
+                        onClick={() => setStatusFilter(st.key)}
+                        className={`px-3 py-1.5 rounded-md font-medium cursor-pointer border ${
+                          statusFilter === st.key
+                            ? "bg-gray-900 text-white border-gray-900"
+                            : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
+                        }`}
+                      >
+                        {st.label}
+                        {st.key === "payment_submitted" && slipReviewCount > 0 ? ` (${slipReviewCount})` : ""}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
-                {/* Search Box + Accordion Toolbar for list view */}
-                {bookingViewSubTab === "list" && (
-                  <div className="pt-3 border-t border-[#E7E2D0] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                    <div className="relative flex-1 min-w-0">
-                      <span
-                        aria-hidden="true"
-                        className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#6F6A5A] pointer-events-none"
-                      >
-                        <svg
-                          width="15"
-                          height="15"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2.4"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <circle cx="11" cy="11" r="8" />
-                          <line x1="21" y1="21" x2="16.65" y2="16.65" />
-                        </svg>
-                      </span>
+                {/* Search Box + Accordion Toolbar */}
+                <div className="pt-3.5 border-t border-gray-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                    <label htmlFor="individual-booking-search" className="text-sm font-medium text-gray-700 shrink-0">
+                      Search:
+                    </label>
+                    <div className="relative flex-1 min-w-0 max-w-lg">
                       <input
+                        id="individual-booking-search"
                         type="text"
                         aria-label="Search individual bookings by name, phone, booking ID, lorry plate, or city"
-                        placeholder="Search name, phone, booking ID, lorry plate, city..."
                         value={individualSearch}
                         onChange={(e) => setIndividualSearch(e.target.value)}
-                        className="w-full pl-9 pr-9 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B] placeholder:text-[#8A836E] transition-colors"
+                        className="w-full px-3 py-2 pr-8 rounded-md border border-gray-300 bg-white focus:border-gray-900 focus:outline-none text-sm text-gray-900"
                       />
                       {individualSearch.length > 0 && (
                         <button
                           type="button"
                           onClick={() => setIndividualSearch("")}
                           aria-label="Clear booking search"
-                          className="absolute right-2.5 top-1/2 -translate-y-1/2 w-6 h-6 rounded-lg bg-[#E7E2D0]/70 hover:bg-[#FFC20E] text-[#26231B] flex items-center justify-center text-xs font-black transition-colors cursor-pointer"
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-900 text-sm font-bold cursor-pointer"
                         >
                           ✕
                         </button>
                       )}
                     </div>
-
-                    <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2 flex-shrink-0">
-                      <span className="px-2.5 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-[11px] font-bold text-[#6F6A5A]">
-                        Showing <b className="text-[#26231B]">{filteredIndividualBookings.length}</b> of{" "}
-                        <b className="text-[#26231B]">{individualBookings.length}</b>
-                      </span>
-
-                      {filteredIndividualBookings.length > 0 && (() => {
-                        const allExpanded = filteredIndividualBookings.every((b, idx) =>
-                          expandedIndividualBookings[b.id] !== undefined
-                            ? expandedIndividualBookings[b.id]
-                            : idx === 0 || b.status === "pending" || b.status === "payment_submitted" || editingQuoteId === b.id
-                        );
-                        return (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const nextState: Record<string, boolean> = { ...expandedIndividualBookings };
-                              filteredIndividualBookings.forEach((b) => {
-                                nextState[b.id] = !allExpanded;
-                              });
-                              setExpandedIndividualBookings(nextState);
-                            }}
-                            className="px-3 py-1.5 rounded-xl border border-[#E7E2D0] bg-white hover:bg-[#FFF4D1] hover:border-[#F0CE68] text-[#26231B] text-[11px] font-black transition-colors cursor-pointer"
-                          >
-                            {allExpanded ? "Collapse All" : "Expand All"}
-                          </button>
-                        );
-                      })()}
-                    </div>
                   </div>
-                )}
+
+                  <div className="flex flex-wrap items-center justify-between sm:justify-end gap-3 shrink-0">
+                    <span className="text-sm text-gray-600">
+                      Showing <strong className="text-gray-900">{filteredIndividualBookings.length}</strong> of{" "}
+                      <strong className="text-gray-900">{individualBookings.length}</strong>
+                    </span>
+
+                    {filteredIndividualBookings.length > 0 && (() => {
+                      const allExpanded = filteredIndividualBookings.every((b, idx) =>
+                        expandedIndividualBookings[b.id] !== undefined
+                          ? expandedIndividualBookings[b.id]
+                          : idx === 0 || b.status === "pending" || b.status === "payment_submitted" || editingQuoteId === b.id
+                      );
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextState: Record<string, boolean> = { ...expandedIndividualBookings };
+                            filteredIndividualBookings.forEach((b) => {
+                              nextState[b.id] = !allExpanded;
+                            });
+                            setExpandedIndividualBookings(nextState);
+                          }}
+                          className="px-3.5 py-2 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 text-sm font-medium cursor-pointer"
+                        >
+                          {allExpanded ? "Collapse All" : "Expand All"}
+                        </button>
+                      );
+                    })()}
+                  </div>
+                </div>
               </div>
 
               {/* LIST VIEW OF INDIVIDUAL BOOKINGS */}
-              {bookingViewSubTab === "list" && (
-                <div className="flex flex-col gap-4">
+              <div className="flex flex-col gap-4">
                   {loadingBookings ? (
-                    <div className="p-12 text-center rounded-3xl bg-white border border-[#E7E2D0]">
-                      <p className="text-sm font-bold text-[#6F6A5A]">Loading live bookings from Firestore...</p>
+                    <div className="p-10 text-center rounded-lg bg-white border border-gray-300">
+                      <p className="text-sm font-medium text-gray-600">Loading bookings...</p>
                     </div>
                   ) : filteredIndividualBookings.length === 0 ? (
-                    <div className="p-10 sm:p-12 text-center rounded-3xl bg-white border border-[#E7E2D0] flex flex-col items-center gap-3">
+                    <div className="p-10 text-center rounded-lg bg-white border border-gray-300 flex flex-col items-center gap-3">
                       {individualSearch.trim() && statusFilter !== "all" && individualSearchMatchesAnyStatusCount > 0 ? (
                         <>
-                          <p className="text-sm font-bold text-[#26231B]">
-                            No bookings match &ldquo;{individualSearch.trim()}&rdquo; under the selected tab, but{" "}
-                            <span className="text-emerald-700">{individualSearchMatchesAnyStatusCount} match(es)</span> exist across all statuses.
+                          <p className="text-sm font-semibold text-gray-900">
+                            No bookings match &ldquo;{individualSearch.trim()}&rdquo; in this tab, but{" "}
+                            {individualSearchMatchesAnyStatusCount} match(es) exist across all statuses.
                           </p>
                           <div className="flex flex-wrap items-center justify-center gap-2">
                             <button
                               type="button"
                               onClick={() => setStatusFilter("all")}
-                              className="px-4 py-2 rounded-xl bg-[#FFC20E] text-[#26231B] text-xs font-black cursor-pointer shadow-xs"
+                              className="px-4 py-2 rounded-md bg-gray-900 text-white text-sm font-semibold cursor-pointer"
                             >
                               Show All {individualSearchMatchesAnyStatusCount} Matches
                             </button>
                             <button
                               type="button"
                               onClick={() => setIndividualSearch("")}
-                              className="px-4 py-2 rounded-xl border border-[#E7E2D0] bg-white text-[#26231B] text-xs font-bold cursor-pointer hover:bg-[#F7F5EE]"
+                              className="px-4 py-2 rounded-md border border-gray-300 bg-white text-gray-900 text-sm font-medium cursor-pointer hover:bg-gray-50"
                             >
                               Clear Search
                             </button>
@@ -3382,28 +3635,28 @@ export default function MasterAdminDashboard() {
                         </>
                       ) : individualSearch.trim() ? (
                         <>
-                          <p className="text-sm font-bold text-[#6F6A5A]">
+                          <p className="text-sm text-gray-600">
                             No individual bookings matched &ldquo;{individualSearch.trim()}&rdquo;.
                           </p>
                           <button
                             type="button"
                             onClick={() => setIndividualSearch("")}
-                            className="px-4 py-2 rounded-xl bg-[#26231B] text-white text-xs font-black cursor-pointer shadow-xs hover:bg-[#FFC20E] hover:text-[#26231B]"
+                            className="px-4 py-2 rounded-md bg-gray-900 text-white text-sm font-semibold cursor-pointer"
                           >
                             Clear Search
                           </button>
                         </>
                       ) : (
                         <>
-                          <p className="text-sm font-bold text-[#6F6A5A]">
-                            No individual vehicle bookings match this filter.
+                          <p className="text-sm text-gray-600">
+                            No individual bookings match this filter.
                           </p>
                           <div className="flex flex-wrap items-center justify-center gap-2">
                             {statusFilter !== "all" && individualBookings.length > 0 && (
                               <button
                                 type="button"
                                 onClick={() => setStatusFilter("all")}
-                                className="px-4 py-2 rounded-xl border border-[#E7E2D0] bg-white text-[#26231B] text-xs font-bold cursor-pointer hover:bg-[#F7F5EE]"
+                                className="px-4 py-2 rounded-md border border-gray-300 bg-white text-gray-900 text-sm font-medium cursor-pointer hover:bg-gray-50"
                               >
                                 Show All ({individualBookings.length})
                               </button>
@@ -3411,9 +3664,9 @@ export default function MasterAdminDashboard() {
                             <button
                               type="button"
                               onClick={handleOpenManualModal}
-                              className="px-4 py-2 rounded-xl bg-[#FFC20E] text-[#26231B] text-xs font-black cursor-pointer shadow-xs"
+                              className="px-4 py-2 rounded-md bg-gray-900 text-white text-sm font-semibold cursor-pointer"
                             >
-                              + Create Manual Booking
+                              + Manual Booking
                             </button>
                           </div>
                         </>
@@ -3470,33 +3723,9 @@ export default function MasterAdminDashboard() {
                       return (
                         <div
                           key={b.id}
-                          className={`rounded-2xl bg-white border overflow-hidden shadow-xs transition-all duration-200 hover:shadow-md ${
-                            b.status === "payment_submitted"
-                              ? "border-purple-300 ring-1 ring-purple-200/70"
-                              : b.status === "pending"
-                                ? "border-[#FFC20E] ring-1 ring-[#FFC20E]/35"
-                                : b.status === "cancelled"
-                                  ? "border-red-200/90"
-                                  : "border-[#E7E2D0] hover:border-[#D6CEB8]"
-                          }`}
+                          className="rounded-lg bg-white border border-gray-300 overflow-hidden"
                         >
-                          {/* Top Status Accent Strip */}
-                          <div
-                            aria-hidden="true"
-                            className={`h-1 w-full ${
-                              b.status === "cancelled"
-                                ? "bg-red-400"
-                                : b.status === "delivered"
-                                  ? "bg-slate-400"
-                                  : ["accepted", "booked", "assigned", "in_transit"].includes(b.status)
-                                    ? "bg-gradient-to-r from-[#10B981] to-[#137333]"
-                                    : b.status === "payment_submitted"
-                                      ? "bg-gradient-to-r from-purple-500 to-indigo-600"
-                                      : "bg-gradient-to-r from-[#FFC20E] to-[#E6A800]"
-                            }`}
-                          />
-
-                          {/* Accordion Header: Top Section with Lorry No, Booking No, Booked Date(s), Request Date & Time, Status & Corner Arrow */}
+                          {/* Accordion Header */}
                           <button
                             type="button"
                             onClick={() => toggleIndividualBookingCard(b.id, isExpanded)}
@@ -3504,503 +3733,594 @@ export default function MasterAdminDashboard() {
                             aria-label={`${
                               isExpanded ? "Minimize booking details" : "Open booking details"
                             } for ${b.id}`}
-                            className="relative w-full text-left border-0 bg-transparent px-4 pt-4 pb-3.5 sm:px-5 sm:pt-4 sm:pb-4 pr-14 sm:pr-16 hover:bg-[#FAF8F2]/80 transition-colors cursor-pointer group"
+                            className="w-full text-left border-0 bg-white px-4 py-4 sm:px-5 hover:bg-gray-50 cursor-pointer"
                           >
-                            <div className="flex flex-wrap items-center justify-between gap-2.5 min-w-0">
-                              {/* Left: Lorry Plate + Model + Booking ID */}
-                              <div className="flex items-center gap-2 flex-wrap min-w-0">
-                                <span className="px-2.5 py-1 rounded-lg bg-[#26231B] text-[#FFC20E] text-xs font-black font-mono tracking-wider shadow-xs">
-                                  {b.assignedPlate || "No Plate"}
-                                </span>
-                                <span className="text-xs sm:text-sm font-black text-[#26231B]">
-                                  {b.vehicleType}
-                                </span>
-                                <span className="px-2.5 py-0.5 rounded-lg bg-[#F7F5EE] border border-[#D8D0B8] text-[#26231B] text-xs font-black font-mono tracking-wide">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                              <div className="flex flex-wrap items-center gap-2.5">
+                                <span className="font-mono text-sm font-bold px-2.5 py-0.5 rounded bg-gray-100 border border-gray-300 text-gray-900">
                                   {b.id}
                                 </span>
+                                <span className="text-base font-bold text-gray-900">
+                                  {b.customerName}
+                                </span>
+                                {b.customerPhone && (
+                                  <span className="text-sm font-mono text-gray-700">
+                                    ({b.customerPhone})
+                                  </span>
+                                )}
                               </div>
 
-                              {/* Right: Amount + Cash badge + Live Status */}
-                              <div className="flex flex-wrap items-center gap-2 flex-shrink-0">
+                              <div className="flex flex-wrap items-center gap-2.5 shrink-0">
                                 {b.quotedAmount !== undefined && (
-                                  <span className="px-2.5 py-1 rounded-xl bg-amber-50 border border-amber-300 text-xs font-black text-amber-900 font-mono">
+                                  <span className="text-sm font-mono font-bold text-gray-900">
                                     Rs. {b.quotedAmount.toLocaleString()}
                                   </span>
                                 )}
                                 {isCashManual && isPaymentLocked && (
-                                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-300 text-[10.5px] font-black text-emerald-800">
-                                    Cash Approved
+                                  <span className="text-xs font-semibold text-green-800 bg-green-50 border border-green-300 px-2.5 py-1 rounded-md">
+                                    Cash Paid
                                   </span>
                                 )}
                                 <StatusBadge status={b.status} />
-                              </div>
-                            </div>
-
-                            {/* Top Section Quick Info Row: Booked Trip Date(s), Booked/Request Date & Time, Customer & Route */}
-                            <div className="mt-2.5 flex flex-wrap items-center gap-2 text-xs">
-                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#F7F5EE] border border-[#E7E2D0] text-[11.5px] font-bold text-[#26231B] font-mono">
-                                <svg
-                                  width="12"
-                                  height="12"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2.3"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  className="text-[#6F6A5A] flex-shrink-0"
-                                >
-                                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-                                  <line x1="16" y1="2" x2="16" y2="6" />
-                                  <line x1="8" y1="2" x2="8" y2="6" />
-                                  <line x1="3" y1="10" x2="21" y2="10" />
-                                </svg>
-                                <span>Trip Date: {bookedDatesDisplay}</span>
-                              </span>
-
-                              {requestTiming && (
-                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50/80 border border-amber-200 text-[11.5px] font-bold text-[#5B4300] font-mono">
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-gray-300 bg-white text-xs font-semibold text-gray-800">
+                                  {isExpanded ? "Hide" : "Show Details"}
                                   <svg
-                                    width="12"
-                                    height="12"
+                                    width="14"
+                                    height="14"
                                     viewBox="0 0 24 24"
                                     fill="none"
                                     stroke="currentColor"
-                                    strokeWidth="2.3"
+                                    strokeWidth="2.2"
                                     strokeLinecap="round"
                                     strokeLinejoin="round"
-                                    className="text-amber-700 flex-shrink-0"
+                                    className={isExpanded ? "rotate-180" : "rotate-0"}
                                   >
-                                    <circle cx="12" cy="12" r="10" />
-                                    <polyline points="12 6 12 12 16 14" />
+                                    <polyline points="6 9 12 15 18 9" />
                                   </svg>
-                                  <span>Booked At: {requestTiming.display}</span>
                                 </span>
-                              )}
-
-                              <span className="inline-flex flex-wrap items-center gap-1.5 text-[12px] text-[#26231B] font-semibold">
-                                <span className="font-black">{b.customerName}</span>
-                                {b.customerPhone && (
-                                  <span className="font-mono text-[#137333] font-bold">
-                                    ({b.customerPhone})
-                                  </span>
-                                )}
-                                <span className="text-[#6F6A5A]">
-                                  · {b.pickupCity} → {b.deliveryCity}
-                                </span>
-                              </span>
+                              </div>
                             </div>
 
-                            {/* Top-Right Corner Minimize / Expand Arrow Button */}
-                            <span
-                              aria-hidden="true"
-                              title={isExpanded ? "Minimize Booking Details" : "Open Booking Details"}
-                              className={`absolute top-3.5 right-3.5 sm:top-4 sm:right-4 w-8 h-8 sm:w-9 sm:h-9 rounded-full border flex items-center justify-center transition-all duration-200 shadow-xs ${
-                                isExpanded
-                                  ? "bg-[#FFF4D1] border-[#F0CE68] text-[#5B4300] group-hover:bg-[#FFE89D]"
-                                  : "bg-[#F7F5EE] border-[#E7E2D0] text-[#26231B] group-hover:bg-[#FFF4D1] group-hover:border-[#F0CE68]"
-                              }`}
-                            >
-                              <svg
-                                width="16"
-                                height="16"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2.6"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                className={`transition-transform duration-200 ${
-                                  isExpanded ? "rotate-180" : "rotate-0"
-                                }`}
-                              >
-                                <polyline points="6 9 12 15 18 9" />
-                              </svg>
-                            </span>
+                            {/* Clean 4-column Scannable Summary Row */}
+                            <div className="mt-3 pt-3 border-t border-gray-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+                              <div>
+                                <div className="text-xs font-medium text-gray-500">Route</div>
+                                <div className="font-semibold text-gray-900 mt-0.5">
+                                  {b.pickupCity} → {b.deliveryCity}
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-xs font-medium text-gray-500">Trip Date &amp; Time</div>
+                                <div className="text-gray-900 mt-0.5">
+                                  <span className="font-medium">{bookedDatesDisplay}</span>
+                                  {" · "}
+                                  {b.startTime && b.endTime ? (
+                                    <span className="font-semibold text-gray-900">
+                                      {formatTimeDurationLabel(b.startTime, b.endTime)}
+                                    </span>
+                                  ) : (
+                                    <span className="text-amber-800 font-medium">Time not set</span>
+                                  )}
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-xs font-medium text-gray-500">Lorry &amp; Rider</div>
+                                <div className="text-gray-900 mt-0.5">
+                                  <span className="font-medium">
+                                    {b.assignedPlate || "No Lorry"} ({b.vehicleType})
+                                  </span>
+                                  {b.assignedDriverName ? ` · ${b.assignedDriverName}` : " · No rider"}
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-xs font-medium text-gray-500">Requested On</div>
+                                <div className="text-gray-900 mt-0.5">
+                                  {requestTiming ? requestTiming.display : "Not recorded"}
+                                </div>
+                              </div>
+                            </div>
                           </button>
 
                           {/* Collapsible Bottom Booking Details & Actions */}
                           {isExpanded && (
-                            <div className="px-4 pb-4 pt-3.5 sm:px-5 sm:pb-5 border-t border-[#E7E2D0] flex flex-col gap-4">
-                              {/* Customer & Request Details + Trip & Cargo Details */}
-                              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                                {/* Customer Information & Lorry Request Timing */}
-                                <div className="bg-[#F7F5EE] p-4 rounded-2xl border border-[#E7E2D0] flex flex-col gap-2.5 text-xs">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <span className="text-[10.5px] font-bold text-[#6F6A5A] uppercase tracking-wider">
-                                      Customer &amp; Request Details
-                                    </span>
-                                    <code className="text-[11px] font-mono font-black text-[#26231B] bg-white px-2 py-0.5 rounded-md border border-[#E7E2D0]">
-                                      {b.id}
-                                    </code>
-                                  </div>
+                            <div className="border-t border-gray-300 divide-y divide-gray-200">
+                              {/* Customer & Trip Summary Table Layout */}
+                              <div className="px-4 py-4 sm:px-5 grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
+                                <div>
+                                  <h4 className="text-sm font-bold text-gray-900 mb-2.5">
+                                    Customer Details
+                                  </h4>
+                                  <dl className="grid grid-cols-[120px_1fr] gap-y-2 gap-x-3">
+                                    <dt className="text-gray-500">Name</dt>
+                                    <dd className="font-semibold text-gray-900">{b.customerName}</dd>
 
-                                  <div className="flex flex-wrap items-baseline justify-between gap-2">
-                                    <div className="text-sm font-black text-[#26231B]">{b.customerName}</div>
-                                    <div className="flex items-center gap-1.5">
-                                      <span className="text-[#6F6A5A]">Phone:</span>
+                                    <dt className="text-gray-500">Phone</dt>
+                                    <dd>
                                       {b.customerPhone ? (
                                         <a
                                           href={`tel:${String(b.customerPhone || "").replace(/\s+/g, "")}`}
-                                          className="font-mono font-black text-[#1E9E5A] hover:underline"
+                                          className="font-mono font-semibold text-gray-900 underline"
                                         >
                                           {b.customerPhone}
                                         </a>
                                       ) : (
-                                        <span className="text-[#6F6A5A] italic font-mono">Not provided</span>
+                                        <span className="text-gray-500">Not provided</span>
                                       )}
-                                    </div>
-                                  </div>
+                                    </dd>
 
-                                  {/* Lorry Requested Date & Time Box */}
-                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 bg-white p-2.5 rounded-xl border border-[#E7E2D0]">
-                                    <div className="flex flex-col gap-0.5">
-                                      <span className="text-[10px] font-bold text-[#6F6A5A] uppercase">
-                                        Lorry Requested Date
-                                      </span>
-                                      <span className="font-mono font-black text-xs text-[#26231B]">
-                                        {requestTiming ? requestTiming.date : "Not recorded"}
-                                      </span>
-                                    </div>
-                                    <div className="flex flex-col gap-0.5">
-                                      <span className="text-[10px] font-bold text-[#6F6A5A] uppercase">
-                                        Lorry Requested Time
-                                      </span>
-                                      <span className="font-mono font-black text-xs text-[#26231B]">
-                                        {requestTiming ? requestTiming.time : "Not recorded"}
-                                      </span>
-                                    </div>
-                                  </div>
+                                    <dt className="text-gray-500">Requested</dt>
+                                    <dd className="text-gray-900">
+                                      {requestTiming ? `${requestTiming.date} at ${requestTiming.time}` : "Not recorded"}
+                                    </dd>
 
-                                  {(quotedTiming || slipTiming || approvedTiming) && (
-                                    <div className="flex flex-wrap gap-1.5 text-[10.5px] font-semibold text-[#6F6A5A]">
-                                      {quotedTiming && (
-                                        <span className="px-2 py-0.5 rounded-md bg-white border border-[#E7E2D0] font-mono">
-                                          Quoted: {quotedTiming.display}
-                                        </span>
-                                      )}
-                                      {slipTiming && (
-                                        <span className="px-2 py-0.5 rounded-md bg-white border border-[#E7E2D0] font-mono">
-                                          Slip Uploaded: {slipTiming.display}
-                                        </span>
-                                      )}
-                                      {approvedTiming && (
-                                        <span className="px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-800 font-mono">
-                                          Approved: {approvedTiming.display}
-                                        </span>
-                                      )}
-                                    </div>
-                                  )}
+                                    {quotedTiming && (
+                                      <>
+                                        <dt className="text-gray-500">Quoted</dt>
+                                        <dd className="text-gray-900">{quotedTiming.display}</dd>
+                                      </>
+                                    )}
+                                    {slipTiming && (
+                                      <>
+                                        <dt className="text-gray-500">Slip Uploaded</dt>
+                                        <dd className="text-gray-900">{slipTiming.display}</dd>
+                                      </>
+                                    )}
+                                    {approvedTiming && (
+                                      <>
+                                        <dt className="text-gray-500">Approved</dt>
+                                        <dd className="text-gray-900">{approvedTiming.display}</dd>
+                                      </>
+                                    )}
 
-                                  {b.packageDetails && (
-                                    <div className="text-[#26231B] bg-white/85 px-3 py-2 rounded-xl border border-[#E7E2D0] text-[11.5px]">
-                                      <span className="font-bold text-[#6F6A5A]">Notes: </span>
-                                      {b.packageDetails}
-                                    </div>
-                                  )}
+                                    {b.packageDetails && (
+                                      <>
+                                        <dt className="text-gray-500">Notes</dt>
+                                        <dd className="text-gray-900">{b.packageDetails}</dd>
+                                      </>
+                                    )}
+                                  </dl>
                                 </div>
 
-                                {/* Lorry, Route & Cargo Specifications */}
-                                <div className="bg-[#F7F5EE] p-4 rounded-2xl border border-[#E7E2D0] flex flex-col gap-2.5 text-xs">
-                                  <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <span className="text-[10.5px] font-bold text-[#6F6A5A] uppercase tracking-wider">
-                                      Trip, Lorry &amp; Cargo Specifications
-                                    </span>
-                                    <span className="font-mono font-black text-[11px] text-[#26231B] bg-white px-2 py-0.5 rounded-md border border-[#E7E2D0]">
-                                      {b.assignedPlate || "No Plate"} · {b.vehicleType}
-                                    </span>
-                                  </div>
+                                <div>
+                                  <h4 className="text-sm font-bold text-gray-900 mb-2.5">
+                                    Trip &amp; Cargo Details
+                                  </h4>
+                                  <dl className="grid grid-cols-[120px_1fr] gap-y-2 gap-x-3">
+                                    <dt className="text-gray-500">Route</dt>
+                                    <dd className="font-semibold text-gray-900">
+                                      {b.pickupCity} → {b.deliveryCity}
+                                    </dd>
 
-                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                    <div className="bg-white px-3 py-2 rounded-xl border border-[#E7E2D0]">
-                                      <span className="block text-[10px] font-bold text-[#6F6A5A] uppercase">
-                                        Pickup Point
-                                      </span>
-                                      <span className="text-xs font-black text-[#26231B] break-words">
-                                        {b.pickupCity}
-                                      </span>
-                                    </div>
-                                    <div className="bg-white px-3 py-2 rounded-xl border border-[#E7E2D0]">
-                                      <span className="block text-[10px] font-bold text-[#6F6A5A] uppercase">
-                                        Destination
-                                      </span>
-                                      <span className="text-xs font-black text-[#26231B] break-words">
-                                        {b.deliveryCity}
-                                      </span>
-                                    </div>
-                                  </div>
+                                    <dt className="text-gray-500">Trip Date(s)</dt>
+                                    <dd className="font-medium text-gray-900">{bookedDatesDisplay}</dd>
 
-                                  <div className="flex flex-wrap items-center gap-1.5">
-                                    <span className="text-[10.5px] font-bold text-[#6F6A5A] mr-0.5">
-                                      Booked Trip Date(s):
-                                    </span>
-                                    {resolvedBookedDates.map((dStr) => (
-                                      <span
-                                        key={dStr}
-                                        className="font-mono text-[11px] font-black text-[#26231B] bg-white px-2 py-0.5 rounded-md border border-[#E7E2D0]"
-                                      >
-                                        {dStr}
-                                      </span>
-                                    ))}
-                                    <span className="font-mono text-[11px] font-bold text-[#5B4300] bg-[#FFF4D1] px-2 py-0.5 rounded-md border border-[#F0CE68]">
-                                      {bookedDaysLabel}
-                                    </span>
-                                  </div>
+                                    <dt className="text-gray-500">Lorry</dt>
+                                    <dd className="text-gray-900">
+                                      {b.assignedPlate || "Not assigned"} ({b.vehicleType})
+                                    </dd>
 
-                                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#26231B]">
                                     {b.cargoNature && (
-                                      <span>
-                                        Goods: <b>{b.cargoNature}</b>
-                                      </span>
+                                      <>
+                                        <dt className="text-gray-500">Goods</dt>
+                                        <dd className="text-gray-900">{b.cargoNature}</dd>
+                                      </>
                                     )}
-                                    {b.cargoWeight && (
-                                      <span>
-                                        Weight: <b>{b.cargoWeight}</b>
-                                      </span>
-                                    )}
-                                    {b.helpersCount !== undefined && (
-                                      <span>
-                                        Helpers: <b>{b.helpersCount}</b>
-                                      </span>
-                                    )}
-                                  </div>
 
-                                  {b.assignedDriverName && (
-                                    <div className="bg-emerald-50 border border-emerald-200 px-3 py-2 rounded-xl text-xs text-[#137333] font-semibold flex flex-wrap items-center justify-between gap-2">
-                                      <span>
-                                        Assigned Driver: <b>{b.assignedDriverName}</b>
-                                      </span>
-                                      {b.assignedDriverPhone && (
-                                        <a
-                                          href={`tel:${String(b.assignedDriverPhone).replace(/\s+/g, "")}`}
-                                          className="font-mono font-black underline"
-                                        >
-                                          {b.assignedDriverPhone}
-                                        </a>
-                                      )}
-                                    </div>
-                                  )}
+                                    {(b.cargoWeight || b.helpersCount !== undefined) && (
+                                      <>
+                                        <dt className="text-gray-500">Weight / Helpers</dt>
+                                        <dd className="text-gray-900">
+                                          {b.cargoWeight || "—"}
+                                          {b.helpersCount !== undefined ? ` · Helpers: ${b.helpersCount}` : ""}
+                                        </dd>
+                                      </>
+                                    )}
+
+                                    {b.assignedDriverName && (
+                                      <>
+                                        <dt className="text-gray-500">Assigned Rider</dt>
+                                        <dd className="font-semibold text-green-800">
+                                          {b.assignedDriverName}
+                                          {b.assignedDriverPhone && (
+                                            <a
+                                              href={`tel:${String(b.assignedDriverPhone).replace(/\s+/g, "")}`}
+                                              className="ml-2 font-mono underline"
+                                            >
+                                              {b.assignedDriverPhone}
+                                            </a>
+                                          )}
+                                        </dd>
+                                      </>
+                                    )}
+                                  </dl>
                                 </div>
                               </div>
 
-                              {/* Step 1: Enter Amount / Quote Box OR Manual Cash Approve */}
-                              {(b.status === "pending" || editingQuoteId === b.id) && (
-                                <div className="p-4 rounded-2xl bg-amber-50/70 border border-amber-300 flex flex-col gap-3">
-                                  <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <div>
-                                      <span className="text-xs font-black text-[#26231B] block">
-                                        Set Booking Amount, Request Slip OR Approve Cash Payment
-                                      </span>
-                                      <span className="text-[11px] text-[#6F6A5A]">
-                                        Send a quote to wait for customer bank slip, or approve Cash / Direct payment immediately to lock dates RED.
-                                      </span>
+                              {/* Schedule Time Duration & Mandatory Rider Allocation Panel */}
+                              {(() => {
+                                const draft = getScheduleDraft(b);
+                                const draftTimeCheck = validateTimeRange(draft.startTime, draft.endTime);
+                                const draftConflict =
+                                  draftTimeCheck.valid && draft.date
+                                    ? findBookingScheduleConflict(
+                                        {
+                                          excludeBookingId: b.id,
+                                          date: draft.date,
+                                          dates: [draft.date],
+                                          startTime: draftTimeCheck.startTime,
+                                          endTime: draftTimeCheck.endTime,
+                                          assignedPlate: draft.plate,
+                                          assignedLorryId: draft.lorryId,
+                                          assignedDriverId: draft.driverId,
+                                          assignedDriverName: draft.driverName,
+                                          assignedDriverPhone: draft.driverPhone,
+                                          bookingType: "individual_vehicle",
+                                        },
+                                        bookings
+                                      )
+                                    : null;
+                                const riderSelected = hasAssignedRider({
+                                  assignedDriverId: draft.driverId,
+                                  assignedDriverName: draft.driverName,
+                                  assignedDriverPhone: draft.driverPhone,
+                                });
+
+                                return (
+                                  <div className="px-4 py-4 sm:px-5 flex flex-col gap-3">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <div>
+                                        <h4 className="text-sm font-bold text-gray-900">
+                                          Step 1: Assign Time Duration &amp; Rider
+                                        </h4>
+                                        <p className="text-sm text-gray-600 mt-0.5">
+                                          Set the trip date, start/end time, lorry, and rider. Overlapping schedules are blocked.
+                                        </p>
+                                      </div>
+                                      {b.startTime && b.endTime && (
+                                        <span className="text-sm font-mono font-semibold text-green-800 bg-green-50 border border-green-300 px-3 py-1 rounded-md">
+                                          Allocated: {formatTimeDurationLabel(b.startTime, b.endTime)}
+                                        </span>
+                                      )}
                                     </div>
-                                    {editingQuoteId === b.id && (
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+                                      <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                          Trip Date *
+                                        </label>
+                                        <input
+                                          type="date"
+                                          aria-label={`Schedule date for ${b.id}`}
+                                          value={draft.date}
+                                          onChange={(e) => updateScheduleDraft(b, { date: e.target.value })}
+                                          className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                          Start Time *
+                                        </label>
+                                        <input
+                                          type="time"
+                                          aria-label={`Start time for ${b.id}`}
+                                          value={draft.startTime}
+                                          onChange={(e) => updateScheduleDraft(b, { startTime: e.target.value })}
+                                          className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                          End Time *
+                                        </label>
+                                        <input
+                                          type="time"
+                                          aria-label={`End time for ${b.id}`}
+                                          value={draft.endTime}
+                                          onChange={(e) => updateScheduleDraft(b, { endTime: e.target.value })}
+                                          className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                          Lorry (Vehicle) *
+                                        </label>
+                                        <select
+                                          aria-label={`Schedule vehicle for ${b.id}`}
+                                          value={draft.plate}
+                                          onChange={(e) => {
+                                            const selPlate = e.target.value;
+                                            const matchedV = fleetVehicles.find((v) => v.plate === selPlate);
+                                            updateScheduleDraft(b, {
+                                              plate: selPlate,
+                                              lorryId:
+                                                matchedV?.id ||
+                                                `lorry-${normalizePlate(selPlate).toLowerCase()}`,
+                                            });
+                                          }}
+                                          className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                                        >
+                                          <option value="">Select Lorry</option>
+                                          {fleetVehicles.map((v) => (
+                                            <option key={v.id || v.plate} value={v.plate}>
+                                              {v.plate} ({v.vehicleType})
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </div>
+                                      <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                          Assign Rider *
+                                        </label>
+                                        <select
+                                          aria-label={`Schedule rider for ${b.id}`}
+                                          value={draft.driverName}
+                                          onChange={(e) => {
+                                            const drv = drivers.find((d) => d.name === e.target.value);
+                                            updateScheduleDraft(b, {
+                                              driverId: drv?.driverId || "",
+                                              driverName: drv?.name || e.target.value,
+                                              driverPhone: drv?.phone || "",
+                                            });
+                                          }}
+                                          className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                                        >
+                                          <option value="">Select Rider</option>
+                                          {drivers.map((d) => (
+                                            <option key={d.driverId} value={d.name}>
+                                              {d.name} ({d.driverId}) - {d.phone}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </div>
+                                    </div>
+
+                                    {draftConflict?.hasConflict ? (
+                                      <div className="px-3.5 py-2.5 rounded-md bg-red-50 border border-red-300 text-sm font-semibold text-red-800">
+                                        {draftConflict.message}
+                                      </div>
+                                    ) : draft.startTime || draft.endTime ? (
+                                      !draftTimeCheck.valid ? (
+                                        <div className="px-3.5 py-2.5 rounded-md bg-amber-50 border border-amber-300 text-sm font-medium text-amber-900">
+                                          {draftTimeCheck.error}
+                                        </div>
+                                      ) : !riderSelected ? (
+                                        <div className="px-3.5 py-2.5 rounded-md bg-amber-50 border border-amber-300 text-sm font-medium text-amber-900">
+                                          Select a Rider to complete schedule allocation.
+                                        </div>
+                                      ) : (
+                                        <div className="px-3.5 py-2.5 rounded-md bg-green-50 border border-green-300 text-sm font-medium text-green-800">
+                                          Slot Available: {draft.date} · {formatTimeDurationLabel(draftTimeCheck.startTime, draftTimeCheck.endTime)} · {draft.plate} · Rider: {draft.driverName}
+                                        </div>
+                                      )
+                                    ) : null}
+
+                                    <div className="flex flex-wrap items-center justify-end gap-2">
                                       <button
                                         type="button"
-                                        onClick={() => setEditingQuoteId(null)}
-                                        className="text-xs font-bold text-[#6F6A5A] hover:text-[#26231B] cursor-pointer"
+                                        disabled={actionLoading === b.id || Boolean(draftConflict?.hasConflict)}
+                                        onClick={() => handleSaveBookingSchedule(b)}
+                                        className="px-5 py-2.5 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer disabled:opacity-50"
                                       >
-                                        Cancel Edit
+                                        {actionLoading === b.id
+                                          ? "Saving..."
+                                          : ["accepted", "booked"].includes(b.status)
+                                          ? "Save & Assign Rider"
+                                          : "Save Time & Rider"}
                                       </button>
-                                    )}
-                                  </div>
-
-                                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end">
-                                    <div className="sm:col-span-5">
-                                      <label className="block text-[11px] font-bold text-[#26231B] mb-1">
-                                        Amount (LKR) *
-                                      </label>
-                                      <input
-                                        type="number"
-                                        min="1"
-                                        placeholder="e.g. 25000"
-                                        value={quoteDraft.amount}
-                                        onChange={(e) =>
-                                          setQuoteInputs((prev) => ({
-                                            ...prev,
-                                            [b.id]: { ...quoteDraft, amount: e.target.value },
-                                          }))
-                                        }
-                                        className="w-full px-3 py-2 rounded-xl border border-amber-300 bg-white text-xs font-mono font-bold text-[#26231B]"
-                                      />
-                                    </div>
-                                    <div className="sm:col-span-7">
-                                      <label className="block text-[11px] font-bold text-[#26231B] mb-1">
-                                        Payment Note (Optional)
-                                      </label>
-                                      <input
-                                        type="text"
-                                        placeholder="e.g. Full fare / Cash paid at office"
-                                        value={quoteDraft.note}
-                                        onChange={(e) =>
-                                          setQuoteInputs((prev) => ({
-                                            ...prev,
-                                            [b.id]: { ...quoteDraft, note: e.target.value },
-                                          }))
-                                        }
-                                        className="w-full px-3 py-2 rounded-xl border border-amber-300 bg-white text-xs text-[#26231B]"
-                                      />
                                     </div>
                                   </div>
+                                );
+                              })()}
 
-                                  <div className="flex flex-wrap items-center justify-end gap-2">
-                                    <button
-                                      type="button"
-                                      disabled={actionLoading === b.id}
-                                      onClick={() => handleSendQuote(b)}
-                                      className="px-4 py-2 rounded-xl bg-[#26231B] hover:bg-[#FFC20E] hover:text-[#26231B] text-white text-xs font-black transition-colors cursor-pointer shadow-xs disabled:opacity-50"
-                                    >
-                                      {actionLoading === b.id ? "Sending..." : "Send Amount & Request Pay"}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={actionLoading === b.id}
-                                      onClick={() => handleManualApprovePayment(b)}
-                                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black transition-colors cursor-pointer shadow-xs disabled:opacity-50"
-                                    >
-                                      Manual Approve (Cash) & Lock Date
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
+                              {/* Pricing & Payment Section */}
+                              {(b.status === "pending" ||
+                                editingQuoteId === b.id ||
+                                b.status === "awaiting_payment" ||
+                                (isPaymentLocked && isCashManual && !hasStoredSlip && !b.paymentSlipDeletedAt) ||
+                                hasStoredSlip ||
+                                (b.paymentSlipDeletedAt && b.paymentSlipStatus === "deleted")) && (
+                                <div className="px-4 py-4 sm:px-5 flex flex-col gap-3">
+                                  <h4 className="text-sm font-bold text-gray-900">
+                                    Step 2: Amount &amp; Payment
+                                  </h4>
 
-                              {/* Step 2: Awaiting Customer Payment Summary */}
-                              {b.status === "awaiting_payment" && editingQuoteId !== b.id && (
-                                <div className="p-3.5 rounded-2xl bg-sky-50 border border-sky-200 flex flex-wrap items-center justify-between gap-3 text-xs">
-                                  <div className="flex flex-col gap-0.5">
-                                    <span className="font-black text-sky-900">
-                                      Waiting for Customer Payment Slip — Quoted Rs. {(b.quotedAmount || 0).toLocaleString()}
-                                    </span>
-                                    {b.quoteNote && (
-                                      <span className="text-[11px] text-sky-800">Note: {b.quoteNote}</span>
-                                    )}
-                                    {b.paymentSlipStatus === "rejected" && b.paymentRejectReason && (
-                                      <span className="text-[11px] text-red-700 font-bold">
-                                        Previous slip rejected: {b.paymentRejectReason}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setQuoteInputs((prev) => ({
-                                          ...prev,
-                                          [b.id]: {
-                                            amount: b.quotedAmount ? String(b.quotedAmount) : "",
-                                            note: b.quoteNote || "",
-                                          },
-                                        }));
-                                        setEditingQuoteId(b.id);
-                                      }}
-                                      className="px-3 py-1.5 rounded-xl border border-sky-300 bg-white text-sky-900 text-xs font-bold hover:bg-sky-100 cursor-pointer"
-                                    >
-                                      Edit Amount
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={actionLoading === b.id}
-                                      onClick={() => handleManualApprovePayment(b)}
-                                      className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black transition-colors cursor-pointer shadow-xs disabled:opacity-50"
-                                    >
-                                      Manual Approve (Cash) & Lock Date
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
+                                  {(b.status === "pending" || editingQuoteId === b.id) && (
+                                    <div className="flex flex-col gap-3">
+                                      <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <p className="text-sm text-gray-600">
+                                          Send the quote amount to request customer payment, or approve Cash payment directly.
+                                        </p>
+                                        {editingQuoteId === b.id && (
+                                          <button
+                                            type="button"
+                                            onClick={() => setEditingQuoteId(null)}
+                                            className="text-sm font-semibold text-gray-700 hover:text-gray-900 underline cursor-pointer"
+                                          >
+                                            Cancel Edit
+                                          </button>
+                                        )}
+                                      </div>
 
-                              {/* Manual Cash Approved Summary (when approved without customer slip) */}
-                              {isPaymentLocked && isCashManual && !hasStoredSlip && !b.paymentSlipDeletedAt && (
-                                <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-xs text-emerald-950">
-                                  <div className="flex flex-col gap-0.5">
-                                    <span className="font-black text-emerald-900">
-                                      Cash / Direct Payment Approved Manually • Calendar Date Locked RED
-                                    </span>
-                                    <span className="text-[11px] text-emerald-800">
-                                      Approved without customer bank slip{b.quoteNote ? ` (${b.quoteNote})` : ""}. Customer portal updated in real time.
-                                    </span>
-                                  </div>
-                                </div>
-                              )}
-
-                              {/* Step 3 & Post-Approval: Uploaded Slip Card / DB Deletion Badge */}
-                              {(hasStoredSlip || (b.paymentSlipDeletedAt && b.paymentSlipStatus === "deleted")) && (
-                                <div
-                                  className={`p-3.5 rounded-2xl border flex flex-wrap items-center justify-between gap-3 text-xs ${
-                                    b.status === "payment_submitted"
-                                      ? "bg-purple-50 border-purple-300"
-                                      : "bg-[#F7F5EE] border-[#E7E2D0]"
-                                  }`}
-                                >
-                                  {hasStoredSlip ? (
-                                    <>
-                                      <div className="flex flex-col gap-0.5">
-                                        <div className="flex flex-wrap items-center gap-2">
-                                          <span className="px-2 py-0.5 rounded-md bg-[#26231B] text-[#FFC20E] text-[10px] font-mono font-black">
-                                            {isPdfSlip ? "PDF" : "IMAGE"}
-                                          </span>
-                                          <span className="font-black text-[#26231B]">
-                                            {b.paymentSlipName || "Payment Slip"}
-                                          </span>
-                                          {b.paymentSlipSize ? (
-                                            <span className="text-[11px] text-[#6F6A5A] font-mono">
-                                              ({Math.max(1, Math.round(b.paymentSlipSize / 1024))} KB in Firestore DB)
-                                            </span>
-                                          ) : null}
+                                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                                        <div className="sm:col-span-4">
+                                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                                            Amount (LKR) *
+                                          </label>
+                                          <input
+                                            type="number"
+                                            min="1"
+                                            value={quoteDraft.amount}
+                                            onChange={(e) =>
+                                              setQuoteInputs((prev) => ({
+                                                ...prev,
+                                                [b.id]: { ...quoteDraft, amount: e.target.value },
+                                              }))
+                                            }
+                                            className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                                          />
                                         </div>
-                                        <div className="text-[11px] text-[#6F6A5A]">
-                                          {b.paymentBankUsed ? `Paid to: ${b.paymentBankUsed}` : "Uploaded by customer to Firestore DB"}
-                                          {b.status === "payment_submitted" && (
-                                            <span className="ml-2 text-purple-800 font-bold">
-                                              • Date NOT locked yet — Review slip & approve
-                                            </span>
-                                          )}
+                                        <div className="sm:col-span-8">
+                                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                                            Payment Note (Optional)
+                                          </label>
+                                          <input
+                                            type="text"
+                                            value={quoteDraft.note}
+                                            onChange={(e) =>
+                                              setQuoteInputs((prev) => ({
+                                                ...prev,
+                                                [b.id]: { ...quoteDraft, note: e.target.value },
+                                              }))
+                                            }
+                                            className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                                          />
                                         </div>
                                       </div>
 
-                                      <div className="flex flex-wrap items-center gap-2">
+                                      <div className="flex flex-wrap items-center justify-end gap-2.5">
                                         <button
                                           type="button"
-                                          onClick={() => openSlipReviewModal(b)}
-                                          className="px-3.5 py-1.5 rounded-xl bg-purple-700 hover:bg-purple-800 text-white text-xs font-black transition-colors cursor-pointer"
+                                          disabled={actionLoading === b.id}
+                                          onClick={() => handleSendQuote(b)}
+                                          className="px-5 py-2.5 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer disabled:opacity-50"
                                         >
-                                          Review Slip / PDF
+                                          {actionLoading === b.id ? "Sending..." : "Send Amount & Request Pay"}
                                         </button>
                                         <button
                                           type="button"
                                           disabled={actionLoading === b.id}
-                                          onClick={() => {
-                                            if (confirm("Delete this payment slip permanently from Firestore database?")) {
-                                              handleDeleteSlipFromDb(b.id, b.paymentSlipId);
-                                            }
-                                          }}
-                                          className="px-3 py-1.5 rounded-xl border border-red-200 bg-white text-red-600 hover:bg-red-50 text-xs font-bold transition-colors cursor-pointer"
+                                          onClick={() => handleManualApprovePayment(b)}
+                                          className="px-4 py-2.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 text-sm font-semibold cursor-pointer disabled:opacity-50"
                                         >
-                                          Delete Slip from DB
+                                          Manual Approve (Cash)
                                         </button>
                                       </div>
-                                    </>
-                                  ) : (
-                                    <span className="text-[11px] font-bold text-[#6F6A5A]">
-                                      Payment slip reviewed & deleted cleanly from database
-                                    </span>
+                                    </div>
+                                  )}
+
+                                  {b.status === "awaiting_payment" && editingQuoteId !== b.id && (
+                                    <div className="flex flex-wrap items-center justify-between gap-3 text-sm bg-gray-50 border border-gray-200 rounded-md px-4 py-3">
+                                      <div className="flex flex-col gap-0.5">
+                                        <span className="font-semibold text-gray-900">
+                                          Waiting for customer payment slip — Quoted Rs. {(b.quotedAmount || 0).toLocaleString()}
+                                        </span>
+                                        {b.quoteNote && (
+                                          <span className="text-sm text-gray-600">Note: {b.quoteNote}</span>
+                                        )}
+                                        {b.paymentSlipStatus === "rejected" && b.paymentRejectReason && (
+                                          <span className="text-sm text-red-700 font-semibold">
+                                            Previous slip rejected: {b.paymentRejectReason}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setQuoteInputs((prev) => ({
+                                              ...prev,
+                                              [b.id]: {
+                                                amount: b.quotedAmount ? String(b.quotedAmount) : "",
+                                                note: b.quoteNote || "",
+                                              },
+                                            }));
+                                            setEditingQuoteId(b.id);
+                                          }}
+                                          className="px-3.5 py-2 rounded-md border border-gray-300 bg-white text-gray-900 text-sm font-medium hover:bg-gray-50 cursor-pointer"
+                                        >
+                                          Edit Amount
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled={actionLoading === b.id}
+                                          onClick={() => handleManualApprovePayment(b)}
+                                          className="px-4 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer disabled:opacity-50"
+                                        >
+                                          Manual Approve (Cash)
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {isPaymentLocked && isCashManual && !hasStoredSlip && !b.paymentSlipDeletedAt && (
+                                    <div className="px-4 py-3 rounded-md bg-green-50 border border-green-300 text-sm text-green-900">
+                                      <span className="font-semibold block">
+                                        Cash / Direct payment approved manually · Schedule active
+                                      </span>
+                                      {b.quoteNote && (
+                                        <span className="text-sm">Note: {b.quoteNote}</span>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  {(hasStoredSlip || (b.paymentSlipDeletedAt && b.paymentSlipStatus === "deleted")) && (
+                                    <div className="px-4 py-3 rounded-md bg-gray-50 border border-gray-200 flex flex-wrap items-center justify-between gap-3 text-sm">
+                                      {hasStoredSlip ? (
+                                        <>
+                                          <div className="flex flex-col gap-0.5">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                              <span className="px-2 py-0.5 rounded bg-gray-900 text-white text-xs font-mono font-bold">
+                                                {isPdfSlip ? "PDF" : "IMAGE"}
+                                              </span>
+                                              <span className="font-semibold text-gray-900">
+                                                {b.paymentSlipName || "Payment Slip"}
+                                              </span>
+                                              {b.paymentSlipSize ? (
+                                                <span className="text-xs text-gray-600 font-mono">
+                                                  ({Math.max(1, Math.round(b.paymentSlipSize / 1024))} KB)
+                                                </span>
+                                              ) : null}
+                                            </div>
+                                            <div className="text-sm text-gray-600">
+                                              {b.paymentBankUsed ? `Paid to: ${b.paymentBankUsed}` : "Uploaded by customer"}
+                                              {b.status === "payment_submitted" && (
+                                                <span className="ml-2 text-gray-900 font-semibold">
+                                                  · Pending review
+                                                </span>
+                                              )}
+                                            </div>
+                                          </div>
+
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <button
+                                              type="button"
+                                              onClick={() => openSlipReviewModal(b)}
+                                              className="px-3.5 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer"
+                                            >
+                                              Review Slip / PDF
+                                            </button>
+                                            <button
+                                              type="button"
+                                              disabled={actionLoading === b.id}
+                                              onClick={() => {
+                                                if (confirm("Delete this payment slip permanently from Firestore database?")) {
+                                                  handleDeleteSlipFromDb(b.id, b.paymentSlipId);
+                                                }
+                                              }}
+                                              className="px-3.5 py-2 rounded-md border border-red-300 bg-white text-red-700 hover:bg-red-50 text-sm font-medium cursor-pointer"
+                                            >
+                                              Delete Slip
+                                            </button>
+                                          </div>
+                                        </>
+                                      ) : (
+                                        <span className="text-sm text-gray-600">
+                                          Payment slip reviewed and deleted from database.
+                                        </span>
+                                      )}
+                                    </div>
                                   )}
                                 </div>
                               )}
 
-                              {/* Manual Progress Control Row */}
-                              <div className="p-3 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0] flex flex-wrap items-center justify-between gap-2.5 text-xs">
-                                <div className="flex flex-col gap-0.5">
-                                  <span className="text-[11px] font-black text-[#26231B]">
-                                    Manual Progress Update
-                                  </span>
-                                  <span className="text-[10.5px] text-[#6F6A5A]">
-                                    Override stage manually anytime (supports cash payments & date locking without slip)
-                                  </span>
-                                </div>
-                                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                              {/* Footer Stage Override & Actions */}
+                              <div className="px-4 py-3.5 sm:px-5 bg-gray-50 flex flex-wrap items-center justify-between gap-3 text-sm">
+                                <div className="flex flex-wrap items-center gap-2.5">
+                                  <label htmlFor={`stage-${b.id}`} className="text-sm font-medium text-gray-700">
+                                    Stage:
+                                  </label>
                                   <select
+                                    id={`stage-${b.id}`}
                                     aria-label={`Manual progress stage for ${b.id}`}
                                     value={selectedManualStage}
                                     onChange={(e) =>
@@ -4009,34 +4329,26 @@ export default function MasterAdminDashboard() {
                                         [b.id]: e.target.value as BookingStatus,
                                       }))
                                     }
-                                    className="flex-1 sm:flex-initial min-w-[210px] px-3 py-2 rounded-xl border border-[#E7E2D0] bg-white text-xs font-bold text-[#26231B]"
+                                    className="min-w-[230px] px-3 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
                                   >
-                                    <option value="pending">1. Pending Quote (Date Open)</option>
-                                    <option value="awaiting_payment">2. Awaiting Payment (Date Open)</option>
+                                    <option value="pending">1. Pending Review</option>
+                                    <option value="awaiting_payment">2. Awaiting Payment</option>
                                     <option value="payment_submitted">3. Slip Submitted — Review</option>
-                                    <option value="accepted">4. Payment Approved • Lock Date RED</option>
-                                    <option value="assigned">5. Driver Assigned (Date Locked RED)</option>
-                                    <option value="in_transit">6. In Transit (Date Locked RED)</option>
+                                    <option value="accepted">4. Payment Approved (Slot Allocated)</option>
+                                    <option value="assigned">5. Rider &amp; Time Assigned</option>
+                                    <option value="in_transit">6. In Transit</option>
                                     <option value="delivered">7. Delivered / Completed</option>
-                                    <option value="cancelled">8. Cancelled (Unlock Dates)</option>
+                                    <option value="cancelled">8. Cancelled (Release Time Slot)</option>
                                   </select>
                                   <button
                                     type="button"
                                     disabled={actionLoading === b.id || selectedManualStage === (b.status === "booked" ? "accepted" : b.status)}
                                     onClick={() => handleManualProgressUpdate(b)}
-                                    className="px-3.5 py-2 rounded-xl bg-[#26231B] hover:bg-[#FFC20E] hover:text-[#26231B] text-white text-xs font-black transition-colors cursor-pointer disabled:opacity-40"
+                                    className="px-3.5 py-2 rounded-md border border-gray-300 bg-white hover:bg-gray-100 text-gray-900 text-sm font-medium cursor-pointer disabled:opacity-40"
                                   >
                                     Update Stage
                                   </button>
                                 </div>
-                              </div>
-
-                              {/* Action Buttons Row */}
-                              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                                <span className="text-[11px] text-[#6F6A5A]">
-                                  Booking ID: <code className="font-mono text-[#26231B]">{b.id}</code>
-                                  <span className="ml-2 text-[10px] text-[#6F6A5A]">(Web &amp; Customer Portal only)</span>
-                                </span>
 
                                 <div className="flex flex-wrap items-center gap-2">
                                   {b.status === "payment_submitted" && (
@@ -4044,20 +4356,9 @@ export default function MasterAdminDashboard() {
                                       type="button"
                                       disabled={actionLoading === b.id}
                                       onClick={() => handleApproveSlipPayment(b)}
-                                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+                                      className="px-4 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer disabled:opacity-50"
                                     >
-                                      Approve Payment &amp; Lock Date
-                                    </button>
-                                  )}
-
-                                  {["accepted", "booked"].includes(b.status) && (
-                                    <button
-                                      type="button"
-                                      disabled={actionLoading === b.id}
-                                      onClick={() => openAssignModal(b)}
-                                      className="px-3.5 py-2 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] text-[#26231B] text-xs font-black transition-colors cursor-pointer shadow-xs disabled:opacity-50"
-                                    >
-                                      Assign Driver
+                                      Approve Payment &amp; Schedule
                                     </button>
                                   )}
 
@@ -4066,7 +4367,7 @@ export default function MasterAdminDashboard() {
                                       type="button"
                                       disabled={actionLoading === b.id}
                                       onClick={() => updateBooking(b.id, "in_transit")}
-                                      className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-black transition-colors cursor-pointer shadow-xs"
+                                      className="px-4 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer"
                                     >
                                       Mark In Transit
                                     </button>
@@ -4077,7 +4378,7 @@ export default function MasterAdminDashboard() {
                                       type="button"
                                       disabled={actionLoading === b.id}
                                       onClick={() => updateBooking(b.id, "delivered")}
-                                      className="px-3.5 py-2 rounded-xl bg-gray-700 hover:bg-gray-800 text-white text-xs font-black transition-colors cursor-pointer shadow-xs"
+                                      className="px-4 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer"
                                     >
                                       Mark Delivered
                                     </button>
@@ -4088,11 +4389,11 @@ export default function MasterAdminDashboard() {
                                       type="button"
                                       disabled={actionLoading === b.id}
                                       onClick={() => {
-                                        if (confirm("Are you sure you want to cancel this booking and free the calendar date?")) {
+                                        if (confirm("Are you sure you want to cancel this booking and free its scheduled time slot?")) {
                                           updateBooking(b.id, "cancelled");
                                         }
                                       }}
-                                      className="px-3 py-2 rounded-xl border border-amber-300 text-amber-800 hover:bg-amber-50 text-xs font-bold transition-colors cursor-pointer"
+                                      className="px-3.5 py-2 rounded-md border border-gray-300 bg-white text-gray-900 hover:bg-gray-100 text-sm font-medium cursor-pointer"
                                     >
                                       Reject / Cancel
                                     </button>
@@ -4102,16 +4403,10 @@ export default function MasterAdminDashboard() {
                                     type="button"
                                     disabled={actionLoading === b.id}
                                     onClick={() => handleDeleteBooking(b.id)}
-                                    className="px-3 py-2 rounded-xl border border-red-300 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-black transition-colors cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                                    className="px-3.5 py-2 rounded-md border border-red-300 bg-white hover:bg-red-50 text-red-700 text-sm font-medium cursor-pointer"
                                     title="Permanently Delete Booking from Database"
                                   >
-                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                      <polyline points="3 6 5 6 21 6" />
-                                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                                      <line x1="10" y1="11" x2="10" y2="17" />
-                                      <line x1="14" y1="11" x2="14" y2="17" />
-                                    </svg>
-                                    <span>Delete</span>
+                                    Delete
                                   </button>
                                 </div>
                               </div>
@@ -4122,81 +4417,6 @@ export default function MasterAdminDashboard() {
                     })
                   )}
                 </div>
-              )}
-
-              {/* CALENDAR VIEW OF DEDICATED VEHICLES */}
-              {bookingViewSubTab === "calendar" && (
-                <div className="flex flex-col gap-5">
-                  {/* Vehicle Selector Pills */}
-                  <div className="bg-white p-4 rounded-3xl border border-[#E7E2D0] shadow-xs flex flex-col gap-3">
-                    <span className="text-xs font-black text-[#26231B] uppercase tracking-wider">
-                      Select Fleet Vehicle to Inspect Calendar:
-                    </span>
-                    <div className="flex flex-wrap gap-2">
-                      {fleetVehicles.map((v) => {
-                        const isSelected = selectedCalendarVehicle?.plate === v.plate;
-                        return (
-                          <button
-                            key={v.id || v.plate}
-                            onClick={() => setSelectedCalendarVehicle(v)}
-                            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all border cursor-pointer ${
-                              isSelected
-                                ? "bg-[#26231B] text-[#FFC20E] border-[#26231B] shadow-xs font-black"
-                                : "bg-[#F7F5EE] text-[#26231B] border-[#E7E2D0] hover:bg-white"
-                            }`}
-                          >
-                            <span>{v.plate}</span>
-                            <span className="text-[10px] ml-1 opacity-70">({v.vehicleType})</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {/* Calendar Display */}
-                  {loadingFleet || loadingBookings ? (
-                    <div className="p-8 text-center bg-white rounded-3xl border border-[#E7E2D0]">
-                      <p className="text-xs font-bold text-[#6F6A5A]">Loading live vehicle calendar...</p>
-                    </div>
-                  ) : selectedCalendarVehicle ? (
-                    <div className="bg-white p-5 rounded-3xl border border-[#E7E2D0] shadow-xs flex flex-col gap-4">
-                      <div className="flex items-center justify-between border-b border-[#E7E2D0] pb-3">
-                        <div>
-                          <h3 className="text-base font-black text-[#26231B]">
-                            {selectedCalendarVehicle.plate} — Booking Calendar
-                          </h3>
-                          <p className="text-xs text-[#6F6A5A]">
-                            Red dates are officially locked for bookings. Click any booked date to view details.
-                          </p>
-                        </div>
-                        <button
-                          onClick={() => refreshVehicleCalendar(selectedCalendarVehicle.plate)}
-                          disabled={calendarLoading}
-                          className="px-3 py-1.5 rounded-xl border border-[#E7E2D0] text-xs font-bold hover:bg-[#F7F5EE] transition-colors cursor-pointer"
-                        >
-                          {calendarLoading ? "Syncing..." : "Refresh"}
-                        </button>
-                      </div>
-
-                      <BookingCalendar
-                        selectedDate={calendarSelectedDate}
-                        onSelectDate={setCalendarSelectedDate}
-                        bookedDates={vehicleBookedDates}
-                        bookingsByDate={vehicleBookingsByDate}
-                        isAdmin={true}
-                        locale="en"
-                        onCancelBooking={async (bookingId) => {
-                          await updateBooking(bookingId, "cancelled");
-                        }}
-                      />
-                    </div>
-                  ) : (
-                    <div className="p-8 text-center bg-white rounded-3xl border border-[#E7E2D0]">
-                      <p className="text-xs font-bold text-[#6F6A5A]">No vehicle selected. Register vehicles in the Fleet section.</p>
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
           )}
 
@@ -4205,22 +4425,20 @@ export default function MasterAdminDashboard() {
           {/* ========================================================= */}
           {activeNav === "online_bookings" && (
             <div className="flex flex-col gap-4">
-              {/* Header Card with Title and Counts */}
-              <div className="flex items-center justify-between bg-white p-4 rounded-2xl border border-[#E7E2D0]">
-                <div>
-                  <h2 className="text-sm font-black text-[#26231B]">Live / Empty Return Bookings</h2>
-                  <p className="text-xs text-[#6F6A5A]">Bookings received from the Find Empty Lorry live map broadcast.</p>
-                </div>
-                <span className="px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs font-black font-mono">
-                  {loadingBookings ? "..." : `${onlineBookings.length} Requests`}
-                </span>
-              </div>
-
-              {/* Status Filters + Search Toolbar */}
-              <div className="flex flex-col gap-3 bg-white p-3.5 sm:p-4 rounded-2xl border border-[#E7E2D0] shadow-xs">
-                {/* Status Filter Buttons */}
+              {/* Filter & Search Bar */}
+              <div className="bg-white border border-gray-300 rounded-lg p-4 sm:p-5 flex flex-col gap-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex flex-wrap items-center gap-1.5 text-xs font-bold">
+                  <div>
+                    <h2 className="text-base font-bold text-gray-900">
+                      Online / Live Bookings ({onlineBookings.length})
+                    </h2>
+                    <p className="text-sm text-gray-600 mt-0.5">
+                      Bookings received from the Find Empty Lorry live broadcast.
+                    </p>
+                  </div>
+
+                  {/* Status Filter */}
+                  <div className="flex flex-wrap items-center gap-1.5 text-sm">
                     {([
                       { key: "all", label: "All" },
                       { key: "pending", label: "Pending Quote" },
@@ -4234,10 +4452,10 @@ export default function MasterAdminDashboard() {
                         key={st.key}
                         type="button"
                         onClick={() => setStatusFilter(st.key)}
-                        className={`px-3 py-1 rounded-lg transition-all cursor-pointer ${
+                        className={`px-3 py-1.5 rounded-md font-medium cursor-pointer border ${
                           statusFilter === st.key
-                            ? "bg-[#FFC20E] text-[#26231B] font-black"
-                            : "text-[#6F6A5A] hover:bg-[#F7F5EE]"
+                            ? "bg-gray-900 text-white border-gray-900"
+                            : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
                         }`}
                       >
                         {st.label}
@@ -4248,51 +4466,38 @@ export default function MasterAdminDashboard() {
                   </div>
                 </div>
 
-                {/* Search Box + Accordion Toolbar */}
-                <div className="pt-3 border-t border-[#E7E2D0] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                  <div className="relative flex-1 min-w-0">
-                    <span
-                      aria-hidden="true"
-                      className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#6F6A5A] pointer-events-none"
-                    >
-                      <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2.4"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <circle cx="11" cy="11" r="8" />
-                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
-                      </svg>
-                    </span>
-                    <input
-                      type="text"
-                      aria-label="Search live bookings by date, customer name, phone, lorry plate, corridor, or cargo"
-                      placeholder="Search date, customer name, phone, lorry plate, corridor, cargo..."
-                      value={onlineSearch}
-                      onChange={(e) => setOnlineSearch(e.target.value)}
-                      className="w-full pl-9 pr-9 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B] placeholder:text-[#8A836E] transition-colors"
-                    />
-                    {onlineSearch.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setOnlineSearch("")}
-                        aria-label="Clear live booking search"
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 w-6 h-6 rounded-lg bg-[#E7E2D0]/70 hover:bg-[#FFC20E] text-[#26231B] flex items-center justify-center text-xs font-black transition-colors cursor-pointer"
-                      >
-                        ✕
-                      </button>
-                    )}
+                {/* Search + Accordion Controls */}
+                <div className="pt-3.5 border-t border-gray-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                    <label htmlFor="online-booking-search" className="text-sm font-medium text-gray-700 shrink-0">
+                      Search:
+                    </label>
+                    <div className="relative flex-1 min-w-0 max-w-lg">
+                      <input
+                        id="online-booking-search"
+                        type="text"
+                        aria-label="Search live bookings by date, customer name, phone, lorry plate, corridor, or cargo"
+                        value={onlineSearch}
+                        onChange={(e) => setOnlineSearch(e.target.value)}
+                        className="w-full px-3 py-2 pr-8 rounded-md border border-gray-300 bg-white focus:border-gray-900 focus:outline-none text-sm text-gray-900"
+                      />
+                      {onlineSearch.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setOnlineSearch("")}
+                          aria-label="Clear live booking search"
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-900 text-sm font-bold cursor-pointer"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2 flex-shrink-0">
-                    <span className="px-2.5 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-[11px] font-bold text-[#6F6A5A]">
-                      Showing <b className="text-[#26231B]">{filteredOnlineBookings.length}</b> of{" "}
-                      <b className="text-[#26231B]">{onlineBookings.length}</b>
+                  <div className="flex flex-wrap items-center justify-between sm:justify-end gap-3 shrink-0">
+                    <span className="text-sm text-gray-600">
+                      Showing <strong className="text-gray-900">{filteredOnlineBookings.length}</strong> of{" "}
+                      <strong className="text-gray-900">{onlineBookings.length}</strong>
                     </span>
 
                     {filteredOnlineBookings.length > 0 && (() => {
@@ -4311,7 +4516,7 @@ export default function MasterAdminDashboard() {
                             });
                             setExpandedOnlineBookings(nextState);
                           }}
-                          className="px-3 py-1.5 rounded-xl border border-[#E7E2D0] bg-white hover:bg-[#FFF4D1] hover:border-[#F0CE68] text-[#26231B] text-[11px] font-black transition-colors cursor-pointer"
+                          className="px-3.5 py-2 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 text-sm font-medium cursor-pointer"
                         >
                           {allExpanded ? "Collapse All" : "Expand All"}
                         </button>
@@ -4322,12 +4527,12 @@ export default function MasterAdminDashboard() {
               </div>
 
               {loadingBookings ? (
-                <div className="p-12 text-center rounded-3xl bg-white border border-[#E7E2D0]">
-                  <p className="text-sm font-bold text-[#6F6A5A]">Loading live bookings from Firestore...</p>
+                <div className="p-10 text-center rounded-lg bg-white border border-gray-300">
+                  <p className="text-sm font-medium text-gray-600">Loading live bookings...</p>
                 </div>
               ) : filteredOnlineBookings.length === 0 ? (
-                <div className="p-12 text-center rounded-3xl bg-white border border-[#E7E2D0]">
-                  <p className="text-sm font-bold text-[#6F6A5A]">
+                <div className="p-10 text-center rounded-lg bg-white border border-gray-300">
+                  <p className="text-sm text-gray-600">
                     {onlineSearch.trim() || statusFilter !== "all"
                       ? "No live bookings match your current filter or search."
                       : "No live lorry bookings currently."}
@@ -4339,7 +4544,7 @@ export default function MasterAdminDashboard() {
                         setOnlineSearch("");
                         setStatusFilter("all");
                       }}
-                      className="mt-3 px-4 py-1.5 rounded-xl bg-[#26231B] text-[#FFC20E] text-xs font-black hover:bg-[#3D3A31] transition-colors cursor-pointer"
+                      className="mt-3 px-4 py-2 rounded-md bg-gray-900 text-white text-sm font-semibold cursor-pointer"
                     >
                       Reset Filter &amp; Search
                     </button>
@@ -4362,33 +4567,9 @@ export default function MasterAdminDashboard() {
                   return (
                     <div
                       key={b.id}
-                      className={`rounded-2xl bg-white border overflow-hidden shadow-xs transition-all duration-200 hover:shadow-md ${
-                        b.status === "payment_submitted"
-                          ? "border-purple-300 ring-1 ring-purple-200/70"
-                          : b.status === "pending"
-                            ? "border-[#FFC20E] ring-1 ring-[#FFC20E]/35"
-                            : b.status === "cancelled"
-                              ? "border-red-200/90"
-                              : "border-[#E7E2D0] hover:border-[#D6CEB8]"
-                      }`}
+                      className="rounded-lg bg-white border border-gray-300 overflow-hidden"
                     >
-                      {/* Top Status Accent Strip */}
-                      <div
-                        aria-hidden="true"
-                        className={`h-1 w-full ${
-                          b.status === "cancelled"
-                            ? "bg-red-400"
-                            : b.status === "delivered"
-                              ? "bg-slate-400"
-                              : ["accepted", "booked", "assigned", "in_transit", "goods_collected"].includes(b.status)
-                                ? "bg-gradient-to-r from-[#10B981] to-[#137333]"
-                                : b.status === "payment_submitted"
-                                  ? "bg-gradient-to-r from-purple-500 to-indigo-600"
-                                  : "bg-gradient-to-r from-[#FFC20E] to-[#E6A800]"
-                        }`}
-                      />
-
-                      {/* Accordion Header Button with Arrow */}
+                      {/* Accordion Header */}
                       <button
                         type="button"
                         onClick={() => toggleOnlineBookingCard(b.id, isExpanded)}
@@ -4396,253 +4577,254 @@ export default function MasterAdminDashboard() {
                         aria-label={`${
                           isExpanded ? "Minimize live booking details" : "Open live booking details"
                         } for #${b.id}`}
-                        className="relative w-full text-left border-0 bg-transparent px-4 pt-4 pb-3.5 sm:px-5 sm:pt-4 sm:pb-4 pr-14 sm:pr-16 hover:bg-[#FAF8F2]/80 transition-colors cursor-pointer group"
+                        className="w-full text-left border-0 bg-white px-4 py-4 sm:px-5 hover:bg-gray-50 cursor-pointer"
                       >
-                        <div className="flex flex-wrap items-center justify-between gap-2.5 min-w-0">
-                          {/* Left: Plate + Badge + Booking ID + Customer Name */}
-                          <div className="flex items-center gap-2 flex-wrap min-w-0">
-                            <span className="px-2.5 py-1 rounded-lg bg-[#26231B] text-[#FFC20E] text-xs font-black font-mono tracking-wider shadow-xs">
-                              {b.assignedPlate || b.selectedVehiclePlate || "Live Lorry"}
-                            </span>
-                            <span className="px-2 py-0.5 rounded-md bg-[#FFF4D1] text-[#7A5A00] text-[11px] font-black font-mono">
-                              Live Booking
-                            </span>
-                            <span className="px-2 py-0.5 rounded-lg bg-[#F7F5EE] border border-[#D8D0B8] text-[#26231B] text-xs font-black font-mono tracking-wide">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="flex flex-wrap items-center gap-2.5">
+                            <span className="font-mono text-sm font-bold px-2.5 py-0.5 rounded bg-gray-100 border border-gray-300 text-gray-900">
                               #{b.id}
                             </span>
-                            <span className="text-xs sm:text-sm font-black text-[#26231B]">
+                            <span className="text-base font-bold text-gray-900">
                               {b.customerName}
                             </span>
+                            {b.customerPhone && (
+                              <span className="text-sm font-mono text-gray-700">
+                                ({b.customerPhone})
+                              </span>
+                            )}
                           </div>
 
-                          {/* Right: Quoted Amount + Status Badge */}
-                          <div className="flex flex-wrap items-center gap-2 flex-shrink-0">
+                          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
                             {isQuoted && (
-                              <span className="px-2.5 py-1 rounded-xl bg-amber-50 border border-amber-300 text-xs font-black text-amber-900 font-mono">
+                              <span className="text-sm font-mono font-bold text-gray-900">
                                 Rs. {Number(b.quotedAmount).toLocaleString()}
                               </span>
                             )}
                             <StatusBadge status={b.status} />
-                          </div>
-                        </div>
-
-                        {/* Quick Info Row: Trip Date, Booked Timing, Customer Phone & Corridor */}
-                        <div className="mt-2.5 flex flex-wrap items-center gap-2 text-xs">
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#F7F5EE] border border-[#E7E2D0] text-[11.5px] font-bold text-[#26231B] font-mono">
-                            <svg
-                              width="12"
-                              height="12"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2.3"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              className="text-[#6F6A5A] flex-shrink-0"
-                            >
-                              <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-                              <line x1="16" y1="2" x2="16" y2="6" />
-                              <line x1="8" y1="2" x2="8" y2="6" />
-                              <line x1="3" y1="10" x2="21" y2="10" />
-                            </svg>
-                            <span>Trip Date: {b.date || "Today (Live)"}</span>
-                          </span>
-
-                          {requestTiming && (
-                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50/80 border border-amber-200 text-[11.5px] font-bold text-[#5B4300] font-mono">
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-gray-300 bg-white text-xs font-semibold text-gray-800">
+                              {isExpanded ? "Hide" : "Show Details"}
                               <svg
-                                width="12"
-                                height="12"
+                                width="14"
+                                height="14"
                                 viewBox="0 0 24 24"
                                 fill="none"
                                 stroke="currentColor"
-                                strokeWidth="2.3"
+                                strokeWidth="2.2"
                                 strokeLinecap="round"
                                 strokeLinejoin="round"
-                                className="text-amber-700 flex-shrink-0"
+                                className={isExpanded ? "rotate-180" : "rotate-0"}
                               >
-                                <circle cx="12" cy="12" r="10" />
-                                <polyline points="12 6 12 12 16 14" />
+                                <polyline points="6 9 12 15 18 9" />
                               </svg>
-                              <span>Booked At: {requestTiming.display}</span>
                             </span>
-                          )}
-
-                          <span className="inline-flex flex-wrap items-center gap-1.5 text-[12px] text-[#26231B] font-semibold">
-                            {b.customerPhone && (
-                              <span className="font-mono text-[#137333] font-bold">
-                                ({b.customerPhone})
-                              </span>
-                            )}
-                            <span className="text-[#6F6A5A]">
-                              · {b.pickupCity} → {b.deliveryCity}
-                            </span>
-                          </span>
+                          </div>
                         </div>
 
-                        {/* Top-Right Corner Arrow Button */}
-                        <span
-                          aria-hidden="true"
-                          title={isExpanded ? "Minimize Booking Details" : "Open Booking Details"}
-                          className={`absolute top-3.5 right-3.5 sm:top-4 sm:right-4 w-8 h-8 sm:w-9 sm:h-9 rounded-full border flex items-center justify-center transition-all duration-200 shadow-xs ${
-                            isExpanded
-                              ? "bg-[#FFF4D1] border-[#F0CE68] text-[#5B4300] group-hover:bg-[#FFE89D]"
-                              : "bg-[#F7F5EE] border-[#E7E2D0] text-[#26231B] group-hover:bg-[#FFF4D1] group-hover:border-[#F0CE68]"
-                          }`}
-                        >
-                          <svg
-                            width="16"
-                            height="16"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2.6"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            className={`transition-transform duration-200 ${
-                              isExpanded ? "rotate-180" : "rotate-0"
-                            }`}
-                          >
-                            <polyline points="6 9 12 15 18 9" />
-                          </svg>
-                        </span>
+                        {/* Clean 4-column Scannable Summary Row */}
+                        <div className="mt-3 pt-3 border-t border-gray-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+                          <div>
+                            <div className="text-xs font-medium text-gray-500">Route</div>
+                            <div className="font-semibold text-gray-900 mt-0.5">
+                              {b.pickupCity} → {b.deliveryCity}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-xs font-medium text-gray-500">Trip Date</div>
+                            <div className="font-medium text-gray-900 mt-0.5">
+                              {b.date || "Today (Live)"}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-xs font-medium text-gray-500">Lorry &amp; Rider</div>
+                            <div className="text-gray-900 mt-0.5">
+                              <span className="font-medium">
+                                {b.assignedPlate || b.selectedVehiclePlate || "Live Lorry"}
+                              </span>
+                              {b.assignedDriverName ? ` · ${b.assignedDriverName}` : " · No rider"}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-xs font-medium text-gray-500">Requested On</div>
+                            <div className="text-gray-900 mt-0.5">
+                              {requestTiming ? requestTiming.display : "Not recorded"}
+                            </div>
+                          </div>
+                        </div>
                       </button>
 
-                      {/* Collapsible Details Panel */}
+                      {/* Expanded Body */}
                       {isExpanded && (
-                        <div className="px-4 pb-4 pt-3.5 sm:px-5 sm:pb-5 border-t border-[#E7E2D0] flex flex-col gap-4">
-                          {/* Assigned Lorry & Driver Information */}
-                          <div className="p-3 rounded-2xl bg-[#FFF9E6] border border-[#FFEBAC] flex flex-wrap items-center justify-between gap-2.5 text-xs">
-                            <div className="flex items-center gap-2">
-                              <span className="px-2 py-0.5 rounded-md bg-[#26231B] text-[#FFC20E] font-mono font-black text-[11px]">
-                                {b.assignedPlate || b.selectedVehiclePlate || "No Vehicle Locked"}
-                              </span>
-                              <span className="font-bold text-[#26231B]">
-                                {b.assignedDriverName || "Awaiting Driver Assignment"}
-                              </span>
-                            </div>
-                            {b.assignedDriverPhone && (
-                              <a
-                                href={`tel:${String(b.assignedDriverPhone).replace(/\s+/g, "")}`}
-                                className="font-mono font-bold text-[#1E9E5A] bg-white px-2.5 py-1 rounded-lg border border-[#1E9E5A]/30 flex items-center gap-1 hover:bg-[#1E9E5A] hover:text-white transition-colors"
-                              >
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
-                                </svg>
-                                <span>Driver: {b.assignedDriverPhone}</span>
-                              </a>
-                            )}
-                          </div>
+                        <div className="border-t border-gray-300 divide-y divide-gray-200">
+                          {/* Section 1: Customer & Trip Summary Table */}
+                          <div className="px-4 py-4 sm:px-5 grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
+                            <div>
+                              <h4 className="text-sm font-bold text-gray-900 mb-2.5">
+                                Customer Details
+                              </h4>
+                              <dl className="grid grid-cols-[120px_1fr] gap-y-2 gap-x-3">
+                                <dt className="text-gray-500">Name</dt>
+                                <dd className="font-semibold text-gray-900">{b.customerName}</dd>
 
-                          {/* Main Details Grid */}
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs bg-[#F7F5EE] p-3.5 rounded-2xl border border-[#E7E2D0]">
-                            <div className="flex flex-col gap-1.5">
-                              <div>
-                                <span className="text-[#6F6A5A]">Customer Mobile: </span>
-                                {b.customerPhone ? (
-                                  <a
-                                    href={`tel:${String(b.customerPhone || "").replace(/\s+/g, "")}`}
-                                    className="font-bold text-[#1E9E5A] font-mono hover:underline"
-                                  >
-                                    {b.customerPhone}
-                                  </a>
-                                ) : (
-                                  <span className="text-[#6F6A5A] italic font-mono">Not provided</span>
+                                <dt className="text-gray-500">Mobile</dt>
+                                <dd>
+                                  {b.customerPhone ? (
+                                    <a
+                                      href={`tel:${String(b.customerPhone || "").replace(/\s+/g, "")}`}
+                                      className="font-mono font-semibold text-gray-900 underline"
+                                    >
+                                      {b.customerPhone}
+                                    </a>
+                                  ) : (
+                                    <span className="text-gray-500">Not provided</span>
+                                  )}
+                                </dd>
+
+                                <dt className="text-gray-500">WhatsApp</dt>
+                                <dd>
+                                  {b.customerWhatsapp || b.customerPhone ? (
+                                    <a
+                                      href={`https://wa.me/94${String(b.customerWhatsapp || b.customerPhone).replace(/[^0-9]/g, "").replace(/^0/, "")}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="font-mono font-semibold text-green-800 underline"
+                                    >
+                                      {b.customerWhatsapp || b.customerPhone}
+                                    </a>
+                                  ) : (
+                                    <span className="text-gray-500">Not provided</span>
+                                  )}
+                                </dd>
+
+                                {requestTiming && (
+                                  <>
+                                    <dt className="text-gray-500">Requested</dt>
+                                    <dd className="text-gray-900">{requestTiming.display}</dd>
+                                  </>
                                 )}
-                              </div>
-                              <div>
-                                <span className="text-[#6F6A5A]">WhatsApp: </span>
-                                {b.customerWhatsapp || b.customerPhone ? (
-                                  <a
-                                    href={`https://wa.me/94${String(b.customerWhatsapp || b.customerPhone).replace(/[^0-9]/g, "").replace(/^0/, "")}`}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="font-bold text-[#1E9E5A] font-mono hover:underline inline-flex items-center gap-1"
-                                  >
-                                    <span>{b.customerWhatsapp || b.customerPhone}</span>
-                                    <span className="text-[10px] px-1 rounded bg-[#E8F8F0] text-[#1E9E5A]">Chat</span>
-                                  </a>
-                                ) : (
-                                  <span className="text-[#6F6A5A] italic">N/A</span>
-                                )}
-                              </div>
-                              <div>
-                                <span className="text-[#6F6A5A]">Trip Corridor: </span>
-                                <span className="font-bold text-[#26231B]">
+                              </dl>
+                            </div>
+
+                            <div>
+                              <h4 className="text-sm font-bold text-gray-900 mb-2.5">
+                                Trip &amp; Cargo Details
+                              </h4>
+                              <dl className="grid grid-cols-[120px_1fr] gap-y-2 gap-x-3">
+                                <dt className="text-gray-500">Route</dt>
+                                <dd className="font-semibold text-gray-900">
                                   {b.pickupCity} → {b.deliveryCity}
-                                </span>
-                              </div>
-                            </div>
+                                </dd>
 
-                            <div className="flex flex-col gap-1.5">
-                              <div>
-                                <span className="text-[#6F6A5A]">Date: </span>
-                                <b>{b.date || "Today"}</b>
-                              </div>
-                              <div>
-                                <span className="text-[#6F6A5A]">Cargo / Goods Nature: </span>
-                                <span className="font-bold text-[#26231B]">
+                                <dt className="text-gray-500">Date</dt>
+                                <dd className="font-medium text-gray-900">{b.date || "Today"}</dd>
+
+                                <dt className="text-gray-500">Goods</dt>
+                                <dd className="text-gray-900">
                                   {b.cargoNature || b.packageDetails || "General Cargo"}
-                                </span>
-                              </div>
-                              {b.cargoWeight && (
-                                <div>
-                                  <span className="text-[#6F6A5A]">Weight: </span>
-                                  <b>{b.cargoWeight}</b>
-                                </div>
-                              )}
-                              {b.packageDetails && b.packageDetails !== b.cargoNature && (
-                                <div className="text-[11px] text-[#6F6A5A] italic">
-                                  <b>Details:</b> {b.packageDetails}
-                                </div>
-                              )}
+                                </dd>
+
+                                {b.cargoWeight && (
+                                  <>
+                                    <dt className="text-gray-500">Weight</dt>
+                                    <dd className="text-gray-900">{b.cargoWeight}</dd>
+                                  </>
+                                )}
+
+                                {b.packageDetails && b.packageDetails !== b.cargoNature && (
+                                  <>
+                                    <dt className="text-gray-500">Notes</dt>
+                                    <dd className="text-gray-900">{b.packageDetails}</dd>
+                                  </>
+                                )}
+                              </dl>
                             </div>
                           </div>
 
-                          {/* Quoting & Fee Section */}
-                          <div className="p-3.5 rounded-2xl bg-amber-50/70 border border-amber-200 flex flex-col gap-2.5">
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <div className="flex items-center gap-2">
-                                <span className="text-xs font-black text-[#5B4300]">Price / Quotation Fee:</span>
-                                {isQuoted && (
-                                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-900 font-mono font-black text-xs">
-                                    Rs. {Number(b.quotedAmount).toLocaleString()}
-                                  </span>
+                          {/* Section 2: Assigned Lorry & Rider */}
+                          <div className="px-4 py-4 sm:px-5 flex flex-wrap items-center justify-between gap-3 text-sm">
+                            <div className="flex flex-col gap-0.5">
+                              <h4 className="text-sm font-bold text-gray-900">
+                                Step 1: Lorry &amp; Rider Assignment
+                              </h4>
+                              <div className="text-sm text-gray-700 mt-0.5">
+                                Lorry:{" "}
+                                <strong className="font-mono text-gray-900">
+                                  {b.assignedPlate || b.selectedVehiclePlate || "Not selected"}
+                                </strong>
+                                {" · "}
+                                Rider:{" "}
+                                <strong className="text-gray-900">
+                                  {b.assignedDriverName || "Not assigned"}
+                                </strong>
+                                {b.assignedDriverPhone && (
+                                  <a
+                                    href={`tel:${String(b.assignedDriverPhone).replace(/\s+/g, "")}`}
+                                    className="ml-2 font-mono text-green-800 underline font-semibold"
+                                  >
+                                    {b.assignedDriverPhone}
+                                  </a>
                                 )}
                               </div>
-                              {b.quoteNote && (
-                                <span className="text-[11px] text-[#8C6D00] italic">
-                                  Note: {b.quoteNote}
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => openAssignModal(b)}
+                              className="px-4 py-2 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 text-sm font-semibold cursor-pointer"
+                            >
+                              {b.assignedPlate ? "Change Lorry / Rider" : "Assign Rider"}
+                            </button>
+                          </div>
+
+                          {/* Section 3: Pricing & Payment */}
+                          <div className="px-4 py-4 sm:px-5 flex flex-col gap-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <h4 className="text-sm font-bold text-gray-900">
+                                Step 2: Amount &amp; Payment
+                              </h4>
+                              {isQuoted && (
+                                <span className="text-sm font-mono font-semibold text-gray-900">
+                                  Quoted: Rs. {Number(b.quotedAmount).toLocaleString()}
+                                  {b.quoteNote ? ` (${b.quoteNote})` : ""}
                                 </span>
                               )}
                             </div>
 
-                            {/* Quote Inputs */}
-                            <div className="flex flex-wrap items-center gap-2 pt-1">
-                              <input
-                                type="text"
-                                placeholder="Quoted Amount (e.g. 15000)"
-                                value={quoteDraft.amount}
-                                onChange={(e) =>
-                                  setQuoteInputs((prev) => ({
-                                    ...prev,
-                                    [b.id]: { ...quoteDraft, amount: e.target.value },
-                                  }))
-                                }
-                                className="px-3 py-1.5 rounded-xl border border-amber-300 bg-white text-xs font-mono font-bold text-[#26231B] w-36 focus:outline-none"
-                              />
-                              <input
-                                type="text"
-                                placeholder="Optional Note to Customer"
-                                value={quoteDraft.note}
-                                onChange={(e) =>
-                                  setQuoteInputs((prev) => ({
-                                    ...prev,
-                                    [b.id]: { ...quoteDraft, note: e.target.value },
-                                  }))
-                                }
-                                className="px-3 py-1.5 rounded-xl border border-amber-300 bg-white text-xs text-[#26231B] flex-1 min-w-[160px] focus:outline-none"
-                              />
+                            <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                              <div className="sm:col-span-4">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">
+                                  Amount (LKR) *
+                                </label>
+                                <input
+                                  type="text"
+                                  value={quoteDraft.amount}
+                                  onChange={(e) =>
+                                    setQuoteInputs((prev) => ({
+                                      ...prev,
+                                      [b.id]: { ...quoteDraft, amount: e.target.value },
+                                    }))
+                                  }
+                                  className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                                />
+                              </div>
+                              <div className="sm:col-span-8">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">
+                                  Payment Note (Optional)
+                                </label>
+                                <input
+                                  type="text"
+                                  value={quoteDraft.note}
+                                  onChange={(e) =>
+                                    setQuoteInputs((prev) => ({
+                                      ...prev,
+                                      [b.id]: { ...quoteDraft, note: e.target.value },
+                                    }))
+                                  }
+                                  className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center justify-end gap-2.5">
                               <button
                                 type="button"
                                 onClick={async () => {
@@ -4657,7 +4839,7 @@ export default function MasterAdminDashboard() {
                                     quoteNote: quoteDraft.note || "",
                                   });
                                 }}
-                                className="px-4 py-1.5 rounded-xl bg-[#26231B] hover:bg-[#3D3A31] text-[#FFC20E] text-xs font-black transition-colors cursor-pointer"
+                                className="px-5 py-2.5 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer"
                               >
                                 {isQuoted ? "Update Quote" : "Send Quote (Rs.)"}
                               </button>
@@ -4666,116 +4848,101 @@ export default function MasterAdminDashboard() {
                                   type="button"
                                   disabled={actionLoading === b.id}
                                   onClick={() => handleManualApprovePayment(b)}
-                                  className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+                                  className="px-4 py-2.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 text-sm font-semibold cursor-pointer disabled:opacity-50"
                                 >
                                   Manual Approve (Cash)
                                 </button>
                               )}
                             </div>
-                          </div>
 
-                          {/* Manual Cash Approved Summary (when approved without customer slip) */}
-                          {!hasStoredSlip &&
-                            (b.paymentMethod === "cash_manual" || b.paymentSlipStatus === "manual_approved") && (
-                              <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-xs text-emerald-950">
-                                <span className="font-black text-emerald-900">
-                                  Cash / Direct Payment Approved Manually • Driver Contact Unlocked for Customer
-                                </span>
-                              </div>
-                            )}
+                            {/* Manual Cash Approved Summary */}
+                            {!hasStoredSlip &&
+                              (b.paymentMethod === "cash_manual" || b.paymentSlipStatus === "manual_approved") && (
+                                <div className="px-4 py-3 rounded-md bg-green-50 border border-green-300 text-sm text-green-900 font-medium">
+                                  Cash / Direct payment approved manually · Driver contact unlocked for customer
+                                </div>
+                              )}
 
-                          {/* Bank Payment Slip Review Section */}
-                          {hasStoredSlip && (
-                            <div className="p-3.5 rounded-2xl bg-purple-50 border border-purple-200 flex flex-wrap items-center justify-between gap-3 text-xs">
-                              <div className="flex items-center gap-2">
-                                <span className="w-2.5 h-2.5 rounded-full bg-purple-600 animate-pulse" />
-                                <span className="font-black text-purple-900">
-                                  Payment Slip Uploaded:
-                                </span>
-                                <span className="px-2 py-0.5 rounded-md bg-purple-200 text-purple-900 font-mono text-[11px] font-bold">
-                                  {b.paymentSlipStatus || "pending_review"}
-                                </span>
-                              </div>
+                            {/* Bank Payment Slip Review Section */}
+                            {hasStoredSlip && (
+                              <div className="px-4 py-3 rounded-md bg-gray-50 border border-gray-200 flex flex-wrap items-center justify-between gap-3 text-sm">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-semibold text-gray-900">
+                                    Payment Slip Uploaded
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded bg-white border border-gray-300 font-mono text-xs font-semibold text-gray-900">
+                                    {b.paymentSlipStatus || "pending_review"}
+                                  </span>
+                                </div>
 
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => openSlipReviewModal(b)}
-                                  className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold transition-colors cursor-pointer"
-                                >
-                                  View Bank Slip
-                                </button>
-                                {b.paymentSlipStatus !== "approved" && (
+                                <div className="flex items-center gap-2">
                                   <button
                                     type="button"
-                                    onClick={() => handleApproveSlipPayment(b)}
-                                    className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-colors cursor-pointer"
+                                    onClick={() => openSlipReviewModal(b)}
+                                    className="px-3.5 py-2 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 text-sm font-medium cursor-pointer"
                                   >
-                                    Approve Slip
+                                    View Bank Slip
                                   </button>
-                                )}
+                                  {b.paymentSlipStatus !== "approved" && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleApproveSlipPayment(b)}
+                                      className="px-4 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer"
+                                    >
+                                      Approve Slip
+                                    </button>
+                                  )}
+                                </div>
                               </div>
+                            )}
+                          </div>
+
+                          {/* Footer Actions & Lifecycle Transitions */}
+                          <div className="px-4 py-3.5 sm:px-5 bg-gray-50 flex flex-wrap items-center justify-between gap-3 text-sm">
+                            <div className="text-sm text-gray-600">
+                              {(b.status === "assigned" || b.status === "accepted") && (
+                                <span className="font-medium text-gray-900">
+                                  Status: Awaiting rider to collect goods
+                                </span>
+                              )}
+                              {b.status === "goods_collected" && (
+                                <span className="font-semibold text-green-800">
+                                  Status: Goods collected by rider
+                                </span>
+                              )}
                             </div>
-                          )}
 
-                          {/* Action Buttons & Lifecycle Transitions */}
-                          <div className="flex flex-wrap items-center justify-end gap-2 pt-1 border-t border-[#E7E2D0]">
-                            <button
-                              type="button"
-                              onClick={() => openAssignModal(b)}
-                              className="px-3.5 py-1.5 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] text-[#26231B] text-xs font-black cursor-pointer shadow-xs"
-                            >
-                              {b.assignedPlate ? "Change Lorry/Driver" : "Assign Driver"}
-                            </button>
+                            <div className="flex flex-wrap items-center gap-2">
+                              {b.status === "goods_collected" && (
+                                <button
+                                  type="button"
+                                  onClick={() => updateBooking(b.id, "in_transit")}
+                                  className="px-4 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer"
+                                >
+                                  Mark In Transit
+                                </button>
+                              )}
 
-                            {(b.status === "assigned" || b.status === "accepted") && (
-                              <span className="px-3 py-1.5 rounded-xl bg-teal-50 border border-teal-200 text-teal-800 text-xs font-bold flex items-center gap-1.5 shadow-2xs">
-                                <span className="w-2 h-2 rounded-full bg-teal-500 animate-pulse" />
-                                <span>⏳ Awaiting Rider to Collect Goods</span>
-                              </span>
-                            )}
+                              {["goods_collected", "in_transit"].includes(b.status) && (
+                                <button
+                                  type="button"
+                                  onClick={() => updateBooking(b.id, "delivered")}
+                                  className="px-4 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer"
+                                >
+                                  Mark Delivered
+                                </button>
+                              )}
 
-                            {b.status === "goods_collected" && (
-                              <span className="px-3 py-1.5 rounded-xl bg-teal-100 border border-teal-300 text-teal-900 text-xs font-black flex items-center gap-1.5 shadow-2xs">
-                                <span>📦 Goods Collected by Rider</span>
-                              </span>
-                            )}
-
-                            {b.status === "goods_collected" && (
                               <button
                                 type="button"
-                                onClick={() => updateBooking(b.id, "in_transit")}
-                                className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-black cursor-pointer shadow-xs"
+                                disabled={actionLoading === b.id}
+                                onClick={() => handleDeleteBooking(b.id)}
+                                className="px-3.5 py-2 rounded-md border border-red-300 bg-white hover:bg-red-50 text-red-700 text-sm font-medium cursor-pointer"
+                                title="Permanently Delete Booking from Database"
                               >
-                                🚚 Mark In Transit
+                                Delete
                               </button>
-                            )}
-
-                            {["goods_collected", "in_transit"].includes(b.status) && (
-                              <button
-                                type="button"
-                                onClick={() => updateBooking(b.id, "delivered")}
-                                className="px-3.5 py-1.5 rounded-xl bg-gray-800 hover:bg-black text-white text-xs font-black cursor-pointer shadow-xs"
-                              >
-                                ✅ Mark Delivered
-                              </button>
-                            )}
-
-                            <button
-                              type="button"
-                              disabled={actionLoading === b.id}
-                              onClick={() => handleDeleteBooking(b.id)}
-                              className="px-3.5 py-1.5 rounded-xl border border-red-300 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-black transition-colors cursor-pointer flex items-center gap-1.5 shadow-2xs"
-                              title="Permanently Delete Booking from Database"
-                            >
-                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                <polyline points="3 6 5 6 21 6" />
-                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                                <line x1="10" y1="11" x2="10" y2="17" />
-                                <line x1="14" y1="11" x2="14" y2="17" />
-                              </svg>
-                              <span>Delete</span>
-                            </button>
+                            </div>
                           </div>
                         </div>
                       )}
@@ -4787,596 +4954,208 @@ export default function MasterAdminDashboard() {
           )}
 
           {/* ========================================================= */}
-          {/* TAB: REGISTERED CUSTOMERS & TOP CLIENTS LEADERBOARD       */}
+          {/* TAB: SIMPLE CUSTOMER LIST                                 */}
           {/* ========================================================= */}
           {activeNav === "customers" && (
-            <div className="flex flex-col gap-6">
-              {/* Top 4 Core KPI Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {/* 1. Total Customers */}
-                <div className="p-5 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#6F6A5A]">
-                      Registered Clients
-                    </span>
-                    <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
-                      All-Time Directory
-                    </span>
-                  </div>
-                  <div className="text-3xl font-black text-[#26231B] font-mono mt-2 tracking-tight">
-                    {loadingUsers ? "..." : customersWithMetrics.length}
-                  </div>
-                  <div className="text-xs text-[#6F6A5A] mt-1 font-medium">
-                    {repeatClientsCount} repeat bookers ({customersWithMetrics.length > 0 ? Math.round((repeatClientsCount / customersWithMetrics.length) * 100) : 0}% loyalty rate)
-                  </div>
+            <div className="bg-white border border-[#E7E2D0] rounded-2xl p-4 sm:p-5 flex flex-col gap-4">
+              {/* Simple Header & Toolbar */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-[#E7E2D0]">
+                <div>
+                  <h2 className="text-base font-bold text-[#26231B]">
+                    Customer List ({filteredCustomers.length})
+                  </h2>
+                  <p className="text-xs text-[#6F6A5A]">
+                    All registered and manually added customers.
+                  </p>
                 </div>
-
-                {/* 2. Total Lifetime Volume */}
-                <div className="p-5 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#6F6A5A]">
-                      Client Bookings
-                    </span>
-                    <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200">
-                      {activeInTransitClientsCount} Active in Transit
-                    </span>
-                  </div>
-                  <div className="text-3xl font-black text-[#26231B] font-mono mt-2 tracking-tight">
-                    {totalClientBookingsCount}
-                  </div>
-                  <div className="text-xs text-[#6F6A5A] mt-1 font-medium">
-                    Individual &amp; Live empty lorry freight jobs
-                  </div>
-                </div>
-
-                {/* 3. Total Lifetime Revenue */}
-                <div className="p-5 rounded-2xl bg-[#26231B] text-white shadow-xs flex flex-col justify-between">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-white/60">
-                      Lifetime Revenue (LTV)
-                    </span>
-                    <span className="text-[11px] font-semibold text-emerald-400">
-                      Confirmed &amp; Delivered
-                    </span>
-                  </div>
-                  <div className="text-3xl font-black text-[#FFC20E] font-mono mt-2 tracking-tight">
-                    Rs. {totalClientsRevenue.toLocaleString()}
-                  </div>
-                  <div className="text-xs text-white/70 mt-1 font-medium">
-                    Avg. Order Value: Rs. {overallAverageOrderValue.toLocaleString()}
-                  </div>
-                </div>
-
-                {/* 4. VIP & High Value Clients */}
-                <div className="p-5 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#6F6A5A]">
-                      High-Value Clients
-                    </span>
-                    <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
-                      VIP &amp; Gold Tiers
-                    </span>
-                  </div>
-                  <div className="text-3xl font-black text-amber-600 font-mono mt-2 tracking-tight">
-                    {vipGoldClientsCount}
-                  </div>
-                  <div className="text-xs text-[#6F6A5A] mt-1 font-medium">
-                    Clients with 3+ bookings or Rs. 40,000+ spend
-                  </div>
-                </div>
+                <span className="text-xs text-[#6F6A5A] font-semibold">
+                  {filteredCustomers.length} of {customersWithMetrics.length} Customers
+                </span>
               </div>
 
-              {/* ========================================================= */}
-              {/* SECTION 1: TOP 10 CLIENTS LEADERBOARD                     */}
-              {/* ========================================================= */}
-              <div className="bg-white border border-[#E7E2D0] rounded-3xl p-5 sm:p-6 shadow-xs flex flex-col gap-5">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#E7E2D0]">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-2xl bg-[#FFC20E] text-[#26231B] flex items-center justify-center font-black text-lg shadow-xs">
-                      🏆
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h2 className="text-base sm:text-lg font-black text-[#26231B] tracking-tight">
-                          Top Clients Leaderboard (ප්‍රමුඛ පාරිභෝගිකයින්)
-                        </h2>
-                        <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-black uppercase tracking-wider">
-                          Ranked by Volume
-                        </span>
-                      </div>
-                      <p className="text-xs text-[#6F6A5A] mt-0.5">
-                        Our highest-frequency repeat clients ranked by total confirmed freight orders and financial turnover.
-                      </p>
-                    </div>
-                  </div>
-
-                  <span className="text-xs text-[#6F6A5A] font-bold self-start sm:self-auto bg-[#F7F5EE] px-3 py-1.5 rounded-xl border border-[#E7E2D0]">
-                    Showing Top {top10Customers.length} {top10Customers.length === 1 ? "Client" : "Clients"}
-                  </span>
-                </div>
-
-                {top10Customers.length === 0 ? (
-                  <div className="py-12 px-4 rounded-2xl bg-[#F7F5EE] border border-dashed border-[#E7E2D0] text-center flex flex-col items-center justify-center">
-                    <span className="text-3xl mb-2">⭐</span>
-                    <h3 className="text-sm font-black text-[#26231B]">No client bookings placed yet</h3>
-                    <p className="text-xs text-[#6F6A5A] max-w-md mt-1">
-                      As customers place individual bookings or reserve live empty lorries on the web platform, the Top 10 clients will automatically be ranked here in real time.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {top10Customers.map((c, idx) => {
-                      const rank = idx + 1;
-                      const isGold = rank === 1;
-                      const isSilver = rank === 2;
-                      const isBronze = rank === 3;
-                      const isExpanded = !!expandedCustomers[c.id];
-
-                      const cleanPhoneDigits = c.phone.replace(/[^0-9]/g, "");
-                      const intlPhone = cleanPhoneDigits.startsWith("0")
-                        ? `94${cleanPhoneDigits.slice(1)}`
-                        : cleanPhoneDigits.startsWith("94")
-                        ? cleanPhoneDigits
-                        : `94${cleanPhoneDigits}`;
-
-                      return (
-                        <div
-                          key={c.id}
-                          className={`rounded-2xl border transition-all flex flex-col justify-between overflow-hidden shadow-xs ${
-                            isGold
-                              ? "bg-gradient-to-br from-amber-50/80 via-white to-amber-50/40 border-amber-300 ring-1 ring-amber-300/60"
-                              : isSilver
-                              ? "bg-gradient-to-br from-slate-50 via-white to-slate-50/50 border-slate-300"
-                              : isBronze
-                              ? "bg-gradient-to-br from-amber-50/30 via-white to-orange-50/30 border-amber-200"
-                              : "bg-white border-[#E7E2D0] hover:border-[#26231B]/30"
-                          }`}
-                        >
-                          {/* Card Header & Rank Ribbon */}
-                          <div className="p-4 sm:p-5 flex flex-col gap-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <span
-                                className={`px-2.5 py-1 rounded-xl text-xs font-black flex items-center gap-1.5 shadow-2xs ${
-                                  isGold
-                                    ? "bg-[#FFC20E] text-[#26231B]"
-                                    : isSilver
-                                    ? "bg-slate-200 text-slate-800"
-                                    : isBronze
-                                    ? "bg-amber-200/80 text-amber-900 border border-amber-300"
-                                    : "bg-[#F7F5EE] text-[#4A4538] border border-[#E7E2D0]"
-                                }`}
-                              >
-                                <span>{isGold ? "👑" : isSilver ? "🥈" : isBronze ? "🥉" : "🎖️"}</span>
-                                <span>#{rank} TOP CLIENT</span>
-                              </span>
-
-                              {/* Tier Badge */}
-                              <span
-                                className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border ${
-                                  c.status === "vip"
-                                    ? "bg-amber-100 text-amber-900 border-amber-300"
-                                    : c.status === "gold"
-                                    ? "bg-yellow-100 text-yellow-900 border-yellow-300"
-                                    : c.status === "silver"
-                                    ? "bg-slate-100 text-slate-800 border-slate-300"
-                                    : "bg-emerald-50 text-emerald-800 border-emerald-200"
-                                }`}
-                              >
-                                {c.status === "vip"
-                                  ? "👑 VIP Platinum"
-                                  : c.status === "gold"
-                                  ? "🥇 Gold Tier"
-                                  : c.status === "silver"
-                                  ? "🥈 Silver Client"
-                                  : "🥉 Active Client"}
-                              </span>
-                            </div>
-
-                            {/* Client Name & Phone */}
-                            <div>
-                              <h3 className="text-base font-black text-[#26231B] tracking-tight">
-                                {c.name}
-                              </h3>
-                              <div className="flex flex-wrap items-center gap-2 mt-1">
-                                <span className="text-xs font-mono font-bold text-[#6F6A5A]">
-                                  {c.phone || "No phone provided"}
-                                </span>
-                                {c.city && (
-                                  <span className="text-[11px] text-[#8C877A] font-semibold bg-[#F7F5EE] px-2 py-0.2 rounded-md">
-                                    📍 {c.city}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-
-                            {/* Direct Contact Links */}
-                            <div className="flex items-center gap-2 pt-1">
-                              {c.phone && (
-                                <>
-                                  <a
-                                    href={`tel:${c.phone}`}
-                                    className="flex-1 py-1.5 px-3 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-xs font-bold text-center flex items-center justify-center gap-1.5 transition-colors"
-                                  >
-                                    <span>📞</span>
-                                    <span>Call</span>
-                                  </a>
-                                  <a
-                                    href={`https://wa.me/${intlPhone}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="flex-1 py-1.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold text-center flex items-center justify-center gap-1.5 transition-colors shadow-2xs"
-                                  >
-                                    <span>💬</span>
-                                    <span>WhatsApp</span>
-                                  </a>
-                                </>
-                              )}
-                            </div>
-
-                            {/* Key Performance Metrics Box */}
-                            <div className="grid grid-cols-2 gap-2 p-3 rounded-xl bg-[#F7F5EE]/70 border border-[#E7E2D0] mt-1 text-xs">
-                              <div>
-                                <span className="text-[10px] uppercase font-bold text-[#6F6A5A] block">Total Bookings</span>
-                                <span className="text-base font-black text-[#26231B] font-mono mt-0.5 block">
-                                  {c.totalBookings} <span className="text-[11px] font-normal text-[#6F6A5A]">Trips</span>
-                                </span>
-                                <span className="text-[10px] text-emerald-700 font-bold block mt-0.5">
-                                  {c.completedBookings} Delivered
-                                </span>
-                              </div>
-                              <div>
-                                <span className="text-[10px] uppercase font-bold text-[#6F6A5A] block">Total Spent (LTV)</span>
-                                <span className="text-base font-black text-[#26231B] font-mono mt-0.5 block">
-                                  Rs. {c.totalRevenue.toLocaleString()}
-                                </span>
-                                <span className="text-[10px] text-[#6F6A5A] font-semibold block mt-0.5">
-                                  Avg: Rs. {c.averageBookingValue.toLocaleString()}
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Favorite Corridor / Route */}
-                            {c.frequentRoutes.length > 0 && (
-                              <div className="text-[11px] text-[#4A4538] font-medium flex items-start gap-1.5 pt-1">
-                                <span className="text-[#FFC20E] font-bold">🛣️</span>
-                                <span>
-                                  <strong className="text-[#26231B]">Route:</strong> {c.frequentRoutes.join(", ")}
-                                </span>
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Footer Action to expand client's booking history */}
-                          <div className="border-t border-[#E7E2D0] bg-[#F7F5EE]/40 px-4 py-2.5 flex items-center justify-between">
-                            <span className="text-[11px] text-[#8C877A]">
-                              Joined: {new Date(c.registeredAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => toggleCustomerExpanded(c.id)}
-                              className="text-xs font-bold text-[#26231B] hover:text-amber-800 flex items-center gap-1 cursor-pointer transition-colors"
-                            >
-                              <span>{isExpanded ? "Hide History ▲" : `View ${c.totalBookings} Bookings ▼`}</span>
-                            </button>
-                          </div>
-
-                          {/* Expandable Booking History Accordion */}
-                          {isExpanded && (
-                            <div className="p-4 bg-white border-t border-[#E7E2D0] flex flex-col gap-2 max-h-72 overflow-y-auto">
-                              <span className="text-[11px] font-bold uppercase text-[#6F6A5A] tracking-wider block mb-1">
-                                Complete Order History ({c.bookingsList.length}):
-                              </span>
-                              {c.bookingsList.map((b) => (
-                                <div
-                                  key={b.id}
-                                  className="p-2.5 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/40 flex flex-col gap-1 text-xs"
-                                >
-                                  <div className="flex items-center justify-between gap-1">
-                                    <span className="font-mono font-bold text-[#26231B]">#{b.id}</span>
-                                    <StatusBadge status={b.status} />
-                                  </div>
-                                  <div className="text-[11px] font-semibold text-[#4A4538]">
-                                    📍 {b.pickupCity} → {b.deliveryCity}
-                                  </div>
-                                  <div className="flex items-center justify-between text-[11px] text-[#6F6A5A] mt-0.5">
-                                    <span>📅 {b.date || "Date unspecified"}</span>
-                                    {b.quotedAmount !== undefined && (
-                                      <span className="font-mono font-bold text-[#26231B]">
-                                        Rs. {b.quotedAmount.toLocaleString()}
-                                      </span>
-                                    )}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* ========================================================= */}
-              {/* SECTION 2: COMPLETE CUSTOMER DIRECTORY (ALL CLIENTS)     */}
-              {/* ========================================================= */}
-              <div className="bg-white border border-[#E7E2D0] rounded-3xl p-5 sm:p-6 shadow-xs flex flex-col gap-5">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#E7E2D0]">
-                  <div>
-                    <h2 className="text-base sm:text-lg font-black text-[#26231B] tracking-tight">
-                      Complete Customer Directory (සියලුම ලියාපදිංචි පාරිභෝගිකයින්)
-                    </h2>
-                    <p className="text-xs text-[#6F6A5A] mt-0.5">
-                      Search and inspect every client account ever registered or booked on Sithumina Transport.
-                    </p>
-                  </div>
-
-                  <span className="text-xs text-[#6F6A5A] font-bold bg-[#F7F5EE] px-3 py-1.5 rounded-xl border border-[#E7E2D0] self-start sm:self-auto">
-                    {filteredCustomers.length} of {customersWithMetrics.length} Clients
-                  </span>
-                </div>
-
-                {/* Filter & Search Toolbar */}
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-                  {/* Search Input */}
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div className="flex items-center gap-2 flex-1">
+                  <label
+                    htmlFor="customer-search-input"
+                    className="text-xs font-semibold text-[#6F6A5A] shrink-0"
+                  >
+                    Search:
+                  </label>
                   <div className="relative flex-1">
-                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs text-[#8C877A]">
-                      🔍
-                    </span>
                     <input
+                      id="customer-search-input"
                       type="text"
-                      placeholder="Search by client name, phone number, city, or route..."
+                      aria-label="Search customers"
                       value={customerSearch}
                       onChange={(e) => setCustomerSearch(e.target.value)}
-                      className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] placeholder-[#8C877A] focus:outline-none focus:border-[#26231B]"
+                      className="w-full px-3.5 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] focus:outline-none focus:border-[#26231B]"
                     />
                     {customerSearch && (
                       <button
+                        type="button"
                         onClick={() => setCustomerSearch("")}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-[#8C877A] hover:text-[#26231B]"
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-[#8C877A] hover:text-[#26231B] cursor-pointer"
                       >
                         ✕
                       </button>
                     )}
                   </div>
-
-                  {/* Tier Filter Tabs */}
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    {[
-                      { key: "all", label: `All (${customersWithMetrics.length})` },
-                      { key: "vip", label: `VIP & Gold (${vipGoldClientsCount})` },
-                      { key: "repeat", label: `Repeat (${repeatClientsCount})` },
-                      { key: "active", label: `Booked Clients (${customersWithMetrics.filter((c) => c.totalBookings > 0).length})` },
-                      { key: "registered", label: `New Registered (${registeredOnlyClientsCount})` },
-                    ].map((tab) => (
-                      <button
-                        key={tab.key}
-                        onClick={() => setCustomerTierFilter(tab.key as any)}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                          customerTierFilter === tab.key
-                            ? "bg-[#26231B] text-white"
-                            : "bg-[#F7F5EE] text-[#6F6A5A] hover:bg-[#E7E2D0]"
-                        }`}
-                      >
-                        {tab.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* Sort Dropdown */}
-                  <div className="flex items-center gap-2 self-start lg:self-auto">
-                    <span className="text-xs font-bold text-[#6F6A5A]">Sort:</span>
-                    <select
-                      value={customerSort}
-                      onChange={(e) => setCustomerSort(e.target.value as any)}
-                      className="px-3 py-1.5 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-bold text-[#26231B] focus:outline-none"
-                    >
-                      <option value="bookings">Most Bookings</option>
-                      <option value="revenue">Highest Revenue (LTV)</option>
-                      <option value="recent">Recently Active</option>
-                      <option value="name">Alphabetical (A–Z)</option>
-                    </select>
-                  </div>
                 </div>
 
-                {/* Customer Cards List */}
-                {filteredCustomers.length === 0 ? (
-                  <div className="py-12 px-4 rounded-2xl bg-[#F7F5EE] border border-dashed border-[#E7E2D0] text-center flex flex-col items-center justify-center">
-                    <span className="text-2xl mb-1">🔍</span>
-                    <h3 className="text-xs font-bold text-[#26231B]">No customers found matching filter</h3>
-                    <p className="text-[11px] text-[#6F6A5A] mt-0.5">
-                      Try clearing the search query or changing the tier filter.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-3">
-                    {filteredCustomers.map((c) => {
-                      const isExpanded = !!expandedCustomers[c.id];
-                      const initial = (c.name || "C").trim().charAt(0).toUpperCase();
-                      const cleanPhoneDigits = c.phone.replace(/[^0-9]/g, "");
-                      const intlPhone = cleanPhoneDigits.startsWith("0")
-                        ? `94${cleanPhoneDigits.slice(1)}`
-                        : cleanPhoneDigits.startsWith("94")
-                        ? cleanPhoneDigits
-                        : `94${cleanPhoneDigits}`;
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[
+                    { key: "all", label: `All (${customersWithMetrics.length})` },
+                    { key: "active", label: `Booked (${bookedCustomersCount})` },
+                    { key: "registered", label: `Registered Only (${registeredOnlyClientsCount})` },
+                  ].map((tab) => (
+                    <button
+                      key={tab.key}
+                      type="button"
+                      onClick={() => setCustomerTierFilter(tab.key as any)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                        customerTierFilter === tab.key
+                          ? "bg-[#26231B] text-white"
+                          : "bg-[#F7F5EE] text-[#6F6A5A] hover:bg-[#E7E2D0]"
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
 
-                      return (
-                        <div
-                          key={c.id}
-                          className="rounded-2xl border border-[#E7E2D0] bg-white hover:border-[#26231B]/30 transition-all overflow-hidden shadow-2xs"
-                        >
-                          <div className="p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                            {/* Left: Avatar & Identity */}
-                            <div className="flex items-center gap-3.5">
-                              <div className="w-12 h-12 rounded-2xl bg-[#26231B] text-[#FFC20E] flex items-center justify-center font-black text-lg shrink-0 shadow-2xs">
-                                {initial}
-                              </div>
-                              <div>
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <h3 className="text-sm sm:text-base font-black text-[#26231B]">
-                                    {c.name}
-                                  </h3>
-                                  <span
-                                    className={`px-2 py-0.2 rounded-full text-[10px] font-black uppercase tracking-wider border ${
-                                      c.status === "vip"
-                                        ? "bg-amber-100 text-amber-900 border-amber-300"
-                                        : c.status === "gold"
-                                        ? "bg-yellow-100 text-yellow-900 border-yellow-300"
-                                        : c.status === "silver"
-                                        ? "bg-slate-100 text-slate-800 border-slate-300"
-                                        : c.status === "active"
-                                        ? "bg-emerald-50 text-emerald-800 border-emerald-200"
-                                        : "bg-[#F7F5EE] text-[#6F6A5A] border-[#E7E2D0]"
-                                    }`}
-                                  >
-                                    {c.status === "vip"
-                                      ? "👑 VIP Platinum"
-                                      : c.status === "gold"
-                                      ? "🥇 Gold Client"
-                                      : c.status === "silver"
-                                      ? "🥈 Silver Client"
-                                      : c.status === "active"
-                                      ? "🥉 Active Prospect"
-                                      : "👤 Registered Member"}
-                                  </span>
-                                </div>
+                <div className="flex items-center gap-2 self-start lg:self-auto">
+                  <span className="text-xs font-semibold text-[#6F6A5A]">Sort:</span>
+                  <select
+                    value={customerSort}
+                    onChange={(e) => setCustomerSort(e.target.value as any)}
+                    className="px-3 py-1.5 rounded-lg border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-semibold text-[#26231B] focus:outline-none"
+                  >
+                    <option value="recent">Recently Added / Active</option>
+                    <option value="name">Name (A–Z)</option>
+                    <option value="bookings">Most Bookings</option>
+                  </select>
+                </div>
+              </div>
 
-                                <div className="flex flex-wrap items-center gap-2.5 mt-1 text-xs text-[#6F6A5A]">
-                                  <span className="font-mono font-bold text-[#26231B]">
-                                    {c.phone || "No phone provided"}
-                                  </span>
-                                  {c.city && <span>• 📍 {c.city}</span>}
-                                  {c.email && <span>• ✉️ {c.email}</span>}
-                                </div>
-                              </div>
+              {/* Normal Clean Customer Table / List */}
+              {loadingUsers && customersWithMetrics.length === 0 ? (
+                <div className="py-10 text-center text-xs font-semibold text-[#6F6A5A]">
+                  Loading customers...
+                </div>
+              ) : filteredCustomers.length === 0 ? (
+                <div className="py-10 px-4 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-center">
+                  <p className="text-xs font-bold text-[#26231B]">No customers found</p>
+                  <p className="text-[11px] text-[#6F6A5A] mt-0.5">
+                    Try clearing the search or filter.
+                  </p>
+                </div>
+              ) : (
+                <div className="border border-[#E7E2D0] rounded-xl overflow-hidden divide-y divide-[#E7E2D0]">
+                  {filteredCustomers.map((c) => {
+                    const isExpanded = !!expandedCustomers[c.id];
+                    const cleanPhoneDigits = c.phone.replace(/[^0-9]/g, "");
+                    const intlPhone = cleanPhoneDigits.startsWith("0")
+                      ? `94${cleanPhoneDigits.slice(1)}`
+                      : cleanPhoneDigits.startsWith("94")
+                      ? cleanPhoneDigits
+                      : `94${cleanPhoneDigits}`;
+
+                    return (
+                      <div key={c.id} className="bg-white">
+                        <div className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-[#FCFBF7] transition-colors">
+                          <div className="min-w-0">
+                            <div className="text-sm font-bold text-[#26231B] truncate">
+                              {c.name}
                             </div>
-
-                            {/* Center: Financial & Booking Metrics */}
-                            <div className="grid grid-cols-3 gap-3 py-2 px-3 sm:px-4 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] shrink-0 text-center">
-                              <div>
-                                <span className="text-[10px] uppercase font-bold text-[#6F6A5A] block">Bookings</span>
-                                <span className="text-sm sm:text-base font-black text-[#26231B] font-mono mt-0.5 block">
-                                  {c.totalBookings}
-                                </span>
-                                <span className="text-[10px] text-emerald-700 font-bold block">
-                                  {c.completedBookings} Done
-                                </span>
-                              </div>
-                              <div>
-                                <span className="text-[10px] uppercase font-bold text-[#6F6A5A] block">LTV Revenue</span>
-                                <span className="text-sm sm:text-base font-black text-[#26231B] font-mono mt-0.5 block">
-                                  Rs. {c.totalRevenue.toLocaleString()}
-                                </span>
-                                <span className="text-[10px] text-[#6F6A5A] font-semibold block">
-                                  Lifetime
-                                </span>
-                              </div>
-                              <div>
-                                <span className="text-[10px] uppercase font-bold text-[#6F6A5A] block">Average Order</span>
-                                <span className="text-sm sm:text-base font-black text-[#26231B] font-mono mt-0.5 block">
-                                  Rs. {c.averageBookingValue.toLocaleString()}
-                                </span>
-                                <span className="text-[10px] text-[#6F6A5A] font-semibold block">
-                                  Per Trip
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Right: Quick Call, WhatsApp & History Toggle */}
-                            <div className="flex flex-wrap items-center gap-2 shrink-0 self-end lg:self-center">
-                              {c.phone && (
-                                <>
-                                  <a
-                                    href={`tel:${c.phone}`}
-                                    className="px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-xs font-bold transition-colors flex items-center gap-1.5"
-                                  >
-                                    <span>📞</span>
-                                    <span>Call</span>
-                                  </a>
-                                  <a
-                                    href={`https://wa.me/${intlPhone}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold transition-colors shadow-2xs flex items-center gap-1.5"
-                                  >
-                                    <span>💬</span>
-                                    <span>WhatsApp</span>
-                                  </a>
-                                </>
-                              )}
-
-                              {c.totalBookings > 0 ? (
-                                <button
-                                  type="button"
-                                  onClick={() => toggleCustomerExpanded(c.id)}
-                                  className="px-3.5 py-2 rounded-xl bg-[#26231B] hover:bg-[#FFC20E] hover:text-[#26231B] text-white text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5"
-                                >
-                                  <span>{isExpanded ? "Hide Orders ▲" : `History (${c.totalBookings}) ▼`}</span>
-                                </button>
-                              ) : (
-                                <span className="px-3 py-1.5 rounded-xl bg-[#F7F5EE] text-[#8C877A] text-xs font-semibold">
-                                  No Orders Yet
-                                </span>
-                              )}
+                            <div className="flex flex-wrap items-center gap-2 mt-0.5 text-xs text-[#6F6A5A]">
+                              <span className="font-mono font-semibold text-[#26231B]">
+                                {c.phone || "No phone"}
+                              </span>
+                              {c.city && <span>• {c.city}</span>}
+                              {c.email && <span>• {c.email}</span>}
+                              <span>
+                                • {c.totalBookings} {c.totalBookings === 1 ? "Booking" : "Bookings"}
+                              </span>
                             </div>
                           </div>
 
-                          {/* Expandable Order History for this customer */}
-                          {isExpanded && c.bookingsList.length > 0 && (
-                            <div className="p-4 sm:p-5 bg-[#F7F5EE]/40 border-t border-[#E7E2D0] flex flex-col gap-3">
-                              <div className="flex items-center justify-between">
-                                <span className="text-xs font-black text-[#26231B] uppercase tracking-wider">
-                                  Freight Orders Placed by {c.name} ({c.bookingsList.length})
-                                </span>
-                                <span className="text-[11px] text-[#6F6A5A]">
-                                  First Booked: {new Date(c.registeredAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
-                                </span>
-                              </div>
+                          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                            {c.phone && (
+                              <>
+                                <a
+                                  href={`tel:${c.phone}`}
+                                  className="px-2.5 py-1.5 rounded-lg border border-[#E7E2D0] hover:bg-[#F7F5EE] text-[#26231B] text-xs font-semibold transition-colors"
+                                >
+                                  Call
+                                </a>
+                                <a
+                                  href={`https://wa.me/${intlPhone}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-xs font-semibold transition-colors"
+                                >
+                                  WhatsApp
+                                </a>
+                              </>
+                            )}
 
-                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                                {c.bookingsList.map((b) => (
-                                  <div
-                                    key={b.id}
-                                    className="p-3.5 rounded-2xl bg-white border border-[#E7E2D0] shadow-2xs flex flex-col justify-between gap-2"
-                                  >
-                                    <div className="flex items-center justify-between gap-1.5">
-                                      <span className="font-mono font-black text-xs text-[#26231B]">
-                                        #{b.id}
-                                      </span>
-                                      <StatusBadge status={b.status} />
-                                    </div>
+                            {c.totalBookings > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => toggleCustomerExpanded(c.id)}
+                                className="px-2.5 py-1.5 rounded-lg border border-[#E7E2D0] hover:bg-[#F7F5EE] text-[#26231B] text-xs font-semibold transition-colors cursor-pointer"
+                              >
+                                {isExpanded ? "Hide Bookings ▲" : `Bookings (${c.totalBookings}) ▼`}
+                              </button>
+                            )}
 
-                                    <div>
-                                      <div className="text-xs font-black text-[#26231B]">
-                                        📍 {b.pickupCity} → {b.deliveryCity}
-                                      </div>
-                                      <div className="text-[11px] text-[#6F6A5A] mt-0.5">
-                                        🚛 {b.vehicleType}
-                                        {b.cargoNature ? ` • ${b.cargoNature}` : ""}
-                                      </div>
-                                    </div>
-
-                                    <div className="flex items-center justify-between pt-2 border-t border-[#E7E2D0] text-xs">
-                                      <span className="text-[#6F6A5A] text-[11px]">
-                                        📅 {b.date || "Date unspecified"}
-                                      </span>
-                                      <span className="font-mono font-black text-[#26231B]">
-                                        {b.quotedAmount !== undefined
-                                          ? `Rs. ${b.quotedAmount.toLocaleString()}`
-                                          : "Unquoted"}
-                                      </span>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
+                            <button
+                              type="button"
+                              disabled={deletingCustomerId === c.id}
+                              aria-label={`Delete customer ${c.name}`}
+                              onClick={() =>
+                                setDeleteCustomerModal({
+                                  id: c.id,
+                                  name: c.name,
+                                  phone: c.phone,
+                                  totalBookings: c.totalBookings,
+                                  totalRevenue: c.totalRevenue,
+                                  deleteBookings: false,
+                                })
+                              }
+                              className="px-2.5 py-1.5 rounded-lg border border-red-200 bg-red-50 hover:bg-red-600 text-red-700 hover:text-white text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              {deletingCustomerId === c.id ? "Deleting..." : "Delete"}
+                            </button>
+                          </div>
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+
+                        {isExpanded && c.bookingsList.length > 0 && (
+                          <div className="px-4 py-3 bg-[#F7F5EE] border-t border-[#E7E2D0] flex flex-col gap-2">
+                            {c.bookingsList.map((b) => (
+                              <div
+                                key={b.id}
+                                className="px-3 py-2 rounded-lg bg-white border border-[#E7E2D0] flex flex-wrap items-center justify-between gap-2 text-xs"
+                              >
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-mono font-bold text-[#26231B]">#{b.id}</span>
+                                  <span className="text-[#26231B]">
+                                    {b.pickupCity} → {b.deliveryCity}
+                                  </span>
+                                  <span className="text-[#6F6A5A]">
+                                    ({b.date || "Date unspecified"})
+                                  </span>
+                                </div>
+                                <StatusBadge status={b.status} />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -5805,7 +5584,6 @@ export default function MasterAdminDashboard() {
                                       setStatusFilter("all");
                                       if (isIndiv) {
                                         setActiveNav("individual_bookings");
-                                        setBookingViewSubTab("list");
                                         setIndividualSearch(b.id);
                                       } else {
                                         setActiveNav("online_bookings");
@@ -5929,7 +5707,7 @@ export default function MasterAdminDashboard() {
                             <b className="text-[#26231B]">{(v as any).maxWeight || "3.5 Tons"}</b>
                           </div>
                           <div className="text-[11.5px] text-[#6F6A5A]">
-                            <span>Assigned Driver: </span>
+                            <span>Assigned Rider: </span>
                             <b className="text-[#26231B]">{v.driverName || "Unassigned"}</b>
                           </div>
                         </div>
@@ -5938,13 +5716,13 @@ export default function MasterAdminDashboard() {
                         <div className="flex items-center justify-between pt-3 border-t border-[#E7E2D0]">
                           <button
                             onClick={() => {
-                              setSelectedCalendarVehicle(v);
+                              setStatusFilter("all");
+                              setIndividualSearch(v.plate);
                               setActiveNav("individual_bookings");
-                              setBookingViewSubTab("calendar");
                             }}
                             className="text-xs font-extrabold text-[#1E9E5A] hover:underline cursor-pointer"
                           >
-                            View Calendar
+                            View Bookings
                           </button>
 
                           <div className="flex items-center gap-2">
@@ -5999,7 +5777,7 @@ export default function MasterAdminDashboard() {
                 </div>
               ) : filteredDrivers.length === 0 ? (
                 <div className="p-12 text-center rounded-3xl bg-white border border-[#E7E2D0]">
-                  <p className="text-sm font-bold text-[#6F6A5A]">No drivers registered. Click &quot;+ Register New Rider&quot; above.</p>
+                  <p className="text-sm font-bold text-[#6F6A5A]">No riders registered. Click &quot;+ Register New Rider&quot; above.</p>
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -6504,8 +6282,8 @@ export default function MasterAdminDashboard() {
                             {/* Status Badge */}
                             <div>
                               {reg.status === "pending" && (
-                                <span className="px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-300 text-[11px] font-black flex items-center gap-1.5 animate-pulse">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-amber-600" />
+                                <span className="px-2.5 py-1 rounded-full bg-[#FBF8EE] text-[#7A5A00] border border-[#E7DEC0] text-[11px] font-bold flex items-center gap-1.5">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-[#B8860B]" />
                                   Pending Review
                                 </span>
                               )}
@@ -6794,8 +6572,8 @@ export default function MasterAdminDashboard() {
                               {formatInquiryDate(inq.createdAt)}
                             </span>
                             {inq.status === "unread" ? (
-                              <span className="px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-300 text-[11px] font-black flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-amber-600 animate-ping" />
+                              <span className="px-2.5 py-1 rounded-full bg-[#FBF8EE] text-[#7A5A00] border border-[#E7DEC0] text-[11px] font-bold flex items-center gap-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#B8860B]" />
                                 Unread
                               </span>
                             ) : (
@@ -6989,7 +6767,7 @@ export default function MasterAdminDashboard() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-[#26231B] mb-1">Assign Driver</label>
+                  <label className="block text-xs font-bold text-[#26231B] mb-1">Assign Rider</label>
                   <select
                     value={lorryForm.rider}
                     onChange={(e) => setLorryForm((p) => ({ ...p, rider: e.target.value }))}
@@ -7091,7 +6869,7 @@ export default function MasterAdminDashboard() {
 
             <form onSubmit={handleSaveRider} className="flex flex-col gap-3.5">
               <div>
-                <label className="block text-xs font-bold text-[#26231B] mb-1">Driver ID</label>
+                <label className="block text-xs font-bold text-[#26231B] mb-1">Rider ID</label>
                 <input
                   type="text"
                   readOnly
@@ -7199,350 +6977,622 @@ export default function MasterAdminDashboard() {
       {/* ========================================================= */}
       {/* MODAL 3: MANUAL BOOKING CREATION                          */}
       {/* ========================================================= */}
-      {showManualModal && (
-        <div
-          className="fixed inset-0 z-[99999] bg-black/60 flex items-start justify-center p-4 py-6 backdrop-blur-xs overflow-y-auto"
-          onClick={() => setShowManualModal(false)}
-        >
+      {showManualModal && (() => {
+        const manualTimeCheck = validateTimeRange(manualForm.startTime, manualForm.endTime);
+        const manualResolvedPlate = manualForm.plate || fleetVehicles[0]?.plate || "";
+        const manualMatchedVehicle = fleetVehicles.find((v) => v.plate === manualResolvedPlate);
+        const manualConflict =
+          manualTimeCheck.valid && manualForm.date
+            ? findBookingScheduleConflict(
+                {
+                  date: manualForm.date,
+                  dates: [manualForm.date],
+                  startTime: manualTimeCheck.startTime,
+                  endTime: manualTimeCheck.endTime,
+                  assignedPlate: manualResolvedPlate,
+                  assignedLorryId:
+                    manualMatchedVehicle?.id ||
+                    `lorry-${normalizePlate(manualResolvedPlate).toLowerCase()}`,
+                  assignedDriverId: manualForm.driverId,
+                  assignedDriverName: manualForm.driverName,
+                  assignedDriverPhone: manualForm.driverPhone,
+                  bookingType: "individual_vehicle",
+                },
+                bookings
+              )
+            : null;
+        const manualRiderValid = hasAssignedRider({
+          assignedDriverId: manualForm.driverId,
+          assignedDriverName: manualForm.driverName,
+          assignedDriverPhone: manualForm.driverPhone,
+        });
+
+        return (
           <div
-            className="w-full max-w-lg bg-white rounded-3xl p-6 shadow-2xl border border-[#E7E2D0] my-auto"
-            onClick={(e) => e.stopPropagation()}
+            className="fixed inset-0 z-[99999] bg-black/50 flex items-start justify-center p-4 py-6 overflow-y-auto"
+            onClick={() => setShowManualModal(false)}
           >
-            <div className="flex items-center justify-between border-b border-[#E7E2D0] pb-3 mb-4">
-              <h2 className="text-base font-black text-[#26231B]">Create Manual Booking (Direct Lock)</h2>
-              <button
-                type="button"
-                onClick={() => setShowManualModal(false)}
-                className="text-[#6F6A5A] hover:text-[#26231B] font-bold text-sm p-1 cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleManualSubmit} className="flex flex-col gap-3.5">
-              <div className="grid grid-cols-2 gap-3">
+            <div
+              className="w-full max-w-xl bg-white rounded-lg p-5 sm:p-6 shadow-xl border border-gray-300 my-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-gray-200 pb-3.5 mb-4">
                 <div>
-                  <label className="block text-xs font-bold text-[#26231B] mb-1">Customer Name *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="Customer Name"
-                    value={manualForm.customerName}
-                    onChange={(e) => setManualForm((p) => ({ ...p, customerName: e.target.value }))}
-                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-[#26231B] mb-1">Mobile Phone *</label>
-                  <input
-                    type="tel"
-                    required
-                    placeholder="077 123 4567"
-                    value={manualForm.customerPhone}
-                    onChange={(e) => setManualForm((p) => ({ ...p, customerPhone: e.target.value }))}
-                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-[#26231B] mb-1">Pickup Location *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. Deniyaya"
-                    value={manualForm.pickupCity}
-                    onChange={(e) => setManualForm((p) => ({ ...p, pickupCity: e.target.value }))}
-                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-[#26231B] mb-1">Delivery Destination *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. Panadura"
-                    value={manualForm.deliveryCity}
-                    onChange={(e) => setManualForm((p) => ({ ...p, deliveryCity: e.target.value }))}
-                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-[#26231B] mb-1">Select Vehicle (Fleet) *</label>
-                <select
-                  required
-                  value={manualForm.plate || (fleetVehicles[0]?.plate || "")}
-                  onChange={(e) => {
-                    const selPlate = e.target.value;
-                    const matched = fleetVehicles.find((v) => v.plate === selPlate);
-                    setManualForm((p) => ({
-                      ...p,
-                      plate: selPlate,
-                      vehicleType: (matched && matched.vehicleType) ? matched.vehicleType : (p.vehicleType || "Lorry"),
-                    }));
-                    if (selPlate) {
-                      void loadModalBookedDates(selPlate);
-                    }
-                  }}
-                  className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
-                >
-                  {fleetVehicles.length === 0 ? (
-                    <option value="">No fleet vehicles registered</option>
-                  ) : (
-                    fleetVehicles.map((v) => (
-                      <option key={v.plate} value={v.plate}>
-                        {v.plate} — {v.vehicleType}
-                      </option>
-                    ))
-                  )}
-                </select>
-              </div>
-
-              <div className="flex flex-col gap-2.5 p-3.5 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0]">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <label className="block text-xs font-black text-[#26231B]">
-                      Select Dates to Lock * <span className="font-normal text-[#6F6A5A]">({manualForm.dates.length} selected)</span>
-                    </label>
-                    <p className="text-[11px] text-[#6F6A5A]">
-                      Dates in <span className="font-bold text-red-600">RED</span> are already booked for this lorry. Click available dates to select/deselect.
-                    </p>
-                  </div>
-                  {manualForm.dates.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setManualForm((p) => ({ ...p, dates: [], date: "" }))}
-                      className="text-[11px] font-bold text-red-600 hover:underline cursor-pointer"
-                    >
-                      Clear All
-                    </button>
-                  )}
-                </div>
-
-                {modalCalendarLoading ? (
-                  <div className="p-8 text-center bg-white rounded-2xl border border-[#E7E2D0]">
-                    <span className="text-xs font-bold text-[#6F6A5A]">Loading vehicle calendar...</span>
-                  </div>
-                ) : (
-                  <BookingCalendar
-                    selectedDates={manualForm.dates}
-                    onSelectDate={(d) => {
-                      setManualForm((p) => {
-                        const exists = p.dates.includes(d);
-                        const next = exists ? p.dates.filter((x) => x !== d) : [...p.dates, d].sort();
-                        return { ...p, dates: next, date: next[0] || "" };
-                      });
-                    }}
-                    onToggleDate={(d) => {
-                      setManualForm((p) => {
-                        const exists = p.dates.includes(d);
-                        const next = exists ? p.dates.filter((x) => x !== d) : [...p.dates, d].sort();
-                        return { ...p, dates: next, date: next[0] || "" };
-                      });
-                    }}
-                    bookedDates={modalBookedDates}
-                    bookingsByDate={modalBookingsByDate}
-                    isAdmin={true}
-                    locale="en"
-                  />
-                )}
-
-                {manualForm.dates.length > 0 ? (
-                  <div className="mt-1 pt-2 border-t border-[#E7E2D0]">
-                    <span className="text-[11px] font-bold text-[#6F6A5A] block mb-1">
-                      Selected Booking Dates ({manualForm.dates.length} Days):
-                    </span>
-                    <div className="flex flex-wrap gap-1.5">
-                      {manualForm.dates.map((d) => (
-                        <span
-                          key={d}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#FFC20E] text-[#26231B] text-xs font-mono font-black border border-[#E7A800]"
-                        >
-                          <span>{d}</span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const next = manualForm.dates.filter((x) => x !== d);
-                              setManualForm((p) => ({ ...p, dates: next, date: next[0] || "" }));
-                            }}
-                            className="hover:text-red-700 text-xs font-bold leading-none cursor-pointer"
-                            title="Remove date"
-                          >
-                            ✕
-                          </button>
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-[11px] text-red-600 font-bold italic pt-1">
-                    Please click at least one date on the calendar above.
+                  <h2 className="text-base font-bold text-gray-900">Create Manual Booking</h2>
+                  <p className="text-sm text-gray-600 mt-0.5">
+                    Schedule trip time, assign rider, set amount, and choose payment status.
                   </p>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-[#26231B] mb-1">Nature of Goods *</label>
-                <select
-                  value={manualForm.cargoNature}
-                  onChange={(e) => setManualForm((p) => ({ ...p, cargoNature: e.target.value }))}
-                  className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
-                >
-                  {CARGO_NATURE_OPTIONS.map((opt) => (
-                    <option key={opt} value={opt}>{opt}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-[#26231B] mb-1">Special Notes</label>
-                <textarea
-                  rows={2}
-                  placeholder="Notes or cargo instructions"
-                  value={manualForm.notes}
-                  onChange={(e) => setManualForm((p) => ({ ...p, notes: e.target.value }))}
-                  className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E7E2D0]">
+                </div>
                 <button
                   type="button"
+                  aria-label="Close manual booking modal"
                   onClick={() => setShowManualModal(false)}
-                  className="px-4 py-2 rounded-xl border border-[#E7E2D0] text-xs font-bold cursor-pointer"
+                  className="text-gray-600 hover:text-gray-900 font-bold text-base px-2 py-1 rounded hover:bg-gray-100 cursor-pointer"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={manualSubmitting}
-                  className="px-5 py-2 rounded-xl bg-[#FFC20E] text-[#26231B] text-xs font-black hover:bg-[#e6ad00] transition-colors cursor-pointer shadow-xs disabled:opacity-50"
-                >
-                  {manualSubmitting ? "Locking..." : "Lock Date & Create"}
+                  ✕
                 </button>
               </div>
-            </form>
+
+              <form onSubmit={handleManualSubmit} className="flex flex-col gap-4">
+                {(() => {
+                  const phoneDigits = String(manualForm.customerPhone || "").replace(/[^0-9]/g, "");
+                  const matchedClient =
+                    phoneDigits.length >= 9 ? lookupManualClientByPhone(manualForm.customerPhone) : null;
+
+                  return (
+                    <>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-800 mb-1">Mobile Phone *</label>
+                          <input
+                            type="tel"
+                            required
+                            aria-label="Manual booking mobile phone"
+                            value={manualForm.customerPhone}
+                            onChange={(e) => handleManualPhoneChange(e.target.value)}
+                            className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-mono font-semibold text-gray-900 focus:border-gray-900 focus:outline-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-sm font-medium text-gray-800 mb-1">Customer Name *</label>
+                          <input
+                            type="text"
+                            required
+                            aria-label="Manual booking customer name"
+                            value={manualForm.customerName}
+                            onChange={(e) => setManualForm((p) => ({ ...p, customerName: e.target.value }))}
+                            className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                          />
+                        </div>
+                      </div>
+
+                      {phoneDigits.length >= 9 && (
+                        matchedClient && matchedClient.isRegisteredInUsers ? (
+                          <div className="px-3.5 py-2.5 rounded-md bg-green-50 border border-green-300 flex flex-wrap items-center justify-between gap-2 text-sm">
+                            <div className="flex flex-wrap items-center gap-1.5 text-green-900 font-medium">
+                              <span>Saved Client Found:</span>
+                              <strong className="font-bold">{matchedClient.name}</strong>
+                              {matchedClient.bookingsCount > 0 && (
+                                <span className="text-xs text-green-800">
+                                  ({matchedClient.bookingsCount} Booking{matchedClient.bookingsCount === 1 ? "" : "s"})
+                                </span>
+                              )}
+                            </div>
+                            <span className="px-2 py-0.5 rounded bg-white border border-green-300 text-green-800 text-xs font-semibold">
+                              Auto-filled
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="px-3.5 py-2.5 rounded-md bg-amber-50 border border-amber-300 flex flex-wrap items-center justify-between gap-2 text-sm">
+                            <div className="flex flex-col gap-0.5">
+                              <span className="font-semibold text-amber-900">
+                                New Number — Not in Customers List
+                              </span>
+                              <span className="text-xs text-amber-800">
+                                Enter Customer Name &amp; click Register Client, or submit to save automatically.
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={manualRegisteringClient}
+                              onClick={handleManualRegisterClient}
+                              className="px-3 py-1.5 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-xs font-semibold cursor-pointer disabled:opacity-50 shrink-0"
+                            >
+                              {manualRegisteringClient ? "Registering..." : "+ Register Client"}
+                            </button>
+                          </div>
+                        )
+                      )}
+                    </>
+                  );
+                })()}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-800 mb-1">Pickup Location *</label>
+                    <input
+                      type="text"
+                      required
+                      aria-label="Manual booking pickup location"
+                      value={manualForm.pickupCity}
+                      onChange={(e) => setManualForm((p) => ({ ...p, pickupCity: e.target.value }))}
+                      className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-800 mb-1">Delivery Destination *</label>
+                    <input
+                      type="text"
+                      required
+                      aria-label="Manual booking delivery destination"
+                      value={manualForm.deliveryCity}
+                      onChange={(e) => setManualForm((p) => ({ ...p, deliveryCity: e.target.value }))}
+                      className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-800 mb-1">Select Lorry (Fleet) *</label>
+                    <select
+                      required
+                      aria-label="Manual booking lorry"
+                      value={manualResolvedPlate}
+                      onChange={(e) => {
+                        const selPlate = e.target.value;
+                        const matched = fleetVehicles.find((v) => v.plate === selPlate);
+                        setManualForm((p) => ({
+                          ...p,
+                          plate: selPlate,
+                          vehicleType: matched?.vehicleType || p.vehicleType || "Lorry",
+                        }));
+                      }}
+                      className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-mono font-semibold text-gray-900 focus:border-gray-900 focus:outline-none"
+                    >
+                      {fleetVehicles.length === 0 ? (
+                        <option value="">No fleet vehicles registered</option>
+                      ) : (
+                        fleetVehicles.map((v) => (
+                          <option key={v.id || v.plate} value={v.plate}>
+                            {v.plate} — {v.vehicleType}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-800 mb-1">Assign Rider (Mandatory) *</label>
+                    <select
+                      required
+                      aria-label="Manual booking rider"
+                      value={manualForm.driverName}
+                      onChange={(e) => {
+                        const drv = drivers.find((d) => d.name === e.target.value);
+                        setManualForm((p) => ({
+                          ...p,
+                          driverId: drv?.driverId || "",
+                          driverName: drv?.name || e.target.value,
+                          driverPhone: drv?.phone || "",
+                        }));
+                      }}
+                      className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-medium text-gray-900 focus:border-gray-900 focus:outline-none"
+                    >
+                      <option value="">Select Rider</option>
+                      {drivers.map((d) => (
+                        <option key={d.driverId} value={d.name}>
+                          {d.name} ({d.driverId}) - {d.phone}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Date + Time Duration Allocation */}
+                <div className="p-4 rounded-md bg-gray-50 border border-gray-200 flex flex-col gap-3">
+                  <div>
+                    <span className="block text-sm font-bold text-gray-900">
+                      Booking Date &amp; Time Duration *
+                    </span>
+                    <p className="text-xs text-gray-600 mt-0.5">
+                      Overlapping times on the same date are blocked automatically for both the lorry and rider.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Trip Date *</label>
+                      <input
+                        type="date"
+                        required
+                        aria-label="Manual booking trip date"
+                        value={manualForm.date}
+                        onChange={(e) => setManualForm((p) => ({ ...p, date: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Start Time *</label>
+                      <input
+                        type="time"
+                        required
+                        aria-label="Manual booking start time"
+                        value={manualForm.startTime}
+                        onChange={(e) => setManualForm((p) => ({ ...p, startTime: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">End Time *</label>
+                      <input
+                        type="time"
+                        required
+                        aria-label="Manual booking end time"
+                        value={manualForm.endTime}
+                        onChange={(e) => setManualForm((p) => ({ ...p, endTime: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {manualConflict?.hasConflict ? (
+                    <div className="px-3 py-2 rounded-md bg-red-50 border border-red-300 text-sm font-semibold text-red-800">
+                      {manualConflict.message}
+                    </div>
+                  ) : !manualTimeCheck.valid ? (
+                    <div className="px-3 py-2 rounded-md bg-amber-50 border border-amber-300 text-sm font-medium text-amber-900">
+                      {manualTimeCheck.error}
+                    </div>
+                  ) : !manualRiderValid ? (
+                    <div className="px-3 py-2 rounded-md bg-amber-50 border border-amber-300 text-sm font-medium text-amber-900">
+                      Please select a Rider (mandatory for every booking).
+                    </div>
+                  ) : manualForm.date ? (
+                    <div className="px-3 py-2 rounded-md bg-green-50 border border-green-300 text-sm font-medium text-green-800">
+                      Available Slot: {manualForm.date} · {formatTimeDurationLabel(manualTimeCheck.startTime, manualTimeCheck.endTime)}
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* Amount & Payment Status Section */}
+                <div className="p-4 rounded-md bg-gray-50 border border-gray-200 flex flex-col gap-3">
+                  <div>
+                    <span className="block text-sm font-bold text-gray-900">
+                      Amount &amp; Payment Status (Manual) *
+                    </span>
+                    <p className="text-xs text-gray-600 mt-0.5">
+                      Enter the transport fee and choose whether payment is pending or already completed.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Amount (LKR) *</label>
+                      <input
+                        type="number"
+                        min="1"
+                        required
+                        aria-label="Manual booking amount LKR"
+                        value={manualForm.quotedAmount}
+                        onChange={(e) => setManualForm((p) => ({ ...p, quotedAmount: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-mono font-semibold text-gray-900 focus:border-gray-900 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Payment Note (Optional)</label>
+                      <input
+                        type="text"
+                        aria-label="Manual booking payment note"
+                        value={manualForm.paymentNote}
+                        onChange={(e) => setManualForm((p) => ({ ...p, paymentNote: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <span className="block text-xs font-medium text-gray-700 mb-1.5">
+                      Select Payment Status *
+                    </span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => setManualForm((p) => ({ ...p, paymentStatusMode: "pending" }))}
+                        className={`text-left px-3.5 py-2.5 rounded-md border cursor-pointer ${
+                          manualForm.paymentStatusMode === "pending"
+                            ? "border-gray-900 bg-gray-900 text-white"
+                            : "border-gray-300 bg-white text-gray-900 hover:bg-gray-100"
+                        }`}
+                      >
+                        <div className="text-sm font-semibold">Payment Pending</div>
+                        <div
+                          className={`text-xs mt-0.5 ${
+                            manualForm.paymentStatusMode === "pending" ? "text-gray-200" : "text-gray-600"
+                          }`}
+                        >
+                          Save in Awaiting Payment state
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setManualForm((p) => ({ ...p, paymentStatusMode: "success" }))}
+                        className={`text-left px-3.5 py-2.5 rounded-md border cursor-pointer ${
+                          manualForm.paymentStatusMode === "success"
+                            ? "border-gray-900 bg-gray-900 text-white"
+                            : "border-gray-300 bg-white text-gray-900 hover:bg-gray-100"
+                        }`}
+                      >
+                        <div className="text-sm font-semibold">Payment Success (Paid)</div>
+                        <div
+                          className={`text-xs mt-0.5 ${
+                            manualForm.paymentStatusMode === "success" ? "text-gray-200" : "text-gray-600"
+                          }`}
+                        >
+                          Paid directly / Cash approved now
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-800 mb-1">Nature of Goods *</label>
+                    <select
+                      aria-label="Manual booking cargo nature"
+                      value={manualForm.cargoNature}
+                      onChange={(e) => setManualForm((p) => ({ ...p, cargoNature: e.target.value }))}
+                      className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                    >
+                      {CARGO_NATURE_OPTIONS.map((opt) => (
+                        <option key={opt} value={opt}>{opt}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-800 mb-1">Special Notes</label>
+                    <input
+                      type="text"
+                      aria-label="Manual booking special notes"
+                      value={manualForm.notes}
+                      onChange={(e) => setManualForm((p) => ({ ...p, notes: e.target.value }))}
+                      className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-gray-200">
+                  <button
+                    type="button"
+                    onClick={() => setShowManualModal(false)}
+                    className="px-4 py-2 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-sm font-medium text-gray-900 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={manualSubmitting || Boolean(manualConflict?.hasConflict)}
+                    className="px-5 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer disabled:opacity-50"
+                  >
+                    {manualSubmitting
+                      ? "Creating..."
+                      : manualForm.paymentStatusMode === "success"
+                      ? "Create Paid Booking"
+                      : "Create Pending Booking"}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ========================================================= */}
       {/* MODAL 4: ASSIGN DRIVER TO BOOKING                         */}
       {/* ========================================================= */}
-      {assignModal && (
-        <div
-          className="fixed inset-0 z-[99999] bg-black/60 flex items-center justify-center p-4 backdrop-blur-xs"
-          onClick={() => setAssignModal(null)}
-        >
+      {assignModal && (() => {
+        const isIndivModal = assignModal.booking.bookingType !== "live_lorry";
+        const modalTimeCheck = isIndivModal ? validateTimeRange(assignModal.startTime, assignModal.endTime) : null;
+        const modalConflict =
+          isIndivModal && modalTimeCheck?.valid && assignModal.date
+            ? findBookingScheduleConflict(
+                {
+                  excludeBookingId: assignModal.booking.id,
+                  date: assignModal.date,
+                  dates: [assignModal.date],
+                  startTime: modalTimeCheck.startTime,
+                  endTime: modalTimeCheck.endTime,
+                  assignedPlate: assignModal.plate,
+                  assignedLorryId: assignModal.lorryId,
+                  assignedDriverId: assignModal.driverId,
+                  assignedDriverName: assignModal.driverName,
+                  assignedDriverPhone: assignModal.driverPhone,
+                  bookingType: "individual_vehicle",
+                },
+                bookings
+              )
+            : null;
+
+        return (
           <div
-            className="w-full max-w-md bg-white rounded-3xl p-6 shadow-2xl border border-[#E7E2D0]"
-            onClick={(e) => e.stopPropagation()}
+            className="fixed inset-0 z-[99999] bg-black/60 flex items-center justify-center p-4 backdrop-blur-xs overflow-y-auto"
+            onClick={() => setAssignModal(null)}
           >
-            <div className="flex items-center justify-between border-b border-[#E7E2D0] pb-3 mb-4">
-              <h2 className="text-base font-black text-[#26231B]">Assign Driver to Booking</h2>
-              <button
-                type="button"
-                onClick={() => setAssignModal(null)}
-                className="text-[#6F6A5A] hover:text-[#26231B] font-bold text-sm p-1 cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="text-xs bg-[#F7F5EE] p-3.5 rounded-2xl border border-[#E7E2D0] mb-4">
-              <div>Customer: <b>{assignModal.booking.customerName}</b> ({assignModal.booking.customerPhone || "N/A"})</div>
-              <div className="mt-1">Route: <b>{assignModal.booking.pickupCity}</b> → <b>{assignModal.booking.deliveryCity}</b></div>
-              <div className="mt-1">Date: <b>{assignModal.booking.date}</b></div>
-            </div>
-
-            <div className="flex flex-col gap-3">
-              <div>
-                <label className="block text-xs font-bold text-[#26231B] mb-1">Select Driver</label>
-                <select
-                  value={assignModal.driverName}
-                  onChange={(e) => {
-                    const drv = drivers.find((d) => d.name === e.target.value);
-                    setAssignModal((p) => {
-                      if (!p) return null;
-                      const preservedPlate =
-                        p.booking.bookingType === "individual_vehicle" && p.booking.assignedPlate
-                          ? p.booking.assignedPlate
-                          : drv?.plate || p.plate;
-                      const derivedLorryId = preservedPlate
-                        ? `lorry-${normalizePlate(preservedPlate).toLowerCase()}`
-                        : p.lorryId;
-                      return {
-                        ...p,
-                        driverName: e.target.value,
-                        driverPhone: drv?.phone || p.driverPhone,
-                        plate: preservedPlate,
-                        lorryId: derivedLorryId,
-                      };
-                    });
-                  }}
-                  className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
-                >
-                  {drivers.map((d) => (
-                    <option key={d.driverId} value={d.name}>{d.name} ({d.driverId}) - {d.phone}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-[#26231B] mb-1">
-                  Rider / Driver Mobile Number (Shown to Customer)
-                </label>
-                <input
-                  type="tel"
-                  placeholder="077 123 4567"
-                  value={assignModal.driverPhone}
-                  onChange={(e) => setAssignModal((p) => (p ? { ...p, driverPhone: e.target.value } : null))}
-                  className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-[#26231B] mb-1">Assigned Vehicle Plate</label>
-                <input
-                  type="text"
-                  placeholder="WP LB-4521"
-                  value={assignModal.plate}
-                  onChange={(e) => setAssignModal((p) => p ? { ...p, plate: e.target.value } : null)}
-                  className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
-                />
-              </div>
-
-              {assignModal.booking.bookingType === "individual_vehicle" && (
-                <p className="text-[11px] text-[#6F6A5A] bg-[#F7F5EE] px-3 py-2 rounded-xl border border-[#E7E2D0]">
-                  Individual vehicle booking: driver contact is displayed on Customer Portal only (not sent to the Rider mobile app).
-                </p>
-              )}
-
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#E7E2D0] mt-2">
+            <div
+              className="w-full max-w-md bg-white rounded-3xl p-6 shadow-2xl border border-[#E7E2D0] my-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-[#E7E2D0] pb-3 mb-4">
+                <h2 className="text-base font-black text-[#26231B]">
+                  {isIndivModal ? "Assign Rider & Time Schedule" : "Assign Rider & Lorry"}
+                </h2>
                 <button
                   type="button"
                   onClick={() => setAssignModal(null)}
-                  className="px-4 py-2 rounded-xl border border-[#E7E2D0] text-xs font-bold cursor-pointer"
+                  className="text-[#6F6A5A] hover:text-[#26231B] font-bold text-sm p-1 cursor-pointer"
                 >
-                  Cancel
+                  ✕
                 </button>
-                <button
-                  type="button"
-                  onClick={confirmAssign}
-                  className="px-5 py-2 rounded-xl bg-[#26231B] text-white hover:bg-[#FFC20E] hover:text-[#26231B] text-xs font-black transition-colors cursor-pointer shadow-xs"
-                >
-                  Confirm Assignment
-                </button>
+              </div>
+
+              <div className="text-xs bg-[#F7F5EE] p-3.5 rounded-2xl border border-[#E7E2D0] mb-4">
+                <div>Customer: <b>{assignModal.booking.customerName}</b> ({assignModal.booking.customerPhone || "N/A"})</div>
+                <div className="mt-1">Route: <b>{assignModal.booking.pickupCity}</b> → <b>{assignModal.booking.deliveryCity}</b></div>
+                <div className="mt-1">Requested Date: <b>{assignModal.booking.date}</b></div>
+              </div>
+
+              <div className="flex flex-col gap-3">
+                {isIndivModal && (
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#26231B] mb-1">Trip Date *</label>
+                      <input
+                        type="date"
+                        value={assignModal.date}
+                        onChange={(e) => setAssignModal((p) => (p ? { ...p, date: e.target.value } : null))}
+                        className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#26231B] mb-1">Start Time *</label>
+                      <input
+                        type="time"
+                        value={assignModal.startTime}
+                        onChange={(e) => setAssignModal((p) => (p ? { ...p, startTime: e.target.value } : null))}
+                        className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#26231B] mb-1">End Time *</label>
+                      <input
+                        type="time"
+                        value={assignModal.endTime}
+                        onChange={(e) => setAssignModal((p) => (p ? { ...p, endTime: e.target.value } : null))}
+                        className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold text-[#26231B] mb-1">Select Rider *</label>
+                  <select
+                    value={assignModal.driverName}
+                    onChange={(e) => {
+                      const drv = drivers.find((d) => d.name === e.target.value);
+                      setAssignModal((p) => {
+                        if (!p) return null;
+                        const preservedPlate = p.plate || drv?.plate || "";
+                        const derivedLorryId = preservedPlate
+                          ? `lorry-${normalizePlate(preservedPlate).toLowerCase()}`
+                          : p.lorryId;
+                        return {
+                          ...p,
+                          driverId: drv?.driverId || "",
+                          driverName: drv?.name || e.target.value,
+                          driverPhone: drv?.phone || p.driverPhone,
+                          plate: preservedPlate,
+                          lorryId: derivedLorryId,
+                        };
+                      });
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
+                  >
+                    <option value="">Select Rider</option>
+                    {drivers.map((d) => (
+                      <option key={d.driverId} value={d.name}>{d.name} ({d.driverId}) - {d.phone}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-[#26231B] mb-1">
+                    Rider Mobile Number (Shown to Customer)
+                  </label>
+                  <input
+                    type="tel"
+                    value={assignModal.driverPhone}
+                    onChange={(e) => setAssignModal((p) => (p ? { ...p, driverPhone: e.target.value } : null))}
+                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-[#26231B] mb-1">Assigned Vehicle Plate *</label>
+                  <select
+                    value={assignModal.plate}
+                    onChange={(e) => {
+                      const selPlate = e.target.value;
+                      const matchedV = fleetVehicles.find((v) => v.plate === selPlate);
+                      setAssignModal((p) =>
+                        p
+                          ? {
+                              ...p,
+                              plate: selPlate,
+                              lorryId: matchedV?.id || `lorry-${normalizePlate(selPlate).toLowerCase()}`,
+                            }
+                          : null
+                      );
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
+                  >
+                    <option value="">Select Lorry</option>
+                    {fleetVehicles.map((v) => (
+                      <option key={v.id || v.plate} value={v.plate}>
+                        {v.plate} — {v.vehicleType}
+                      </option>
+                    ))}
+                    {assignModal.plate && !fleetVehicles.some((v) => v.plate === assignModal.plate) && (
+                      <option value={assignModal.plate}>{assignModal.plate}</option>
+                    )}
+                  </select>
+                </div>
+
+                {modalConflict?.hasConflict && (
+                  <div className="px-3 py-2 rounded-xl bg-red-50 border border-red-300 text-[11.5px] font-bold text-red-700">
+                    {modalConflict.message}
+                  </div>
+                )}
+
+                {isIndivModal && modalTimeCheck && !modalTimeCheck.valid && (
+                  <div className="px-3 py-2 rounded-xl bg-amber-50 border border-amber-300 text-[11px] font-bold text-amber-800">
+                    {modalTimeCheck.error}
+                  </div>
+                )}
+
+                {assignModal.booking.bookingType === "individual_vehicle" && (
+                  <p className="text-[11px] text-[#6F6A5A] bg-[#F7F5EE] px-3 py-2 rounded-xl border border-[#E7E2D0]">
+                    Individual vehicle booking: schedule &amp; driver contact display on Customer Portal only (not sent to the Rider mobile app).
+                  </p>
+                )}
+
+                <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#E7E2D0] mt-2">
+                  <button
+                    type="button"
+                    onClick={() => setAssignModal(null)}
+                    className="px-4 py-2 rounded-xl border border-[#E7E2D0] text-xs font-bold cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={Boolean(modalConflict?.hasConflict)}
+                    onClick={confirmAssign}
+                    className="px-5 py-2 rounded-xl bg-[#26231B] text-white hover:bg-[#FFC20E] hover:text-[#26231B] text-xs font-black transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+                  >
+                    Confirm Assignment
+                  </button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ========================================================= */}
       {/* MODAL 5: PAYMENT SLIP (PDF & IMAGE) REVIEW MODAL          */}
@@ -7729,7 +7779,7 @@ export default function MasterAdminDashboard() {
                       onClick={() => handleApproveSlipPayment(linkedBooking)}
                       className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black transition-colors cursor-pointer shadow-xs disabled:opacity-50"
                     >
-                      Approve Payment & Lock Date
+                      Approve Payment &amp; Schedule
                     </button>
                   )}
                 </div>
@@ -7738,6 +7788,106 @@ export default function MasterAdminDashboard() {
           </div>
         );
       })()}
+
+      {/* ========================================================= */}
+      {/* MODAL: DELETE CUSTOMER CONFIRMATION                       */}
+      {/* ========================================================= */}
+      {deleteCustomerModal && (
+        <div
+          className="fixed inset-0 z-[99999] bg-black/60 flex items-center justify-center p-4 backdrop-blur-xs overflow-y-auto"
+          onClick={() => {
+            if (!deletingCustomerId) setDeleteCustomerModal(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md bg-white rounded-3xl p-6 shadow-2xl border border-[#E7E2D0] flex flex-col gap-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-[#E7E2D0] pb-3">
+              <div>
+                <h2 className="text-base font-black text-[#26231B]">Delete Customer Profile</h2>
+                <p className="text-xs text-[#6F6A5A] mt-0.5">
+                  Remove this client from the Customers directory &amp; database.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={Boolean(deletingCustomerId)}
+                onClick={() => setDeleteCustomerModal(null)}
+                className="text-[#6F6A5A] hover:text-[#26231B] font-bold text-sm p-1 cursor-pointer disabled:opacity-40"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0] flex items-center gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-[#26231B] text-[#FFC20E] flex items-center justify-center font-black text-base shrink-0">
+                {(deleteCustomerModal.name || "C").trim().charAt(0).toUpperCase()}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-black text-[#26231B] truncate">
+                  {deleteCustomerModal.name}
+                </div>
+                <div className="text-xs font-mono font-bold text-[#6F6A5A]">
+                  {deleteCustomerModal.phone || "No phone number"}
+                </div>
+                {deleteCustomerModal.totalBookings > 0 && (
+                  <div className="text-[11px] font-bold text-amber-800 mt-1">
+                    {deleteCustomerModal.totalBookings} Booking{deleteCustomerModal.totalBookings === 1 ? "" : "s"}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {deleteCustomerModal.totalBookings > 0 ? (
+              <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 flex flex-col gap-2">
+                <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={deleteCustomerModal.deleteBookings}
+                    onChange={(e) =>
+                      setDeleteCustomerModal((prev) =>
+                        prev ? { ...prev, deleteBookings: e.target.checked } : null
+                      )
+                    }
+                    className="mt-0.5 rounded border-amber-400 text-red-600 focus:ring-red-500"
+                  />
+                  <span className="text-xs font-bold text-[#26231B] leading-snug">
+                    Also permanently delete all {deleteCustomerModal.totalBookings} booking
+                    {deleteCustomerModal.totalBookings === 1 ? "" : "s"} for this customer
+                  </span>
+                </label>
+                <p className="text-[11px] text-amber-900 leading-relaxed pl-6">
+                  Leave unchecked to remove the customer from the Customers list while keeping past booking &amp; revenue records intact.
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-[#6F6A5A] leading-relaxed">
+                This will permanently remove <b className="text-[#26231B]">{deleteCustomerModal.name}</b> from Firestore and the Admin Customers list.
+              </p>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E7E2D0]">
+              <button
+                type="button"
+                disabled={Boolean(deletingCustomerId)}
+                onClick={() => setDeleteCustomerModal(null)}
+                className="px-4 py-2 rounded-xl border border-[#E7E2D0] text-xs font-bold text-[#26231B] hover:bg-[#F7F5EE] cursor-pointer disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={Boolean(deletingCustomerId)}
+                onClick={handleConfirmDeleteCustomer}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-black transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+              >
+                {deletingCustomerId ? "Deleting..." : "Permanently Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

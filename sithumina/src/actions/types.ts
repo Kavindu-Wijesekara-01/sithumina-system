@@ -1,4 +1,8 @@
-import type { BookingStatusValue } from "@/lib/server-store";
+import type {
+  BookingPaymentMethod,
+  BookingStatusValue,
+  PaymentSlipStatus,
+} from "@/lib/server-store";
 
 export type ActionResult<T = unknown> =
   | { success: true; data: T; message?: string }
@@ -10,12 +14,17 @@ export interface BookingActionInput {
   vehicleType: string;
   date: string;
   dates?: string[];
+  startTime?: string;
+  endTime?: string;
   phone: string;
   customerName?: string;
   weight?: string;
   notes?: string;
   assignedPlate?: string;
   assignedLorryId?: string;
+  assignedDriverId?: string;
+  assignedDriverName?: string;
+  assignedDriverPhone?: string;
   pickupLat?: number;
   pickupLng?: number;
   deliveryLat?: number;
@@ -28,6 +37,9 @@ export interface BookingActionInput {
   status?: BookingStatusValue;
   quotedAmount?: number;
   quoteNote?: string;
+  paymentMethod?: BookingPaymentMethod;
+  paymentSlipStatus?: PaymentSlipStatus;
+  paymentApprovedAt?: number;
 }
 
 export interface VehicleRegistrationActionInput {

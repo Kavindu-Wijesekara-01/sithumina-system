@@ -7,12 +7,43 @@ import {
   upsertBookingInStore,
 } from "@/lib/server-store";
 import { normalizePhoneNumber, phonesMatch } from "@/lib/phone-utils";
+import {
+  cleanRiderName,
+  findBookingScheduleConflict,
+  hasAssignedRider,
+  validateTimeRange,
+} from "@/lib/booking-schedule";
 import { db } from "@/lib/firebase";
 import { collection, getDocs, getDoc, doc, setDoc, updateDoc, query, where } from "firebase/firestore";
 
 function isRealDriverName(val: unknown): string {
   const s = String(val || "").trim();
   return s && s !== "Driver" && s !== "Unassigned" ? s : "";
+}
+
+async function getCombinedBookingsForSchedule() {
+  const byId = new Map<string, any>();
+  for (const b of getAllStoredBookings()) {
+    byId.set(b.id, b);
+  }
+  try {
+    const snap = await getDocs(collection(db, "bookings"));
+    snap.docs.forEach((d) => {
+      const data = d.data();
+      const id = String(data.id || data.trackingId || d.id);
+      const prev = byId.get(id);
+      byId.set(id, {
+        ...(prev || {}),
+        ...data,
+        id,
+        date: data.date || (Array.isArray(data.dates) && data.dates[0]) || prev?.date || "",
+        dates: Array.isArray(data.dates) && data.dates.length > 0 ? data.dates : prev?.dates || (data.date ? [data.date] : []),
+      });
+    });
+  } catch {
+    // Fallback to local store when Firestore is unavailable
+  }
+  return Array.from(byId.values());
 }
 
 export async function GET(request: Request) {
@@ -115,10 +146,13 @@ export async function GET(request: Request) {
         deliveryLng: data.deliveryLng,
         date: resolvedDate,
         dates: resolvedDates,
+        startTime: data.startTime ? String(data.startTime).trim() : "",
+        endTime: data.endTime ? String(data.endTime).trim() : "",
         vehicleType: data.vehicleType || "Lorry",
         packageDetails: data.packageDetails || data.notes || "",
         status: statusVal,
         assignedLorryId: data.assignedLorryId || "",
+        assignedDriverId: data.assignedDriverId ? String(data.assignedDriverId).trim() : "",
         assignedDriverName: cleanDrvName,
         assignedDriverPhone: cleanDrvPhone,
         assignedPlate: rawPlate,
@@ -185,6 +219,67 @@ export async function POST(request: Request) {
       );
     }
 
+    const bookingType = body.bookingType || "individual_vehicle";
+    const status = body.status || "pending";
+    const startTimeRaw = String(body.startTime || "").trim();
+    const endTimeRaw = String(body.endTime || "").trim();
+    const assignedDriverId = String(body.assignedDriverId || "").trim();
+    const assignedDriverName = cleanRiderName(body.assignedDriverName);
+    const assignedDriverPhone = String(body.assignedDriverPhone || "").trim();
+
+    let cleanStartTime = startTimeRaw;
+    let cleanEndTime = endTimeRaw;
+
+    const requiresScheduleValidation =
+      bookingType !== "live_lorry" &&
+      (Boolean(cleanStartTime || cleanEndTime) ||
+        ["accepted", "booked", "assigned", "in_transit"].includes(status));
+
+    if (requiresScheduleValidation) {
+      const timeCheck = validateTimeRange(cleanStartTime, cleanEndTime);
+      if (!timeCheck.valid) {
+        return NextResponse.json({ success: false, error: timeCheck.error }, { status: 400 });
+      }
+      cleanStartTime = timeCheck.startTime;
+      cleanEndTime = timeCheck.endTime;
+
+      if (
+        !hasAssignedRider({
+          assignedDriverId,
+          assignedDriverName,
+          assignedDriverPhone,
+        })
+      ) {
+        return NextResponse.json(
+          { success: false, error: "A Rider must be assigned to this booking." },
+          { status: 400 }
+        );
+      }
+
+      const existing = await getCombinedBookingsForSchedule();
+      const conflict = findBookingScheduleConflict(
+        {
+          date,
+          dates,
+          startTime: cleanStartTime,
+          endTime: cleanEndTime,
+          assignedPlate: body.assignedPlate,
+          assignedLorryId: body.assignedLorryId,
+          assignedDriverId,
+          assignedDriverName,
+          assignedDriverPhone,
+          bookingType,
+        },
+        existing
+      );
+      if (conflict.hasConflict) {
+        return NextResponse.json(
+          { success: false, error: conflict.message || "Schedule conflict detected." },
+          { status: 409 }
+        );
+      }
+    }
+
     const resolvedName = customerName || `Customer (${customerPhone.slice(-4)})`;
     const booking = createBookingInStore({
       customerName: resolvedName,
@@ -197,16 +292,21 @@ export async function POST(request: Request) {
       deliveryLng: body.deliveryLng,
       date,
       dates,
+      startTime: cleanStartTime || undefined,
+      endTime: cleanEndTime || undefined,
       vehicleType,
       packageDetails,
       assignedPlate: body.assignedPlate,
       assignedLorryId: body.assignedLorryId,
-      bookingType: body.bookingType || "individual_vehicle",
+      assignedDriverId: assignedDriverId || undefined,
+      assignedDriverName: assignedDriverName || undefined,
+      assignedDriverPhone: assignedDriverPhone || undefined,
+      bookingType,
       cargoNature: body.cargoNature,
       daysNeeded: body.daysNeeded || (dates ? dates.length : 1),
       cargoWeight: body.cargoWeight || body.weight,
       helpersCount: body.helpersCount,
-      status: body.status || "pending",
+      status,
     });
 
     try {
@@ -242,9 +342,14 @@ export async function PATCH(request: Request) {
       id,
       status,
       assignedLorryId,
+      assignedDriverId,
       assignedDriverName,
       assignedDriverPhone,
       assignedPlate,
+      date,
+      dates,
+      startTime,
+      endTime,
       quotedAmount,
       quoteNote,
       paymentMethod,
@@ -259,17 +364,85 @@ export async function PATCH(request: Request) {
       );
     }
 
-    const validDriverName =
-      typeof assignedDriverName === "string" &&
-      assignedDriverName.trim() !== "" &&
-      assignedDriverName.trim() !== "Driver" &&
-      assignedDriverName.trim() !== "Unassigned"
-        ? assignedDriverName.trim()
+    const validDriverId =
+      typeof assignedDriverId === "string" && assignedDriverId.trim() !== ""
+        ? assignedDriverId.trim()
         : undefined;
+    const validDriverName = cleanRiderName(assignedDriverName) || undefined;
     const validDriverPhone =
       typeof assignedDriverPhone === "string" && assignedDriverPhone.trim() !== ""
         ? assignedDriverPhone.trim()
         : undefined;
+    const cleanDate = typeof date === "string" && date.trim() !== "" ? date.trim() : undefined;
+    const cleanDates = Array.isArray(dates) && dates.length > 0 ? dates : undefined;
+    let cleanStartTime = typeof startTime === "string" && startTime.trim() !== "" ? startTime.trim() : undefined;
+    let cleanEndTime = typeof endTime === "string" && endTime.trim() !== "" ? endTime.trim() : undefined;
+
+    const allStored = await getCombinedBookingsForSchedule();
+    const currentBooking = allStored.find((b) => b.id === id);
+    const isIndividual = (currentBooking?.bookingType || "individual_vehicle") !== "live_lorry";
+
+    if (isIndividual && status !== "cancelled" && status !== "delivered") {
+      const mergedDate = cleanDate || (cleanDates && cleanDates[0]) || currentBooking?.date || "";
+      const mergedDates = cleanDates || (cleanDate ? [cleanDate] : currentBooking?.dates) || (mergedDate ? [mergedDate] : []);
+      const mergedStartTime = cleanStartTime || currentBooking?.startTime || "";
+      const mergedEndTime = cleanEndTime || currentBooking?.endTime || "";
+      const mergedPlate = assignedPlate || currentBooking?.assignedPlate || "";
+      const mergedLorryId = assignedLorryId || currentBooking?.assignedLorryId || "";
+      const mergedDriverId = validDriverId || currentBooking?.assignedDriverId || "";
+      const mergedDriverName = validDriverName || cleanRiderName(currentBooking?.assignedDriverName);
+      const mergedDriverPhone = validDriverPhone || currentBooking?.assignedDriverPhone || "";
+
+      const schedulingActive =
+        Boolean(cleanStartTime || cleanEndTime) ||
+        Boolean(mergedStartTime || mergedEndTime) ||
+        ["accepted", "booked", "assigned", "in_transit"].includes(status);
+
+      if (schedulingActive) {
+        const timeCheck = validateTimeRange(mergedStartTime, mergedEndTime);
+        if (!timeCheck.valid) {
+          return NextResponse.json({ success: false, error: timeCheck.error }, { status: 400 });
+        }
+        cleanStartTime = timeCheck.startTime;
+        cleanEndTime = timeCheck.endTime;
+
+        if (
+          !hasAssignedRider({
+            assignedDriverId: mergedDriverId,
+            assignedDriverName: mergedDriverName,
+            assignedDriverPhone: mergedDriverPhone,
+          })
+        ) {
+          return NextResponse.json(
+            { success: false, error: "A Rider must be assigned to this booking." },
+            { status: 400 }
+          );
+        }
+
+        const conflict = findBookingScheduleConflict(
+          {
+            excludeBookingId: id,
+            date: mergedDate,
+            dates: mergedDates,
+            startTime: cleanStartTime,
+            endTime: cleanEndTime,
+            assignedPlate: mergedPlate,
+            assignedLorryId: mergedLorryId,
+            assignedDriverId: mergedDriverId,
+            assignedDriverName: mergedDriverName,
+            assignedDriverPhone: mergedDriverPhone,
+            bookingType: currentBooking?.bookingType || "individual_vehicle",
+          },
+          allStored
+        );
+        if (conflict.hasConflict) {
+          return NextResponse.json(
+            { success: false, error: conflict.message || "Schedule conflict detected." },
+            { status: 409 }
+          );
+        }
+      }
+    }
 
     const paymentPatch = {
       ...(typeof quotedAmount === "number" ? { quotedAmount, quotedAt: Date.now() } : {}),
@@ -287,9 +460,14 @@ export async function PATCH(request: Request) {
       status,
       {
         assignedLorryId,
+        assignedDriverId: validDriverId,
         assignedDriverName: validDriverName,
         assignedDriverPhone: validDriverPhone,
         assignedPlate,
+        date: cleanDate,
+        dates: cleanDates,
+        startTime: cleanStartTime,
+        endTime: cleanEndTime,
       },
       paymentPatch
     );
@@ -302,9 +480,14 @@ export async function PATCH(request: Request) {
       updatedAt: Date.now(),
     };
     if (assignedLorryId !== undefined && assignedLorryId !== "") updateFields.assignedLorryId = assignedLorryId;
+    if (validDriverId !== undefined) updateFields.assignedDriverId = validDriverId;
     if (validDriverName !== undefined) updateFields.assignedDriverName = validDriverName;
     if (validDriverPhone !== undefined) updateFields.assignedDriverPhone = validDriverPhone;
     if (assignedPlate !== undefined && assignedPlate !== "") updateFields.assignedPlate = assignedPlate;
+    if (cleanDate !== undefined) updateFields.date = cleanDate;
+    if (cleanDates !== undefined) updateFields.dates = cleanDates;
+    if (cleanStartTime !== undefined) updateFields.startTime = cleanStartTime;
+    if (cleanEndTime !== undefined) updateFields.endTime = cleanEndTime;
 
     try {
       const docRef = doc(db, "bookings", id);

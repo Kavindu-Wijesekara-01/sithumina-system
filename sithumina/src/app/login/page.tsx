@@ -7,6 +7,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useLiveLorries } from "@/hooks/useLiveLorries";
 import { StoredBooking, PaymentSlipStatus } from "@/lib/server-store";
 import { phonesMatch, normalizePlate, normalizePhoneNumber } from "@/lib/phone-utils";
+import { formatTimeDurationLabel } from "@/lib/booking-schedule";
 import { db } from "@/lib/firebase";
 import { collection, onSnapshot } from "firebase/firestore";
 import { subscribeFleetVehicles, subscribeAdminDrivers, AdminDriverRecord } from "@/lib/db-services";
@@ -105,6 +106,9 @@ export default function CustomerPortalPage() {
       if (!existing || (b.updatedAt || 0) >= (existing.updatedAt || 0)) {
         merged.set(id, {
           ...b,
+          startTime: b.startTime || existing?.startTime || "",
+          endTime: b.endTime || existing?.endTime || "",
+          assignedDriverId: b.assignedDriverId || existing?.assignedDriverId || "",
           assignedPlate: b.assignedPlate || existing?.assignedPlate || "",
           assignedLorryId: b.assignedLorryId || existing?.assignedLorryId || "",
           assignedDriverName:
@@ -228,10 +232,13 @@ export default function CustomerPortalPage() {
                 deliveryCity: data.deliveryCity || data.destination || "",
                 date: resolvedDate,
                 dates: resolvedDates,
+                startTime: data.startTime ? String(data.startTime).trim() : "",
+                endTime: data.endTime ? String(data.endTime).trim() : "",
                 vehicleType: data.vehicleType || "Lorry",
                 packageDetails: data.packageDetails || data.notes || "",
                 status: data.status || "pending",
                 assignedLorryId: data.assignedLorryId || "",
+                assignedDriverId: data.assignedDriverId ? String(data.assignedDriverId).trim() : "",
                 assignedDriverName: isRealDriverName(data.assignedDriverName),
                 assignedDriverPhone: String(data.assignedDriverPhone || "").trim(),
                 assignedPlate: data.assignedPlate || data.selectedVehiclePlate || "",
@@ -593,7 +600,7 @@ export default function CustomerPortalPage() {
         return (
           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-extrabold bg-[#E6F4EA] text-[#137333] border border-[#CEEAD6]">
             <span className="w-2 h-2 rounded-full bg-[#137333]" />
-            {locale === "en" ? "Driver Assigned" : "රියදුරු වෙන්කර ඇත"}
+            {locale === "en" ? "Rider Assigned" : "රයිඩර් වෙන්කර ඇත"}
           </span>
         );
       case "goods_collected":
@@ -691,12 +698,12 @@ export default function CustomerPortalPage() {
           : "ප්‍රවාහනය සිදුවෙමින් පවතී"
         : isGoodsCollected
           ? locale === "en"
-            ? "📦 Goods Collected by Driver"
-            : "📦 භාණ්ඩය රියදුරු විසින් භාරගෙන ඇත"
+            ? "📦 Goods Collected by Rider"
+            : "📦 භාණ්ඩය රයිඩර් විසින් භාරගෙන ඇත"
           : isDriverAssigned
             ? locale === "en"
-              ? "Payment Approved • Driver Assigned"
-              : "ගෙවීම අනුමතයි • රියදුරු වෙන්කළා"
+              ? "Payment Approved • Rider Assigned"
+              : "ගෙවීම අනුමතයි • රයිඩර් වෙන්කළා"
           : isPaymentDone
             ? isCashManual
               ? locale === "en"
@@ -794,8 +801,8 @@ export default function CustomerPortalPage() {
               ? "Transit"
               : "ගමනේ"
             : locale === "en"
-              ? "Driver"
-              : "රියදුරු",
+              ? "Rider"
+              : "රයිඩර්",
         sub: isDelivered
           ? locale === "en"
             ? "Delivered"
@@ -1595,6 +1602,9 @@ export default function CustomerPortalPage() {
                               <span className="font-mono text-[11px] text-[#5B4300] bg-[var(--y3)] px-2 py-0.5 rounded border border-[var(--y2)]">
                                 {resolvedDates[0]}
                                 {resolvedDates.length > 1 ? ` (+${resolvedDates.length - 1})` : ""}
+                                {b.startTime && b.endTime
+                                  ? ` · ${formatTimeDurationLabel(b.startTime, b.endTime)}`
+                                  : ""}
                               </span>
                             )}
                           </div>
@@ -1701,6 +1711,11 @@ export default function CustomerPortalPage() {
                                       {dStr}
                                     </span>
                                   ))}
+                                  {b.startTime && b.endTime && (
+                                    <span className="font-mono text-[11px] font-extrabold px-2.5 py-0.5 rounded-md bg-emerald-50 text-emerald-900 border border-emerald-200">
+                                      {formatTimeDurationLabel(b.startTime, b.endTime)}
+                                    </span>
+                                  )}
                                   <span className="text-[11px] font-extrabold px-2 py-0.5 rounded-md bg-[var(--y3)] text-[#5B4300] border border-[var(--y2)]">
                                     {dayCount}{" "}
                                     {locale === "en"
@@ -2005,10 +2020,10 @@ export default function CustomerPortalPage() {
                                       </span>
                                     )}
                                     {resolvedDriverName
-                                      ? `${locale === "en" ? "Driver:" : "රියදුරු:"} ${resolvedDriverName}${resolvedPlate ? ` (${resolvedPlate})` : ""}`
+                                      ? `${locale === "en" ? "Rider:" : "රයිඩර්:"} ${resolvedDriverName}${resolvedPlate ? ` (${resolvedPlate})` : ""}`
                                       : locale === "en"
-                                        ? `Vehicle ${resolvedPlate || b.vehicleType} is locked for your selected date(s). Driver contact will appear here once assigned.`
-                                        : `${resolvedPlate || b.vehicleType} වාහනය ඔබ වෙනුවෙන් වෙන්කර අවසන්ය. රියදුරු වෙන් කළ පසු දුරකථන අංකය මෙහි පෙන්වනු ඇත.`}
+                                        ? `Vehicle ${resolvedPlate || b.vehicleType} schedule is confirmed. Rider contact will appear here once assigned.`
+                                        : `${resolvedPlate || b.vehicleType} වාහනය සඳහා වෙන්කිරීම තහවුරුයි. රයිඩර් වෙන් කළ පසු දුරකථන අංකය මෙහි පෙන්වනු ඇත.`}
                                   </p>
                                 </div>
                                 {resolvedDriverPhone && (
@@ -2019,7 +2034,7 @@ export default function CustomerPortalPage() {
                                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                                       <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.63 3.37 2 2 0 0 1 3.6 1h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L7.91 8.6a16 16 0 0 0 6 6l.95-.95a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
                                     </svg>
-                                    {locale === "en" ? "Call Driver" : "රියදුරු අමතන්න"}: {resolvedDriverPhone}
+                                    {locale === "en" ? "Call Rider" : "රයිඩර් අමතන්න"}: {resolvedDriverPhone}
                                   </a>
                                 )}
                               </div>
@@ -2030,7 +2045,7 @@ export default function CustomerPortalPage() {
                                 <div className="min-w-0">
                                   <div className="flex flex-wrap items-center gap-2 mb-1">
                                     <span className="text-[10px] font-black text-emerald-800 uppercase tracking-wide">
-                                      {locale === "en" ? "Assigned Driver & Contact Number" : "වෙන්කළ රියදුරු සහ දුරකථන අංකය"}
+                                      {locale === "en" ? "Assigned Rider & Contact Number" : "වෙන්කළ රයිඩර් සහ දුරකථන අංකය"}
                                     </span>
                                     {isCashManual && (
                                       <span className="px-2 py-0.5 rounded-full bg-white border border-emerald-300 text-emerald-800 text-[10px] font-black">
@@ -2039,7 +2054,7 @@ export default function CustomerPortalPage() {
                                     )}
                                   </div>
                                   <p className="font-extrabold text-emerald-950 text-sm">
-                                    {resolvedDriverName || (locale === "en" ? "Driver Assigned" : "රියදුරු සූදානම්")}{" "}
+                                    {resolvedDriverName || (locale === "en" ? "Rider Assigned" : "රයිඩර් සූදානම්")}{" "}
                                     {resolvedPlate && (
                                       <span className="font-mono text-xs text-emerald-800">
                                         ({resolvedPlate})
@@ -2048,7 +2063,7 @@ export default function CustomerPortalPage() {
                                   </p>
                                   {resolvedDriverPhone ? (
                                     <p className="mt-1 text-xs font-mono font-bold text-emerald-900">
-                                      {locale === "en" ? "Rider Phone:" : "රියදුරු අංකය:"} {resolvedDriverPhone}
+                                      {locale === "en" ? "Rider Phone:" : "රයිඩර් අංකය:"} {resolvedDriverPhone}
                                     </p>
                                   ) : (
                                     <div className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] text-[#856A15] bg-[#FDFBEF] px-2.5 py-1 rounded-lg border border-[#E2D9BC]">
@@ -2056,7 +2071,7 @@ export default function CustomerPortalPage() {
                                       <span className="font-semibold">
                                         {locale === "en"
                                           ? "Rider phone unlocks once payment slip is submitted"
-                                          : "ගෙවීම් රිසිට්පත (Slip) upload කළ පසු රියදුරුගේ අංකය දිස්වේ"}
+                                          : "ගෙවීම් රිසිට්පත (Slip) upload කළ පසු රයිඩර්ගේ අංකය දිස්වේ"}
                                       </span>
                                     </div>
                                   )}
@@ -2071,7 +2086,7 @@ export default function CustomerPortalPage() {
                                       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                                         <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.63 3.37 2 2 0 0 1 3.6 1h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L7.91 8.6a16 16 0 0 0 6 6l.95-.95a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
                                       </svg>
-                                      {locale === "en" ? "Call Driver" : "රියදුරුට ඇමතීම"}
+                                      {locale === "en" ? "Call Rider" : "රයිඩර්ට ඇමතීම"}
                                     </a>
                                   )}
 

@@ -1285,7 +1285,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               {riders.length === 0 ? (
                 <View style={styles.emptyStateCard}>
                   <Text style={styles.emptyLorriesTitle}>No riders registered yet</Text>
-                  <Text style={styles.emptyLorriesSub}>Tap "+ Add Rider" to register a driver</Text>
+                  <Text style={styles.emptyLorriesSub}>Tap "+ Add Rider" to register a rider</Text>
                 </View>
               ) : (
                 riders.map((r, i) => (
@@ -1723,11 +1723,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
 
                 <View style={styles.inspectorGrid}>
                   <View style={styles.inspectorCol}>
-                    <Text style={styles.inspectorMetaLabel}>Driver</Text>
+                    <Text style={styles.inspectorMetaLabel}>Rider</Text>
                     <Text style={styles.inspectorMetaVal}>{selectedLorryObj.driverName}</Text>
                   </View>
                   <View style={styles.inspectorCol}>
-                    <Text style={styles.inspectorMetaLabel}>Driver Phone</Text>
+                    <Text style={styles.inspectorMetaLabel}>Rider Phone</Text>
                     <Text style={styles.inspectorMetaVal}>{selectedLorryObj.driverPhone || "077 234 5678"}</Text>
                   </View>
                   <View style={styles.inspectorCol}>
@@ -1826,7 +1826,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               {lorries.length === 0 ? (
                 <View style={styles.emptyLorriesBox}>
                   <Text style={styles.emptyLorriesTitle}>No active lorries online</Text>
-                  <Text style={styles.emptyLorriesSub}>Lorries appear automatically when drivers broadcast live</Text>
+                  <Text style={styles.emptyLorriesSub}>Lorries appear automatically when riders broadcast live</Text>
                 </View>
               ) : (
                 lorries

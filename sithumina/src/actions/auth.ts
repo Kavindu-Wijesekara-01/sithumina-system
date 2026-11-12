@@ -2,15 +2,17 @@
 
 import {
   upsertCustomerInStore,
+  deleteCustomerFromStore,
+  archiveOrDeleteCustomerBookingsInStore,
   getAllStoredCustomers,
   getAllStoredDrivers,
   StoredCustomer,
   StoredDriver,
 } from "@/lib/server-store";
-import { normalizePhoneNumber, phonesMatch } from "@/lib/phone-utils";
+import { normalizePhoneNumber, phonesMatch, getCanonicalCustomerId } from "@/lib/phone-utils";
 import { ActionResult } from "./types";
 import { db } from "@/lib/firebase";
-import { collection, doc, getDocs, setDoc } from "firebase/firestore";
+import { collection, deleteDoc, doc, getDocs, setDoc, updateDoc } from "firebase/firestore";
 
 /**
  * Server Action for Customer login or instant profile provisioning.
@@ -183,31 +185,236 @@ export async function loginDriverAction(
 }
 
 /**
- * Server Action to get all registered customers.
+ * Server Action to register/save a customer profile cleanly (e.g. from Admin Manual Booking).
+ */
+export async function registerCustomerAction(input: {
+  phone: string;
+  name: string;
+  city?: string;
+  email?: string;
+}): Promise<ActionResult<StoredCustomer>> {
+  try {
+    const rawPhone = String(input.phone || "").trim();
+    const canonicalPhone = normalizePhoneNumber(rawPhone);
+    const digitsOnly = canonicalPhone.replace(/[^0-9]/g, "");
+    if (!canonicalPhone || digitsOnly.length < 9) {
+      return { success: false, error: "Please enter a valid customer mobile number." };
+    }
+
+    const cleanName = String(input.name || "").trim();
+    if (!cleanName || cleanName.length < 2) {
+      return { success: false, error: "Please enter the customer's full name to register." };
+    }
+
+    const customer = upsertCustomerInStore({
+      phone: canonicalPhone,
+      name: cleanName,
+      city: input.city?.trim(),
+      email: input.email?.trim(),
+    });
+
+    try {
+      await setDoc(
+        doc(db, "users", customer.id),
+        {
+          uid: customer.id,
+          phone: customer.phone,
+          name: customer.name,
+          email: customer.email || "",
+          city: customer.city || "",
+          role: "customer",
+          createdAt: customer.createdAt,
+          lastLoginAt: customer.lastLoginAt,
+        },
+        { merge: true }
+      );
+    } catch (cloudErr) {
+      console.warn("Customer Firestore sync notice:", cloudErr);
+    }
+
+    return {
+      success: true,
+      data: customer,
+    };
+  } catch (err: unknown) {
+    console.error("registerCustomerAction error:", err);
+    return {
+      success: false,
+      error: "Failed to register customer.",
+    };
+  }
+}
+
+/**
+ * Server Action for Admin to delete a customer profile (and optionally their bookings).
+ */
+export async function deleteCustomerAction(input: {
+  customerId: string;
+  phone?: string;
+  deleteBookings?: boolean;
+}): Promise<ActionResult<{ deletedUserDocs: number; affectedBookings: number }>> {
+  try {
+    const cleanId = String(input.customerId || "").trim();
+    const cleanPhone = String(input.phone || "").trim();
+    const deleteBookings = Boolean(input.deleteBookings);
+
+    if (!cleanId && !cleanPhone) {
+      return { success: false, error: "Customer ID or phone number is required." };
+    }
+
+    // 1. Remove from local fleet-store.json immediately
+    const removedLocal = deleteCustomerFromStore(cleanId, cleanPhone);
+    let deletedUserDocs = removedLocal ? 1 : 0;
+    let affectedBookings = cleanPhone
+      ? archiveOrDeleteCustomerBookingsInStore(cleanPhone, deleteBookings)
+      : 0;
+
+    // 2. Remove matching customer document(s) from Firestore "users" collection
+    try {
+      const candidateIds = new Set<string>();
+      if (cleanId) candidateIds.add(cleanId);
+      if (cleanPhone) {
+        const canonicalId = getCanonicalCustomerId(cleanPhone);
+        if (canonicalId) candidateIds.add(canonicalId);
+      }
+
+      const usersSnap = await getDocs(collection(db, "users"));
+      const deletedDocIds = new Set<string>();
+
+      for (const userDoc of usersSnap.docs) {
+        const data = userDoc.data();
+        if (data.role === "driver" || data.role === "admin") continue;
+        const docPhone = String(data.phone || "").trim();
+        const matchesId =
+          candidateIds.has(userDoc.id) ||
+          (data.uid && candidateIds.has(String(data.uid)));
+        const matchesPhone = Boolean(cleanPhone && docPhone && phonesMatch(docPhone, cleanPhone));
+
+        if (matchesId || matchesPhone) {
+          await deleteDoc(doc(db, "users", userDoc.id));
+          deletedDocIds.add(userDoc.id);
+          deletedUserDocs += 1;
+        }
+      }
+
+      // Direct delete safeguard if any candidate ID wasn't seen above
+      for (const cid of candidateIds) {
+        if (!deletedDocIds.has(cid) && cid.startsWith("CUST-")) {
+          try {
+            await deleteDoc(doc(db, "users", cid));
+          } catch {
+            // Ignore non-existent IDs
+          }
+        }
+      }
+
+      // 3. Either delete or archive customer directory link on existing bookings
+      if (cleanPhone) {
+        const bookingsSnap = await getDocs(collection(db, "bookings"));
+        const nowTs = Date.now();
+        for (const bDoc of bookingsSnap.docs) {
+          const bData = bDoc.data();
+          const bPhone = String(bData.customerPhone || bData.phone || "").trim();
+          if (!bPhone || !phonesMatch(bPhone, cleanPhone)) continue;
+
+          if (deleteBookings) {
+            await deleteDoc(doc(db, "bookings", bDoc.id));
+          } else {
+            await updateDoc(doc(db, "bookings", bDoc.id), {
+              customerArchived: true,
+              updatedAt: nowTs,
+            });
+          }
+          affectedBookings += 1;
+        }
+      }
+    } catch (cloudErr) {
+      console.warn("Customer Firestore delete sync notice:", cloudErr);
+    }
+
+    return {
+      success: true,
+      data: {
+        deletedUserDocs,
+        affectedBookings,
+      },
+    };
+  } catch (err: unknown) {
+    console.error("deleteCustomerAction error:", err);
+    return {
+      success: false,
+      error: "Failed to delete customer.",
+    };
+  }
+}
+
+/**
+ * Server Action to get all registered customers (merged Firestore + local store).
  */
 export async function getCustomersAction(): Promise<ActionResult<StoredCustomer[]>> {
   try {
+    const localCustomers = getAllStoredCustomers();
+    const byKey = new Map<string, StoredCustomer>();
+
+    const isGeneric = (val?: string) => {
+      const t = String(val || "").trim();
+      return !t || t === "Customer" || t === "Valued Customer" || t.startsWith("Customer (");
+    };
+
+    const mergeEntry = (entry: StoredCustomer) => {
+      const norm = normalizePhoneNumber(entry.phone) || entry.phone.trim();
+      const key = norm || entry.id;
+      if (!key) return;
+      const prev = byKey.get(key);
+      if (!prev) {
+        byKey.set(key, entry);
+        return;
+      }
+      const resolvedName = !isGeneric(entry.name)
+        ? entry.name.trim()
+        : !isGeneric(prev.name)
+        ? prev.name.trim()
+        : entry.name || prev.name;
+      byKey.set(key, {
+        ...prev,
+        ...entry,
+        name: resolvedName,
+        phone: prev.phone || entry.phone,
+        email: entry.email || prev.email || "",
+        city: entry.city || prev.city || "",
+        createdAt:
+          prev.createdAt && entry.createdAt
+            ? Math.min(prev.createdAt, entry.createdAt)
+            : prev.createdAt || entry.createdAt,
+        lastLoginAt: Math.max(prev.lastLoginAt || 0, entry.lastLoginAt || 0),
+      });
+    };
+
+    localCustomers.forEach(mergeEntry);
+
     try {
       const snap = await getDocs(collection(db, "users"));
-      const customers: StoredCustomer[] = snap.docs
-        .map((d) => {
-          const data = d.data();
-          return {
-            id: String(data.uid || d.id),
-            name: String(data.name || "Customer"),
-            phone: String(data.phone || ""),
-            email: data.email || "",
-            city: data.city || "",
-            createdAt: Number(data.createdAt) || 0,
-            lastLoginAt: Number(data.lastLoginAt) || Number(data.createdAt) || 0,
-          };
-        })
-        .sort((a, b) => (b.lastLoginAt || 0) - (a.lastLoginAt || 0));
-      return { success: true, data: customers };
+      snap.docs.forEach((d) => {
+        const data = d.data();
+        if (data.role === "driver" || data.role === "admin") return;
+        mergeEntry({
+          id: String(data.uid || d.id),
+          name: String(data.name || "Customer"),
+          phone: String(data.phone || ""),
+          email: data.email || "",
+          city: data.city || "",
+          createdAt: Number(data.createdAt) || 0,
+          lastLoginAt: Number(data.lastLoginAt) || Number(data.createdAt) || 0,
+        });
+      });
     } catch {
-      const customers = getAllStoredCustomers();
-      return { success: true, data: customers };
+      // Fallback to local store when Firestore is unavailable
     }
+
+    const merged = Array.from(byKey.values()).sort(
+      (a, b) => (b.lastLoginAt || 0) - (a.lastLoginAt || 0)
+    );
+    return { success: true, data: merged };
   } catch (err: unknown) {
     console.error("getCustomersAction error:", err);
     return {
