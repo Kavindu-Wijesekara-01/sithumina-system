@@ -291,6 +291,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
             data.paymentSlipStatus === "approved" ||
             data.paymentSlipStatus === "pending" ||
             data.paymentSlipStatus === "manual_approved" ||
+            data.paymentSlipStatus === "cash_pending" ||
             data.paymentSlipId
           ),
           paymentSlipStatus: data.paymentSlipStatus || "",

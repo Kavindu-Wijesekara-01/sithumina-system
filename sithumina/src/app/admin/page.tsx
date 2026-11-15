@@ -196,6 +196,27 @@ const DURATION_OPTIONS = [
   { value: "7", label: "1 Week (සතියක්)" },
 ];
 
+const BOOKING_STAGES: { key: BookingStatus; label: string }[] = [
+  { key: "pending", label: "1. Pending Review" },
+  { key: "awaiting_payment", label: "2. Awaiting Payment" },
+  { key: "payment_submitted", label: "3. Slip Submitted" },
+  { key: "accepted", label: "4. Payment Approved" },
+  { key: "assigned", label: "5. Rider & Time Assigned" },
+  { key: "in_transit", label: "6. In Transit" },
+  { key: "delivered", label: "7. Delivered / Completed" },
+  { key: "cancelled", label: "8. Cancelled" },
+];
+
+const PROGRESS_KEYS: BookingStatus[] = [
+  "pending",
+  "awaiting_payment",
+  "payment_submitted",
+  "accepted",
+  "assigned",
+  "in_transit",
+  "delivered",
+];
+
 function formatBookingDateTime(ts?: number): { date: string; time: string; display: string } | null {
   if (!ts || !Number.isFinite(ts) || ts <= 0) return null;
   try {
@@ -406,6 +427,14 @@ export default function MasterAdminDashboard() {
     totalBookings: number;
     totalRevenue: number;
     deleteBookings: boolean;
+  } | null>(null);
+
+  // ---- Cash Approval Modal State ----
+  const [cashApprovalModal, setCashApprovalModal] = useState<{
+    booking: StoredBooking;
+    amount: string;
+    note: string;
+    statusMode: "pending" | "success";
   } | null>(null);
 
   const isRealCustomerName = useCallback((raw?: string) => {
@@ -1160,63 +1189,119 @@ export default function MasterAdminDashboard() {
     }
   };
 
-  const handleManualApprovePayment = async (booking: StoredBooking) => {
+  const openCashApprovalModal = (booking: StoredBooking) => {
     const entry = quoteInputs[booking.id];
-    const draftAmount = Number(String(entry?.amount || "").replace(/[^0-9.]/g, ""));
-    const finalAmount =
-      draftAmount > 0
-        ? draftAmount
-        : booking.quotedAmount !== undefined && booking.quotedAmount > 0
-        ? booking.quotedAmount
-        : undefined;
-    const hasSlip = Boolean(booking.paymentSlipId && booking.paymentSlipStatus !== "deleted");
-    if (!hasSlip && (!finalAmount || finalAmount <= 0)) {
-      showToast("Please enter the Rs. amount first to manually approve cash payment.", "error");
+    const defaultAmount =
+      entry?.amount || (booking.quotedAmount ? String(booking.quotedAmount) : "");
+    const defaultNote =
+      entry?.note || booking.quoteNote || "";
+    setCashApprovalModal({
+      booking,
+      amount: defaultAmount,
+      note: defaultNote,
+      statusMode: "pending",
+    });
+  };
+
+  const handleConfirmCashApproval = async () => {
+    if (!cashApprovalModal) return;
+    const { booking, amount, note, statusMode } = cashApprovalModal;
+    const numAmount = Number(String(amount || "").replace(/[^0-9.]/g, ""));
+    if (!numAmount || numAmount <= 0) {
+      showToast("Please enter a valid Amount (LKR) greater than 0.", "error");
       return;
     }
 
     let scheduleAssignment: Parameters<typeof updateBookingStatusAction>[2] | undefined;
+    let targetStatus: BookingStatus = "accepted";
     if (booking.bookingType !== "live_lorry") {
       const draft = getScheduleDraft(booking);
-      const check = validateIndividualScheduleOrToast(booking.id, draft);
-      if (!check.valid) return;
-      scheduleAssignment = check.assignment;
+      const hasFullSchedule = Boolean(
+        draft.date &&
+        draft.startTime &&
+        draft.endTime &&
+        draft.plate &&
+        hasAssignedRider({
+          assignedDriverId: draft.driverId,
+          assignedDriverName: draft.driverName,
+          assignedDriverPhone: draft.driverPhone,
+        })
+      );
+      if (hasFullSchedule) {
+        const check = validateIndividualScheduleOrToast(booking.id, draft);
+        if (!check.valid) return;
+        scheduleAssignment = check.assignment;
+        targetStatus = "assigned";
+      } else {
+        targetStatus = "accepted";
+      }
+    } else {
+      targetStatus = "accepted";
     }
 
-    const draftNote = (entry?.note || "").trim();
-    const resolvedNote =
-      draftNote ||
-      booking.quoteNote ||
-      (hasSlip ? "" : "Cash / Direct payment approved manually by Head Office");
+    const isSuccess = statusMode === "success";
 
-    const targetStatus: BookingStatus =
-      booking.bookingType !== "live_lorry" ? "assigned" : "accepted";
     const ok = await updateBooking(booking.id, targetStatus, scheduleAssignment, {
-      ...(finalAmount !== undefined
-        ? { quotedAmount: finalAmount, quotedAt: booking.quotedAt || Date.now() }
-        : {}),
-      ...(resolvedNote ? { quoteNote: resolvedNote } : {}),
-      paymentMethod: hasSlip ? "bank_slip" : "cash_manual",
-      paymentSlipStatus: hasSlip ? "approved" : "manual_approved",
-      paymentApprovedAt: Date.now(),
+      quotedAmount: numAmount,
+      quotedAt: booking.quotedAt || Date.now(),
+      quoteNote: note.trim() || (isSuccess ? "Cash paid in full" : "Cash pending / pay later"),
+      paymentMethod: "cash_manual",
+      paymentSlipStatus: isSuccess ? "manual_approved" : "cash_pending",
+      paymentApprovedAt: isSuccess ? Date.now() : 0,
       paymentRejectReason: "",
     });
+
     if (ok) {
       setEditingQuoteId(null);
       setManualStageDraft((prev) => ({ ...prev, [booking.id]: targetStatus }));
+      setCashApprovalModal(null);
+      showToast(
+        isSuccess
+          ? `Cash payment of Rs. ${numAmount.toLocaleString()} approved and marked as Paid (Success)!`
+          : `Booking approved as Cash Pending (Rs. ${numAmount.toLocaleString()}). Mark as Paid once collected.`,
+        "success"
+      );
     }
   };
 
-  const handleManualProgressUpdate = async (booking: StoredBooking) => {
-    const targetStatus = manualStageDraft[booking.id] || booking.status;
-    if (targetStatus === booking.status) {
-      showToast("Select a different progress stage to update.", "error");
+  const handleMarkCashAsPaid = async (booking: StoredBooking) => {
+    const amt = booking.quotedAmount || 0;
+    const ok = await updateBooking(booking.id, booking.status, undefined, {
+      paymentMethod: "cash_manual",
+      paymentSlipStatus: "manual_approved",
+      paymentApprovedAt: Date.now(),
+    });
+    if (ok) {
+      showToast(`Cash payment of Rs. ${amt.toLocaleString()} marked as Success! Added to Revenue.`, "success");
+    }
+  };
+
+  const handleMarkCashAsPending = async (booking: StoredBooking) => {
+    const ok = await updateBooking(booking.id, booking.status, undefined, {
+      paymentMethod: "cash_manual",
+      paymentSlipStatus: "cash_pending",
+      paymentApprovedAt: 0,
+    });
+    if (ok) {
+      showToast(`Payment status reverted to Cash Pending. Removed from Revenue.`, "success");
+    }
+  };
+
+  const handleManualApprovePayment = async (booking: StoredBooking) => {
+    openCashApprovalModal(booking);
+  };
+
+  const handleStageClickboxSelect = async (booking: StoredBooking, targetStatus: BookingStatus) => {
+    const currentStatus = booking.status === "booked" ? "accepted" : booking.status;
+    if (targetStatus === currentStatus) {
       return;
     }
 
     if (targetStatus === "accepted") {
-      await handleManualApprovePayment(booking);
-      return;
+      if (!booking.paymentApprovedAt && booking.paymentSlipStatus !== "manual_approved" && booking.paymentSlipStatus !== "cash_pending") {
+        openCashApprovalModal(booking);
+        return;
+      }
     }
 
     if (targetStatus === "awaiting_payment") {
@@ -1233,12 +1318,16 @@ export default function MasterAdminDashboard() {
         showToast("Please enter a valid Amount (LKR) first.", "error");
         return;
       }
-      await updateBooking(booking.id, "awaiting_payment", undefined, {
+      const ok = await updateBooking(booking.id, "awaiting_payment", undefined, {
         quotedAmount: validAmount,
         quotedAt: Date.now(),
         quoteNote: (entry?.note ?? booking.quoteNote ?? "").trim(),
       });
-      setEditingQuoteId(null);
+      if (ok) {
+        setEditingQuoteId(null);
+        setManualStageDraft((prev) => ({ ...prev, [booking.id]: "awaiting_payment" }));
+        showToast("Stage updated to: 2. Awaiting Payment", "success");
+      }
       return;
     }
 
@@ -1246,15 +1335,14 @@ export default function MasterAdminDashboard() {
       if (booking.bookingType !== "live_lorry") {
         const draft = getScheduleDraft(booking);
         const check = validateIndividualScheduleOrToast(booking.id, draft);
-        if (!check.valid) {
-          return;
-        }
+        if (!check.valid) return;
         const hasSlip = Boolean(booking.paymentSlipId && booking.paymentSlipStatus !== "deleted");
-        await updateBooking(
+        const shouldAutoApprove = !booking.paymentApprovedAt && booking.paymentSlipStatus !== "cash_pending";
+        const ok = await updateBooking(
           booking.id,
           "assigned",
           check.assignment,
-          !booking.paymentApprovedAt
+          shouldAutoApprove
             ? {
                 paymentMethod: hasSlip ? "bank_slip" : "cash_manual",
                 paymentSlipStatus: hasSlip ? "approved" : "manual_approved",
@@ -1262,6 +1350,10 @@ export default function MasterAdminDashboard() {
               }
             : undefined
         );
+        if (ok) {
+          setManualStageDraft((prev) => ({ ...prev, [booking.id]: "assigned" }));
+          showToast("Stage updated to: 5. Rider & Time Assigned", "success");
+        }
         return;
       }
       const hasRealDriver =
@@ -1272,7 +1364,8 @@ export default function MasterAdminDashboard() {
         return;
       }
       const hasSlip = Boolean(booking.paymentSlipId && booking.paymentSlipStatus !== "deleted");
-      await updateBooking(
+      const shouldAutoApprove = !booking.paymentApprovedAt && booking.paymentSlipStatus !== "cash_pending";
+      const ok = await updateBooking(
         booking.id,
         "assigned",
         {
@@ -1281,7 +1374,7 @@ export default function MasterAdminDashboard() {
           assignedDriverPhone: booking.assignedDriverPhone,
           assignedPlate: booking.assignedPlate,
         },
-        !booking.paymentApprovedAt
+        shouldAutoApprove
           ? {
               paymentMethod: hasSlip ? "bank_slip" : "cash_manual",
               paymentSlipStatus: hasSlip ? "approved" : "manual_approved",
@@ -1289,6 +1382,10 @@ export default function MasterAdminDashboard() {
             }
           : undefined
       );
+      if (ok) {
+        setManualStageDraft((prev) => ({ ...prev, [booking.id]: "assigned" }));
+        showToast("Stage updated to: 5. Rider & Time Assigned", "success");
+      }
       return;
     }
 
@@ -1301,11 +1398,12 @@ export default function MasterAdminDashboard() {
         scheduleAssignment = check.assignment;
       }
       const hasSlip = Boolean(booking.paymentSlipId && booking.paymentSlipStatus !== "deleted");
-      await updateBooking(
+      const shouldAutoApprove = !booking.paymentApprovedAt && booking.paymentSlipStatus !== "cash_pending";
+      const ok = await updateBooking(
         booking.id,
         targetStatus,
         scheduleAssignment,
-        !booking.paymentApprovedAt
+        shouldAutoApprove
           ? {
               paymentMethod: hasSlip ? "bank_slip" : "cash_manual",
               paymentSlipStatus: hasSlip ? "approved" : "manual_approved",
@@ -1313,12 +1411,29 @@ export default function MasterAdminDashboard() {
             }
           : undefined
       );
+      if (ok) {
+        setManualStageDraft((prev) => ({ ...prev, [booking.id]: targetStatus }));
+        const lbl = BOOKING_STAGES.find((s) => s.key === targetStatus)?.label || targetStatus;
+        showToast(`Stage updated to: ${lbl}`, "success");
+      }
+      return;
+    }
+
+    if (targetStatus === "cancelled") {
+      if (!window.confirm("Are you sure you want to cancel this booking and release its time slot?")) {
+        return;
+      }
+      const ok = await updateBooking(booking.id, "cancelled");
+      if (ok) {
+        setManualStageDraft((prev) => ({ ...prev, [booking.id]: "cancelled" }));
+        showToast("Booking cancelled and time slot released.", "success");
+      }
       return;
     }
 
     if (targetStatus === "pending") {
       const hasSlip = Boolean(booking.paymentSlipId && booking.paymentSlipStatus !== "deleted");
-      await updateBooking(
+      const ok = await updateBooking(
         booking.id,
         "pending",
         undefined,
@@ -1326,10 +1441,24 @@ export default function MasterAdminDashboard() {
           ? { paymentApprovedAt: 0, paymentSlipStatus: "none" }
           : { paymentApprovedAt: 0 }
       );
+      if (ok) {
+        setManualStageDraft((prev) => ({ ...prev, [booking.id]: "pending" }));
+        showToast("Stage reset to: 1. Pending Review", "success");
+      }
       return;
     }
 
-    await updateBooking(booking.id, targetStatus);
+    const ok = await updateBooking(booking.id, targetStatus);
+    if (ok) {
+      setManualStageDraft((prev) => ({ ...prev, [booking.id]: targetStatus }));
+      const lbl = BOOKING_STAGES.find((s) => s.key === targetStatus)?.label || targetStatus;
+      showToast(`Stage updated to: ${lbl}`, "success");
+    }
+  };
+
+  const handleManualProgressUpdate = async (booking: StoredBooking) => {
+    const targetStatus = manualStageDraft[booking.id] || booking.status;
+    await handleStageClickboxSelect(booking, targetStatus);
   };
 
   const handleRejectSlipRequestReupload = async (booking: StoredBooking, reason: string) => {
@@ -1438,11 +1567,12 @@ export default function MasterAdminDashboard() {
       if (!check.valid) return;
 
       const hasSlip = Boolean(b.paymentSlipId && b.paymentSlipStatus !== "deleted");
+      const shouldAutoApprove = !b.paymentApprovedAt && b.paymentSlipStatus !== "cash_pending";
       const ok = await updateBooking(
         b.id,
         "assigned",
         check.assignment,
-        !b.paymentApprovedAt
+        shouldAutoApprove
           ? {
               paymentMethod: hasSlip ? "bank_slip" : "cash_manual",
               paymentSlipStatus: hasSlip ? "approved" : "manual_approved",
@@ -1471,6 +1601,7 @@ export default function MasterAdminDashboard() {
     }
 
     const hasSlip = Boolean(b.paymentSlipId && b.paymentSlipStatus !== "deleted");
+    const shouldAutoApprove = !b.paymentApprovedAt && b.paymentSlipStatus !== "cash_pending";
     const ok = await updateBooking(
       b.id,
       "assigned",
@@ -1481,7 +1612,7 @@ export default function MasterAdminDashboard() {
         assignedDriverPhone: assignModal.driverPhone,
         assignedPlate: assignModal.plate,
       },
-      !b.paymentApprovedAt
+      shouldAutoApprove
         ? {
             paymentMethod: hasSlip ? "bank_slip" : "cash_manual",
             paymentSlipStatus: hasSlip ? "approved" : "manual_approved",
@@ -2278,6 +2409,8 @@ export default function MasterAdminDashboard() {
       if (b.status === "cancelled") return false;
       const amt = Number(b.quotedAmount || 0);
       if (amt <= 0) return false;
+      if (b.paymentSlipStatus === "cash_pending") return false;
+      if (b.paymentMethod === "cash_manual" && (!b.paymentApprovedAt || b.paymentApprovedAt <= 0)) return false;
       if (b.paymentApprovedAt && b.paymentApprovedAt > 0) return true;
       if (b.paymentSlipStatus === "approved" || (b.paymentSlipStatus as string) === "manual_approved") return true;
       if (["accepted", "booked", "assigned", "goods_collected", "in_transit", "delivered"].includes(b.status)) {
@@ -2631,6 +2764,8 @@ export default function MasterAdminDashboard() {
         const amt = Number(b.quotedAmount) || 0;
         const isRevenueContributing =
           amt > 0 &&
+          b.paymentSlipStatus !== "cash_pending" &&
+          !(b.paymentMethod === "cash_manual" && (!b.paymentApprovedAt || b.paymentApprovedAt <= 0)) &&
           (b.status === "delivered" ||
             b.paymentSlipStatus === "approved" ||
             b.paymentSlipStatus === "manual_approved" ||
@@ -2750,7 +2885,7 @@ export default function MasterAdminDashboard() {
         label: "Awaiting Payment",
       },
       payment_submitted: {
-        cls: "bg-gray-900 text-white border-gray-900",
+        cls: "bg-blue-50 text-blue-900 border-blue-300",
         label: "Slip Review",
       },
       accepted: {
@@ -3683,7 +3818,13 @@ export default function MasterAdminDashboard() {
                         (b.paymentSlipType || "").toLowerCase().includes("pdf") ||
                         (b.paymentSlipName || "").toLowerCase().endsWith(".pdf");
                       const isCashManual =
-                        b.paymentMethod === "cash_manual" || b.paymentSlipStatus === "manual_approved";
+                        b.paymentMethod === "cash_manual" ||
+                        b.paymentSlipStatus === "manual_approved" ||
+                        b.paymentSlipStatus === "cash_pending";
+                      const isCashPending = b.paymentSlipStatus === "cash_pending";
+                      const isCashPaid =
+                        b.paymentSlipStatus === "manual_approved" ||
+                        (b.paymentMethod === "cash_manual" && Boolean(b.paymentApprovedAt && b.paymentApprovedAt > 0));
                       const isPaymentLocked = [
                         "accepted",
                         "booked",
@@ -3723,9 +3864,9 @@ export default function MasterAdminDashboard() {
                       return (
                         <div
                           key={b.id}
-                          className="rounded-lg bg-white border border-gray-300 overflow-hidden"
+                          className="rounded-lg bg-white border border-gray-300 overflow-hidden shadow-xs"
                         >
-                          {/* Accordion Header */}
+                          {/* Dark Booking Header Bar */}
                           <button
                             type="button"
                             onClick={() => toggleIndividualBookingCard(b.id, isExpanded)}
@@ -3733,97 +3874,104 @@ export default function MasterAdminDashboard() {
                             aria-label={`${
                               isExpanded ? "Minimize booking details" : "Open booking details"
                             } for ${b.id}`}
-                            className="w-full text-left border-0 bg-white px-4 py-4 sm:px-5 hover:bg-gray-50 cursor-pointer"
+                            className="w-full text-left border-0 bg-gray-900 text-white px-4 py-3 sm:px-5 hover:bg-gray-800 transition-colors cursor-pointer flex flex-wrap items-center justify-between gap-3"
                           >
-                            <div className="flex flex-wrap items-center justify-between gap-3">
-                              <div className="flex flex-wrap items-center gap-2.5">
-                                <span className="font-mono text-sm font-bold px-2.5 py-0.5 rounded bg-gray-100 border border-gray-300 text-gray-900">
-                                  {b.id}
+                            <div className="flex flex-wrap items-center gap-2.5">
+                              <span className="font-mono text-sm font-bold px-2.5 py-0.5 rounded bg-white/10 border border-white/20 text-white">
+                                {b.id}
+                              </span>
+                              <span className="text-base font-bold text-white">
+                                {b.customerName}
+                              </span>
+                              {b.customerPhone && (
+                                <span className="text-sm font-mono text-gray-300">
+                                  ({b.customerPhone})
                                 </span>
-                                <span className="text-base font-bold text-gray-900">
-                                  {b.customerName}
-                                </span>
-                                {b.customerPhone && (
-                                  <span className="text-sm font-mono text-gray-700">
-                                    ({b.customerPhone})
-                                  </span>
-                                )}
-                              </div>
-
-                              <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-                                {b.quotedAmount !== undefined && (
-                                  <span className="text-sm font-mono font-bold text-gray-900">
-                                    Rs. {b.quotedAmount.toLocaleString()}
-                                  </span>
-                                )}
-                                {isCashManual && isPaymentLocked && (
-                                  <span className="text-xs font-semibold text-green-800 bg-green-50 border border-green-300 px-2.5 py-1 rounded-md">
-                                    Cash Paid
-                                  </span>
-                                )}
-                                <StatusBadge status={b.status} />
-                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-gray-300 bg-white text-xs font-semibold text-gray-800">
-                                  {isExpanded ? "Hide" : "Show Details"}
-                                  <svg
-                                    width="14"
-                                    height="14"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth="2.2"
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                    className={isExpanded ? "rotate-180" : "rotate-0"}
-                                  >
-                                    <polyline points="6 9 12 15 18 9" />
-                                  </svg>
-                                </span>
-                              </div>
+                              )}
                             </div>
 
-                            {/* Clean 4-column Scannable Summary Row */}
-                            <div className="mt-3 pt-3 border-t border-gray-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
-                              <div>
-                                <div className="text-xs font-medium text-gray-500">Route</div>
-                                <div className="font-semibold text-gray-900 mt-0.5">
-                                  {b.pickupCity} → {b.deliveryCity}
-                                </div>
-                              </div>
-                              <div>
-                                <div className="text-xs font-medium text-gray-500">Trip Date &amp; Time</div>
-                                <div className="text-gray-900 mt-0.5">
-                                  <span className="font-medium">{bookedDatesDisplay}</span>
-                                  {" · "}
-                                  {b.startTime && b.endTime ? (
-                                    <span className="font-semibold text-gray-900">
-                                      {formatTimeDurationLabel(b.startTime, b.endTime)}
-                                    </span>
-                                  ) : (
-                                    <span className="text-amber-800 font-medium">Time not set</span>
-                                  )}
-                                </div>
-                              </div>
-                              <div>
-                                <div className="text-xs font-medium text-gray-500">Lorry &amp; Rider</div>
-                                <div className="text-gray-900 mt-0.5">
-                                  <span className="font-medium">
-                                    {b.assignedPlate || "No Lorry"} ({b.vehicleType})
+                            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                              {b.quotedAmount !== undefined && (
+                                <span className="text-sm font-mono font-bold text-amber-400">
+                                  Rs. {b.quotedAmount.toLocaleString()}
+                                </span>
+                              )}
+                              {isCashManual && (
+                                isCashPending ? (
+                                  <span className="text-xs font-semibold text-amber-200 bg-amber-950/80 border border-amber-600/70 px-2.5 py-1 rounded-md">
+                                    Cash Pending
                                   </span>
-                                  {b.assignedDriverName ? ` · ${b.assignedDriverName}` : " · No rider"}
-                                </div>
-                              </div>
-                              <div>
-                                <div className="text-xs font-medium text-gray-500">Requested On</div>
-                                <div className="text-gray-900 mt-0.5">
-                                  {requestTiming ? requestTiming.display : "Not recorded"}
-                                </div>
-                              </div>
+                                ) : isCashPaid ? (
+                                  <span className="text-xs font-semibold text-emerald-200 bg-emerald-950/80 border border-emerald-600/70 px-2.5 py-1 rounded-md">
+                                    Cash Paid
+                                  </span>
+                                ) : null
+                              )}
+                              <StatusBadge status={b.status} />
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-white/20 bg-white/10 text-xs font-semibold text-white hover:bg-white/20 transition-colors">
+                                {isExpanded ? "Hide" : "Show Details"}
+                                <svg
+                                  width="14"
+                                  height="14"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2.2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  className={isExpanded ? "rotate-180" : "rotate-0"}
+                                >
+                                  <polyline points="6 9 12 15 18 9" />
+                                </svg>
+                              </span>
                             </div>
                           </button>
 
+                          {/* Clean 4-column Scannable Summary Row */}
+                          <div
+                            onClick={() => toggleIndividualBookingCard(b.id, isExpanded)}
+                            className="bg-gray-50/80 px-4 py-3 sm:px-5 border-b border-gray-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm cursor-pointer hover:bg-gray-100/60 transition-colors"
+                          >
+                            <div>
+                              <div className="text-xs font-medium text-gray-500">Route</div>
+                              <div className="font-semibold text-gray-900 mt-0.5">
+                                {b.pickupCity} → {b.deliveryCity}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-xs font-medium text-gray-500">Trip Date &amp; Time</div>
+                              <div className="text-gray-900 mt-0.5">
+                                <span className="font-medium">{bookedDatesDisplay}</span>
+                                {" · "}
+                                {b.startTime && b.endTime ? (
+                                  <span className="font-semibold text-gray-900">
+                                    {formatTimeDurationLabel(b.startTime, b.endTime)}
+                                  </span>
+                                ) : (
+                                  <span className="text-amber-800 font-medium">Time not set</span>
+                                )}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-xs font-medium text-gray-500">Lorry &amp; Rider</div>
+                              <div className="text-gray-900 mt-0.5">
+                                <span className="font-medium">
+                                  {b.assignedPlate || "No Lorry"} ({b.vehicleType})
+                                </span>
+                                {b.assignedDriverName ? ` · ${b.assignedDriverName}` : " · No rider"}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-xs font-medium text-gray-500">Requested On</div>
+                              <div className="text-gray-900 mt-0.5">
+                                {requestTiming ? requestTiming.display : "Not recorded"}
+                              </div>
+                            </div>
+                          </div>
+
                           {/* Collapsible Bottom Booking Details & Actions */}
                           {isExpanded && (
-                            <div className="border-t border-gray-300 divide-y divide-gray-200">
+                            <div className="divide-y divide-gray-200">
                               {/* Customer & Trip Summary Table Layout */}
                               <div className="px-4 py-4 sm:px-5 grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
                                 <div>
@@ -4189,7 +4337,7 @@ export default function MasterAdminDashboard() {
                                         <button
                                           type="button"
                                           disabled={actionLoading === b.id}
-                                          onClick={() => handleManualApprovePayment(b)}
+                                          onClick={() => openCashApprovalModal(b)}
                                           className="px-4 py-2.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 text-sm font-semibold cursor-pointer disabled:opacity-50"
                                         >
                                           Manual Approve (Cash)
@@ -4233,7 +4381,7 @@ export default function MasterAdminDashboard() {
                                         <button
                                           type="button"
                                           disabled={actionLoading === b.id}
-                                          onClick={() => handleManualApprovePayment(b)}
+                                          onClick={() => openCashApprovalModal(b)}
                                           className="px-4 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer disabled:opacity-50"
                                         >
                                           Manual Approve (Cash)
@@ -4243,14 +4391,77 @@ export default function MasterAdminDashboard() {
                                   )}
 
                                   {isPaymentLocked && isCashManual && !hasStoredSlip && !b.paymentSlipDeletedAt && (
-                                    <div className="px-4 py-3 rounded-md bg-green-50 border border-green-300 text-sm text-green-900">
-                                      <span className="font-semibold block">
-                                        Cash / Direct payment approved manually · Schedule active
-                                      </span>
-                                      {b.quoteNote && (
-                                        <span className="text-sm">Note: {b.quoteNote}</span>
-                                      )}
-                                    </div>
+                                    isCashPending ? (
+                                      <div className="px-4 py-3.5 rounded-lg bg-amber-50 border border-amber-300 text-sm text-amber-900">
+                                        <div className="flex flex-wrap items-center justify-between gap-3">
+                                          <div>
+                                            <span className="font-bold flex items-center gap-1.5 text-amber-900">
+                                              <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></span>
+                                              Cash Payment Pending (පසුගෙවීම් · Pay Later)
+                                            </span>
+                                            <p className="text-xs text-amber-800 mt-0.5">
+                                              Quoted: <span className="font-bold">Rs. {(b.quotedAmount || 0).toLocaleString()}</span>
+                                              {b.quoteNote && ` · Note: ${b.quoteNote}`}
+                                              {" · "}
+                                              <span className="font-medium text-amber-950">
+                                                Trip slot is active, but revenue is NOT counted until payment is marked as Success.
+                                              </span>
+                                            </p>
+                                          </div>
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <button
+                                              type="button"
+                                              disabled={actionLoading === b.id}
+                                              onClick={() => handleMarkCashAsPaid(b)}
+                                              className="px-3.5 py-2 rounded-md bg-green-700 hover:bg-green-800 text-white text-xs font-semibold cursor-pointer shadow-sm transition-all"
+                                              title="Mark cash as paid in full to count into revenue"
+                                            >
+                                              ✓ Mark Cash as Paid (Success)
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setQuoteInputs((prev) => ({
+                                                  ...prev,
+                                                  [b.id]: {
+                                                    amount: b.quotedAmount ? String(b.quotedAmount) : "",
+                                                    note: b.quoteNote || "",
+                                                  },
+                                                }));
+                                                setEditingQuoteId(b.id);
+                                              }}
+                                              className="px-3 py-2 rounded-md border border-amber-300 bg-white hover:bg-amber-100 text-amber-950 text-xs font-medium cursor-pointer"
+                                            >
+                                              Edit Amount / Note
+                                            </button>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div className="px-4 py-3 rounded-md bg-green-50 border border-green-300 text-sm text-green-900">
+                                        <div className="flex flex-wrap items-center justify-between gap-3">
+                                          <div>
+                                            <span className="font-semibold block">
+                                              Cash / Direct payment approved manually · Schedule active
+                                            </span>
+                                            <span className="text-xs text-green-800 mt-0.5 block">
+                                              Amount: <span className="font-bold">Rs. {(b.quotedAmount || 0).toLocaleString()}</span>
+                                              {b.quoteNote && ` · Note: ${b.quoteNote}`}
+                                              {" · Added to Today's Revenue."}
+                                            </span>
+                                          </div>
+                                          <button
+                                            type="button"
+                                            disabled={actionLoading === b.id}
+                                            onClick={() => handleMarkCashAsPending(b)}
+                                            className="px-3 py-1.5 rounded-md border border-green-300 bg-white hover:bg-green-100 text-green-900 text-xs font-medium cursor-pointer"
+                                            title="Change back to pending if cash not received"
+                                          >
+                                            Change to Pending
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )
                                   )}
 
                                   {(hasStoredSlip || (b.paymentSlipDeletedAt && b.paymentSlipStatus === "deleted")) && (
@@ -4314,43 +4525,124 @@ export default function MasterAdminDashboard() {
                               )}
 
                               {/* Footer Stage Override & Actions */}
-                              <div className="px-4 py-3.5 sm:px-5 bg-gray-50 flex flex-wrap items-center justify-between gap-3 text-sm">
-                                <div className="flex flex-wrap items-center gap-2.5">
-                                  <label htmlFor={`stage-${b.id}`} className="text-sm font-medium text-gray-700">
-                                    Stage:
-                                  </label>
-                                  <select
-                                    id={`stage-${b.id}`}
-                                    aria-label={`Manual progress stage for ${b.id}`}
-                                    value={selectedManualStage}
-                                    onChange={(e) =>
-                                      setManualStageDraft((prev) => ({
-                                        ...prev,
-                                        [b.id]: e.target.value as BookingStatus,
-                                      }))
-                                    }
-                                    className="min-w-[230px] px-3 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
-                                  >
-                                    <option value="pending">1. Pending Review</option>
-                                    <option value="awaiting_payment">2. Awaiting Payment</option>
-                                    <option value="payment_submitted">3. Slip Submitted — Review</option>
-                                    <option value="accepted">4. Payment Approved (Slot Allocated)</option>
-                                    <option value="assigned">5. Rider &amp; Time Assigned</option>
-                                    <option value="in_transit">6. In Transit</option>
-                                    <option value="delivered">7. Delivered / Completed</option>
-                                    <option value="cancelled">8. Cancelled (Release Time Slot)</option>
-                                  </select>
-                                  <button
-                                    type="button"
-                                    disabled={actionLoading === b.id || selectedManualStage === (b.status === "booked" ? "accepted" : b.status)}
-                                    onClick={() => handleManualProgressUpdate(b)}
-                                    className="px-3.5 py-2 rounded-md border border-gray-300 bg-white hover:bg-gray-100 text-gray-900 text-sm font-medium cursor-pointer disabled:opacity-40"
-                                  >
-                                    Update Stage
-                                  </button>
-                                </div>
+                              <div className="px-4 py-4 sm:px-5 bg-gray-50 flex flex-col gap-3 text-sm">
+                                {/* 8-Stage Clickboxes (Progress Stepper) */}
+                                {(() => {
+                                  const currentStatus = (b.status === "booked" ? "accepted" : b.status) as BookingStatus;
+                                  const currentProgressIdx = PROGRESS_KEYS.indexOf(currentStatus);
+                                  const isBookingCancelled = currentStatus === "cancelled";
 
-                                <div className="flex flex-wrap items-center gap-2">
+                                  const isCashPending = b.paymentSlipStatus === "cash_pending";
+                                  const isPaymentApproved =
+                                    !isCashPending &&
+                                    (b.paymentSlipStatus === "manual_approved" ||
+                                     b.paymentSlipStatus === "approved" ||
+                                     Boolean(b.paymentApprovedAt && b.paymentApprovedAt > 0));
+                                  const isPaymentPending = isCashPending || !isPaymentApproved;
+                                  const isPaymentPendingWarning = isPaymentPending && (currentProgressIdx >= 3 || isCashPending);
+
+                                  return (
+                                    <div className="w-full">
+                                      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                                        <span className="text-xs font-bold text-gray-700 uppercase tracking-wider">
+                                          Stage Selection (ක්ලික් කර වෙනස් කරන්න):
+                                        </span>
+                                        <div className="flex items-center gap-2">
+                                          {isPaymentPendingWarning && (
+                                            <span className="text-[11px] font-semibold text-orange-800 bg-orange-100 border border-orange-300 px-2 py-0.5 rounded-md">
+                                              Payment Pending
+                                            </span>
+                                          )}
+                                          <span className="text-xs text-gray-500 font-medium">
+                                            Current: <strong className="text-gray-900">{BOOKING_STAGES.find((s) => s.key === currentStatus)?.label || b.status}</strong>
+                                          </span>
+                                        </div>
+                                      </div>
+                                      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+                                        {BOOKING_STAGES.map((st) => {
+                                          const isCancelledStage = st.key === "cancelled";
+                                          const stageProgressIdx = PROGRESS_KEYS.indexOf(st.key);
+                                          const isCurrent = currentStatus === st.key;
+
+                                          // Reached in progress: all stages at or before the current stage
+                                          const isReached =
+                                            !isBookingCancelled &&
+                                            stageProgressIdx !== -1 &&
+                                            currentProgressIdx !== -1 &&
+                                            stageProgressIdx <= currentProgressIdx;
+
+                                          // Stage 4 ("Payment Approved") turns orange ONLY if payment is pending
+                                          const isPaymentStage = st.key === "accepted";
+                                          const isOrangePending =
+                                            isPaymentStage &&
+                                            isPaymentPending &&
+                                            (isReached || isCashPending);
+
+                                          let btnClass = "bg-white text-gray-700 border-gray-300 hover:border-gray-900 hover:bg-gray-50";
+                                          let checkClass = "border-gray-400 bg-white text-transparent";
+                                          let checkContent = "✓";
+
+                                          if (isCancelledStage) {
+                                            if (isBookingCancelled) {
+                                              btnClass = "bg-red-600 text-white border-red-600 shadow-sm ring-1 ring-red-600";
+                                              checkClass = "bg-white text-red-600 border-white";
+                                              checkContent = "✓";
+                                            } else {
+                                              btnClass = "bg-white text-gray-700 border-gray-300 hover:border-red-600 hover:bg-red-50/50";
+                                              checkClass = "border-gray-400 bg-white text-transparent";
+                                              checkContent = "✓";
+                                            }
+                                          } else if (isOrangePending) {
+                                            btnClass = `bg-orange-500 text-white border-orange-600 shadow-sm ring-1 ring-orange-500 hover:bg-orange-600 ${
+                                              isCurrent ? "ring-2 ring-offset-1 ring-orange-600 font-bold" : ""
+                                            }`;
+                                            checkClass = "bg-white text-orange-600 border-white";
+                                            checkContent = "!";
+                                          } else if (isReached) {
+                                            btnClass = `bg-gray-900 text-white border-gray-900 shadow-sm ring-1 ring-gray-900 hover:bg-gray-800 ${
+                                              isCurrent ? "ring-2 ring-offset-1 ring-[#FFC20E] font-bold" : ""
+                                            }`;
+                                            checkClass = "bg-white text-gray-900 border-white";
+                                            checkContent = "✓";
+                                          }
+
+                                          return (
+                                            <button
+                                              key={st.key}
+                                              type="button"
+                                              disabled={actionLoading === b.id}
+                                              onClick={() => handleStageClickboxSelect(b, st.key)}
+                                              className={`flex items-start gap-1.5 p-2 rounded-lg border text-xs font-medium text-left transition-all cursor-pointer ${btnClass}`}
+                                              title={
+                                                isOrangePending
+                                                  ? "Payment is pending! Click to review or approve payment."
+                                                  : isReached
+                                                  ? `Completed stage: ${st.label}`
+                                                  : `Click to set stage to ${st.label}`
+                                              }
+                                            >
+                                              <span
+                                                className={`w-4 h-4 mt-0.5 rounded flex items-center justify-center flex-shrink-0 text-[10px] font-bold border ${checkClass}`}
+                                              >
+                                                {checkContent}
+                                              </span>
+                                              <span className="leading-tight">
+                                                {st.label}
+                                                {isOrangePending && (
+                                                  <span className="block text-[10px] font-bold text-amber-100 uppercase tracking-wider mt-0.5">
+                                                    Pending
+                                                  </span>
+                                                )}
+                                              </span>
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
+
+                                <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-gray-200">
                                   {b.status === "payment_submitted" && (
                                     <button
                                       type="button"
@@ -4418,7 +4710,8 @@ export default function MasterAdminDashboard() {
                   )}
                 </div>
             </div>
-          )}
+          )}
+
 
           {/* ========================================================= */}
           {/* TAB 3: ONLINE / LIVE LORRY BOOKINGS                       */}
@@ -4558,6 +4851,14 @@ export default function MasterAdminDashboard() {
                   };
                   const hasStoredSlip = Boolean(b.paymentSlipId && b.paymentSlipStatus !== "deleted");
                   const isQuoted = Boolean(b.quotedAmount && b.quotedAmount > 0);
+                    const isCashManual =
+                      b.paymentMethod === "cash_manual" ||
+                      b.paymentSlipStatus === "manual_approved" ||
+                      b.paymentSlipStatus === "cash_pending";
+                    const isCashPending = b.paymentSlipStatus === "cash_pending";
+                    const isCashPaid =
+                      b.paymentSlipStatus === "manual_approved" ||
+                      (b.paymentMethod === "cash_manual" && Boolean(b.paymentApprovedAt && b.paymentApprovedAt > 0));
                   const isExpanded =
                     expandedOnlineBookings[b.id] !== undefined
                       ? expandedOnlineBookings[b.id]
@@ -4567,9 +4868,9 @@ export default function MasterAdminDashboard() {
                   return (
                     <div
                       key={b.id}
-                      className="rounded-lg bg-white border border-gray-300 overflow-hidden"
+                      className="rounded-lg bg-white border border-gray-300 overflow-hidden shadow-xs"
                     >
-                      {/* Accordion Header */}
+                      {/* Dark Booking Header Bar */}
                       <button
                         type="button"
                         onClick={() => toggleOnlineBookingCard(b.id, isExpanded)}
@@ -4577,84 +4878,96 @@ export default function MasterAdminDashboard() {
                         aria-label={`${
                           isExpanded ? "Minimize live booking details" : "Open live booking details"
                         } for #${b.id}`}
-                        className="w-full text-left border-0 bg-white px-4 py-4 sm:px-5 hover:bg-gray-50 cursor-pointer"
+                        className="w-full text-left border-0 bg-gray-900 text-white px-4 py-3 sm:px-5 hover:bg-gray-800 transition-colors cursor-pointer flex flex-wrap items-center justify-between gap-3"
                       >
-                        <div className="flex flex-wrap items-center justify-between gap-3">
-                          <div className="flex flex-wrap items-center gap-2.5">
-                            <span className="font-mono text-sm font-bold px-2.5 py-0.5 rounded bg-gray-100 border border-gray-300 text-gray-900">
-                              #{b.id}
+                        <div className="flex flex-wrap items-center gap-2.5">
+                          <span className="font-mono text-sm font-bold px-2.5 py-0.5 rounded bg-white/10 border border-white/20 text-white">
+                            #{b.id}
+                          </span>
+                          <span className="text-base font-bold text-white">
+                            {b.customerName}
+                          </span>
+                          {b.customerPhone && (
+                            <span className="text-sm font-mono text-gray-300">
+                              ({b.customerPhone})
                             </span>
-                            <span className="text-base font-bold text-gray-900">
-                              {b.customerName}
-                            </span>
-                            {b.customerPhone && (
-                              <span className="text-sm font-mono text-gray-700">
-                                ({b.customerPhone})
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-                            {isQuoted && (
-                              <span className="text-sm font-mono font-bold text-gray-900">
-                                Rs. {Number(b.quotedAmount).toLocaleString()}
-                              </span>
-                            )}
-                            <StatusBadge status={b.status} />
-                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-gray-300 bg-white text-xs font-semibold text-gray-800">
-                              {isExpanded ? "Hide" : "Show Details"}
-                              <svg
-                                width="14"
-                                height="14"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2.2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                className={isExpanded ? "rotate-180" : "rotate-0"}
-                              >
-                                <polyline points="6 9 12 15 18 9" />
-                              </svg>
-                            </span>
-                          </div>
+                          )}
                         </div>
 
-                        {/* Clean 4-column Scannable Summary Row */}
-                        <div className="mt-3 pt-3 border-t border-gray-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
-                          <div>
-                            <div className="text-xs font-medium text-gray-500">Route</div>
-                            <div className="font-semibold text-gray-900 mt-0.5">
-                              {b.pickupCity} → {b.deliveryCity}
-                            </div>
-                          </div>
-                          <div>
-                            <div className="text-xs font-medium text-gray-500">Trip Date</div>
-                            <div className="font-medium text-gray-900 mt-0.5">
-                              {b.date || "Today (Live)"}
-                            </div>
-                          </div>
-                          <div>
-                            <div className="text-xs font-medium text-gray-500">Lorry &amp; Rider</div>
-                            <div className="text-gray-900 mt-0.5">
-                              <span className="font-medium">
-                                {b.assignedPlate || b.selectedVehiclePlate || "Live Lorry"}
+                        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                          {isQuoted && (
+                            <span className="text-sm font-mono font-bold text-amber-400">
+                              Rs. {Number(b.quotedAmount).toLocaleString()}
+                            </span>
+                          )}
+                          <StatusBadge status={b.status} />
+                          {isCashManual && (
+                            isCashPending ? (
+                              <span className="text-xs font-semibold text-amber-200 bg-amber-950/80 border border-amber-600/70 px-2.5 py-1 rounded-md">
+                                Cash Pending
                               </span>
-                              {b.assignedDriverName ? ` · ${b.assignedDriverName}` : " · No rider"}
-                            </div>
-                          </div>
-                          <div>
-                            <div className="text-xs font-medium text-gray-500">Requested On</div>
-                            <div className="text-gray-900 mt-0.5">
-                              {requestTiming ? requestTiming.display : "Not recorded"}
-                            </div>
-                          </div>
+                            ) : isCashPaid ? (
+                              <span className="text-xs font-semibold text-emerald-200 bg-emerald-950/80 border border-emerald-600/70 px-2.5 py-1 rounded-md">
+                                Cash Paid
+                              </span>
+                            ) : null
+                          )}
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-white/20 bg-white/10 text-xs font-semibold text-white hover:bg-white/20 transition-colors">
+                            {isExpanded ? "Hide" : "Show Details"}
+                            <svg
+                              width="14"
+                              height="14"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              className={isExpanded ? "rotate-180" : "rotate-0"}
+                            >
+                              <polyline points="6 9 12 15 18 9" />
+                            </svg>
+                          </span>
                         </div>
                       </button>
 
+                      {/* Clean 4-column Scannable Summary Row */}
+                      <div
+                        onClick={() => toggleOnlineBookingCard(b.id, isExpanded)}
+                        className="bg-gray-50/80 px-4 py-3 sm:px-5 border-b border-gray-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm cursor-pointer hover:bg-gray-100/60 transition-colors"
+                      >
+                        <div>
+                          <div className="text-xs font-medium text-gray-500">Route</div>
+                          <div className="font-semibold text-gray-900 mt-0.5">
+                            {b.pickupCity} → {b.deliveryCity}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-xs font-medium text-gray-500">Trip Date</div>
+                          <div className="font-medium text-gray-900 mt-0.5">
+                            {b.date || "Today (Live)"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-xs font-medium text-gray-500">Lorry &amp; Rider</div>
+                          <div className="text-gray-900 mt-0.5">
+                            <span className="font-medium">
+                              {b.assignedPlate || b.selectedVehiclePlate || "Live Lorry"}
+                            </span>
+                            {b.assignedDriverName ? ` · ${b.assignedDriverName}` : " · No rider"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-xs font-medium text-gray-500">Requested On</div>
+                          <div className="text-gray-900 mt-0.5">
+                            {requestTiming ? requestTiming.display : "Not recorded"}
+                          </div>
+                        </div>
+                      </div>
+
                       {/* Expanded Body */}
                       {isExpanded && (
-                        <div className="border-t border-gray-300 divide-y divide-gray-200">
+                        <div className="divide-y divide-gray-200">
                           {/* Section 1: Customer & Trip Summary Table */}
                           <div className="px-4 py-4 sm:px-5 grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
                             <div>
@@ -4847,7 +5160,7 @@ export default function MasterAdminDashboard() {
                                 <button
                                   type="button"
                                   disabled={actionLoading === b.id}
-                                  onClick={() => handleManualApprovePayment(b)}
+                                  onClick={() => openCashApprovalModal(b)}
                                   className="px-4 py-2.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 text-sm font-semibold cursor-pointer disabled:opacity-50"
                                 >
                                   Manual Approve (Cash)
@@ -4855,14 +5168,62 @@ export default function MasterAdminDashboard() {
                               )}
                             </div>
 
-                            {/* Manual Cash Approved Summary */}
-                            {!hasStoredSlip &&
-                              (b.paymentMethod === "cash_manual" || b.paymentSlipStatus === "manual_approved") && (
-                                <div className="px-4 py-3 rounded-md bg-green-50 border border-green-300 text-sm text-green-900 font-medium">
-                                  Cash / Direct payment approved manually · Driver contact unlocked for customer
+                            {/* Manual Cash Status Summary */}
+                            {!hasStoredSlip && isCashManual && (
+                              isCashPending ? (
+                                <div className="px-4 py-3.5 rounded-lg bg-amber-50 border border-amber-300 text-sm text-amber-900">
+                                  <div className="flex flex-wrap items-center justify-between gap-3">
+                                    <div>
+                                      <span className="font-bold flex items-center gap-1.5 text-amber-900">
+                                        <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></span>
+                                        Cash Payment Pending (පසුගෙවීම් · Pay Later)
+                                      </span>
+                                      <p className="text-xs text-amber-800 mt-0.5">
+                                        Quoted: <span className="font-bold">Rs. {(b.quotedAmount || 0).toLocaleString()}</span>
+                                        {b.quoteNote && ` · Note: ${b.quoteNote}`}
+                                        {" · "}
+                                        <span className="font-medium text-amber-950">
+                                          Trip slot is active, but revenue is NOT counted until payment is marked as Success.
+                                        </span>
+                                      </p>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      disabled={actionLoading === b.id}
+                                      onClick={() => handleMarkCashAsPaid(b)}
+                                      className="px-3.5 py-2 rounded-md bg-green-700 hover:bg-green-800 text-white text-xs font-semibold cursor-pointer shadow-sm transition-all"
+                                      title="Mark cash as paid in full to count into revenue"
+                                    >
+                                      ✓ Mark Cash as Paid (Success)
+                                    </button>
+                                  </div>
                                 </div>
-                              )}
-
+                              ) : (
+                                <div className="px-4 py-3 rounded-md bg-green-50 border border-green-300 text-sm text-green-900">
+                                  <div className="flex flex-wrap items-center justify-between gap-3">
+                                    <div>
+                                      <span className="font-semibold block">
+                                        Cash / Direct payment approved manually · Driver contact unlocked for customer
+                                      </span>
+                                      <span className="text-xs text-green-800 mt-0.5 block">
+                                        Amount: <span className="font-bold">Rs. {(b.quotedAmount || 0).toLocaleString()}</span>
+                                        {b.quoteNote && ` · Note: ${b.quoteNote}`}
+                                        {" · Added to Today's Revenue."}
+                                      </span>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      disabled={actionLoading === b.id}
+                                      onClick={() => handleMarkCashAsPending(b)}
+                                      className="px-3.5 py-1.5 rounded-md border border-green-300 bg-white hover:bg-green-100 text-green-900 text-xs font-medium cursor-pointer"
+                                      title="Change back to pending if cash not received"
+                                    >
+                                      Change to Pending
+                                    </button>
+                                  </div>
+                                </div>
+                              )
+                            )}
                             {/* Bank Payment Slip Review Section */}
                             {hasStoredSlip && (
                               <div className="px-4 py-3 rounded-md bg-gray-50 border border-gray-200 flex flex-wrap items-center justify-between gap-3 text-sm">
@@ -4898,7 +5259,124 @@ export default function MasterAdminDashboard() {
                           </div>
 
                           {/* Footer Actions & Lifecycle Transitions */}
-                          <div className="px-4 py-3.5 sm:px-5 bg-gray-50 flex flex-wrap items-center justify-between gap-3 text-sm">
+                          <div className="px-4 py-4 sm:px-5 bg-gray-50 flex flex-col gap-3 text-sm">
+                            {/* 8-Stage Clickboxes (Progress Stepper) */}
+                            {(() => {
+                              const currentStatus = (b.status === "booked" ? "accepted" : b.status) as BookingStatus;
+                              const currentProgressIdx = PROGRESS_KEYS.indexOf(currentStatus);
+                              const isBookingCancelled = currentStatus === "cancelled";
+
+                              const isCashPending = b.paymentSlipStatus === "cash_pending";
+                              const isPaymentApproved =
+                                !isCashPending &&
+                                (b.paymentSlipStatus === "manual_approved" ||
+                                 b.paymentSlipStatus === "approved" ||
+                                 Boolean(b.paymentApprovedAt && b.paymentApprovedAt > 0));
+                              const isPaymentPending = isCashPending || !isPaymentApproved;
+                              const isPaymentPendingWarning = isPaymentPending && (currentProgressIdx >= 3 || isCashPending);
+
+                              return (
+                                <div className="w-full">
+                                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                                    <span className="text-xs font-bold text-gray-700 uppercase tracking-wider">
+                                      Stage Selection (ක්ලික් කර වෙනස් කරන්න):
+                                    </span>
+                                    <div className="flex items-center gap-2">
+                                      {isPaymentPendingWarning && (
+                                        <span className="text-[11px] font-semibold text-orange-800 bg-orange-100 border border-orange-300 px-2 py-0.5 rounded-md">
+                                          Payment Pending
+                                        </span>
+                                      )}
+                                      <span className="text-xs text-gray-500 font-medium">
+                                        Current: <strong className="text-gray-900">{BOOKING_STAGES.find((s) => s.key === currentStatus)?.label || b.status}</strong>
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+                                    {BOOKING_STAGES.map((st) => {
+                                      const isCancelledStage = st.key === "cancelled";
+                                      const stageProgressIdx = PROGRESS_KEYS.indexOf(st.key);
+                                      const isCurrent = currentStatus === st.key;
+
+                                      // Reached in progress: all stages at or before the current stage
+                                      const isReached =
+                                        !isBookingCancelled &&
+                                        stageProgressIdx !== -1 &&
+                                        currentProgressIdx !== -1 &&
+                                        stageProgressIdx <= currentProgressIdx;
+
+                                      // Stage 4 ("Payment Approved") turns orange ONLY if payment is pending
+                                      const isPaymentStage = st.key === "accepted";
+                                      const isOrangePending =
+                                        isPaymentStage &&
+                                        isPaymentPending &&
+                                        (isReached || isCashPending);
+
+                                      let btnClass = "bg-white text-gray-700 border-gray-300 hover:border-gray-900 hover:bg-gray-50";
+                                      let checkClass = "border-gray-400 bg-white text-transparent";
+                                      let checkContent = "✓";
+
+                                      if (isCancelledStage) {
+                                        if (isBookingCancelled) {
+                                          btnClass = "bg-red-600 text-white border-red-600 shadow-sm ring-1 ring-red-600";
+                                          checkClass = "bg-white text-red-600 border-white";
+                                          checkContent = "✓";
+                                        } else {
+                                          btnClass = "bg-white text-gray-700 border-gray-300 hover:border-red-600 hover:bg-red-50/50";
+                                          checkClass = "border-gray-400 bg-white text-transparent";
+                                          checkContent = "✓";
+                                        }
+                                      } else if (isOrangePending) {
+                                        btnClass = `bg-orange-500 text-white border-orange-600 shadow-sm ring-1 ring-orange-500 hover:bg-orange-600 ${
+                                          isCurrent ? "ring-2 ring-offset-1 ring-orange-600 font-bold" : ""
+                                        }`;
+                                        checkClass = "bg-white text-orange-600 border-white";
+                                        checkContent = "!";
+                                      } else if (isReached) {
+                                        btnClass = `bg-gray-900 text-white border-gray-900 shadow-sm ring-1 ring-gray-900 hover:bg-gray-800 ${
+                                          isCurrent ? "ring-2 ring-offset-1 ring-[#FFC20E] font-bold" : ""
+                                        }`;
+                                        checkClass = "bg-white text-gray-900 border-white";
+                                        checkContent = "✓";
+                                      }
+
+                                      return (
+                                        <button
+                                          key={st.key}
+                                          type="button"
+                                          disabled={actionLoading === b.id}
+                                          onClick={() => handleStageClickboxSelect(b, st.key)}
+                                          className={`flex items-start gap-1.5 p-2 rounded-lg border text-xs font-medium text-left transition-all cursor-pointer ${btnClass}`}
+                                          title={
+                                            isOrangePending
+                                              ? "Payment is pending! Click to review or approve payment."
+                                              : isReached
+                                              ? `Completed stage: ${st.label}`
+                                              : `Click to set stage to ${st.label}`
+                                          }
+                                        >
+                                          <span
+                                            className={`w-4 h-4 mt-0.5 rounded flex items-center justify-center flex-shrink-0 text-[10px] font-bold border ${checkClass}`}
+                                          >
+                                            {checkContent}
+                                          </span>
+                                          <span className="leading-tight">
+                                            {st.label}
+                                            {isOrangePending && (
+                                              <span className="block text-[10px] font-bold text-amber-100 uppercase tracking-wider mt-0.5">
+                                                Pending
+                                              </span>
+                                            )}
+                                          </span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-gray-200">
                             <div className="text-sm text-gray-600">
                               {(b.status === "assigned" || b.status === "accepted") && (
                                 <span className="font-medium text-gray-900">
@@ -4945,7 +5423,8 @@ export default function MasterAdminDashboard() {
                             </div>
                           </div>
                         </div>
-                      )}
+                      </div>
+                    )}
                     </div>
                   );
                 })
@@ -5746,7 +6225,8 @@ export default function MasterAdminDashboard() {
                 </div>
               )}
             </div>
-          )}
+          )}
+
 
           {/* ========================================================= */}
           {/* TAB 5: RIDERS & DRIVERS REGISTRY                          */}
@@ -5849,7 +6329,8 @@ export default function MasterAdminDashboard() {
                 </div>
               )}
             </div>
-          )}
+          )}
+
 
           {/* ========================================================= */}
           {/* TAB 6: SYSTEM & PAYMENT SETTINGS (Bank Accounts & Slips)  */}
@@ -6425,7 +6906,8 @@ export default function MasterAdminDashboard() {
                 </div>
               )}
             </div>
-          )}
+          )}
+
 
           {/* ========================================================= */}
           {/* TAB 8: CONTACT INQUIRIES & SUPPORT                        */}
@@ -6672,7 +7154,8 @@ export default function MasterAdminDashboard() {
                 </div>
               )}
             </div>
-          )}
+          )}
+
         </main>
       </div>
 
@@ -7888,6 +8371,191 @@ export default function MasterAdminDashboard() {
           </div>
         </div>
       )}
+      {/* Cash Approval / Confirmation Modal */}
+      {cashApprovalModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="px-6 py-4 bg-gray-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <span className="w-3 h-3 rounded-full bg-amber-400"></span>
+                <h3 className="text-base font-bold">Manual Cash Approval / Confirmation</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCashApprovalModal(null)}
+                className="text-gray-400 hover:text-white text-lg font-bold px-2 py-0.5 rounded cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-6 flex flex-col gap-4">
+              {/* Booking Summary Box */}
+              <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 text-xs text-gray-700 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono font-bold text-gray-900">
+                    {cashApprovalModal.booking.id}
+                  </span>
+                  <span className="font-semibold text-gray-800">
+                    {cashApprovalModal.booking.pickupCity} → {cashApprovalModal.booking.deliveryCity}
+                  </span>
+                </div>
+                <div className="text-gray-600">
+                  Customer: <strong className="text-gray-900">{cashApprovalModal.booking.customerName}</strong>
+                  {cashApprovalModal.booking.customerPhone && (
+                    <span className="font-mono ml-1">({cashApprovalModal.booking.customerPhone})</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Payment Status Selection (Pending vs Success) */}
+              <div>
+                <label className="block text-xs font-bold text-gray-800 uppercase tracking-wider mb-2">
+                  Payment Status (ගෙවීමේ තත්ත්වය තෝරන්න) *
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Option 1: Cash Pending */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCashApprovalModal((prev) =>
+                        prev ? { ...prev, statusMode: "pending" } : null
+                      )
+                    }
+                    className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 ${
+                      cashApprovalModal.statusMode === "pending"
+                        ? "bg-amber-50 border-amber-500 ring-2 ring-amber-400/40"
+                        : "bg-white border-gray-300 hover:border-gray-400"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-amber-900 flex items-center gap-1.5">
+                        <span
+                          className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center text-[9px] font-bold ${
+                            cashApprovalModal.statusMode === "pending"
+                              ? "bg-amber-500 text-white border-amber-600"
+                              : "border-gray-400 text-transparent"
+                          }`}
+                        >
+                          ✓
+                        </span>
+                        Cash Pending (පසුගෙවීම්)
+                      </span>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-900">
+                        Pay Later
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-amber-800 leading-snug">
+                      Customer will pay cash later or on delivery. Slot is confirmed, but NOT added to revenue yet.
+                    </p>
+                  </button>
+
+                  {/* Option 2: Cash Success / Paid */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCashApprovalModal((prev) =>
+                        prev ? { ...prev, statusMode: "success" } : null
+                      )
+                    }
+                    className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 ${
+                      cashApprovalModal.statusMode === "success"
+                        ? "bg-green-50 border-green-600 ring-2 ring-green-500/40"
+                        : "bg-white border-gray-300 hover:border-gray-400"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-green-900 flex items-center gap-1.5">
+                        <span
+                          className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center text-[9px] font-bold ${
+                            cashApprovalModal.statusMode === "success"
+                              ? "bg-green-600 text-white border-green-700"
+                              : "border-gray-400 text-transparent"
+                          }`}
+                        >
+                          ✓
+                        </span>
+                        Payment Success (ගෙවා ඇත)
+                      </span>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-green-100 text-green-900">
+                        Paid Now
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-green-800 leading-snug">
+                      Cash payment received in full. Slot is confirmed and added to Today's Revenue immediately.
+                    </p>
+                  </button>
+                </div>
+              </div>
+
+              {/* Quoted Amount (LKR) */}
+              <div>
+                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">
+                  Booking Amount (LKR) *
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={cashApprovalModal.amount}
+                  onChange={(e) =>
+                    setCashApprovalModal((prev) =>
+                      prev ? { ...prev, amount: e.target.value } : null
+                    )
+                  }
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 text-gray-900 text-sm font-semibold focus:border-gray-900 focus:outline-none"
+                  aria-label="Booking amount in LKR"
+                />
+              </div>
+
+              {/* Payment Note (Optional) */}
+              <div>
+                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">
+                  Payment Note (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={cashApprovalModal.note}
+                  onChange={(e) =>
+                    setCashApprovalModal((prev) =>
+                      prev ? { ...prev, note: e.target.value } : null
+                    )
+                  }
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 text-gray-900 text-sm focus:border-gray-900 focus:outline-none"
+                  aria-label="Payment note"
+                />
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-3.5 bg-gray-50 border-t border-gray-200 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setCashApprovalModal(null)}
+                className="px-4 py-2 rounded-xl border border-gray-300 text-xs font-bold text-gray-700 hover:bg-gray-100 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmCashApproval}
+                className={`px-5 py-2 rounded-xl text-xs font-bold text-white transition-all cursor-pointer shadow-sm ${
+                  cashApprovalModal.statusMode === "success"
+                    ? "bg-green-700 hover:bg-green-800"
+                    : "bg-amber-600 hover:bg-amber-700"
+                }`}
+              >
+                {cashApprovalModal.statusMode === "success"
+                  ? "Confirm & Mark Paid (Success)"
+                  : "Confirm as Cash Pending"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

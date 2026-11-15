@@ -85,6 +85,7 @@ export type PaymentSlipStatus =
   | "pending_review"
   | "approved"
   | "manual_approved"
+  | "cash_pending"
   | "rejected"
   | "deleted";
 
