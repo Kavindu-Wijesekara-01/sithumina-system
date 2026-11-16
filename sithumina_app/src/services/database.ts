@@ -1145,6 +1145,8 @@ export interface BookingRecord {
   date: string;
   vehicleType: string;
   packageDetails?: string;
+  customerIdNumber?: string;
+  distanceKm?: number;
   status: "pending" | "assigned" | "goods_collected" | "in_transit" | "delivered" | "cancelled";
   assignedLorryId?: string;
   assignedDriverName?: string;
@@ -1486,6 +1488,8 @@ export function subscribeAdminBookings(
             date: resolvedDate,
             vehicleType: data.vehicleType || "14ft Lorry",
             packageDetails: data.packageDetails || data.notes || "",
+            customerIdNumber: data.customerIdNumber || data.idNumber || "",
+            distanceKm: typeof data.distanceKm === "number" ? data.distanceKm : (Number(data.distanceKm) || undefined),
             status: data.status || "pending",
             assignedLorryId: data.assignedLorryId,
             assignedDriverName: data.assignedDriverName,

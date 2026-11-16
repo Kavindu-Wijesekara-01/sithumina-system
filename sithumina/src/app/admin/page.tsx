@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   StoredBooking,
+  StoredComplaint,
   BookingStatusValue,
   PaymentSlipStatus,
   BookingPaymentMethod,
@@ -51,6 +52,7 @@ import {
   createBookingAction,
   updateBookingStatusAction,
   deleteBookingAction,
+  getAllComplaintsAction,
   getAllBookingsAction,
   getAllRegistrationsAction,
   updateRegistrationStatusAction,
@@ -69,6 +71,7 @@ type NavSection =
   | "individual_bookings"
   | "online_bookings"
   | "customers"
+  | "complaints"
   | "revenue"
   | "vehicle_registrations"
   | "contact_submissions"
@@ -81,6 +84,7 @@ export interface CustomerMetric {
   name: string;
   phone: string;
   canonicalPhone: string;
+  idNumber?: string;
   email?: string;
   city?: string;
   registeredAt: number;
@@ -109,6 +113,7 @@ interface AssignModalState {
   date: string;
   startTime: string;
   endTime: string;
+  distanceKm?: string;
 }
 
 interface ScheduleDraft {
@@ -120,6 +125,7 @@ interface ScheduleDraft {
   driverId: string;
   driverName: string;
   driverPhone: string;
+  distanceKm?: string;
 }
 
 interface ManualBookingForm {
@@ -130,8 +136,10 @@ interface ManualBookingForm {
   driverPhone: string;
   customerName: string;
   customerPhone: string;
+  customerIdNumber: string;
   pickupCity: string;
   deliveryCity: string;
+  distanceKm: string;
   date: string;
   startTime: string;
   endTime: string;
@@ -402,8 +410,10 @@ export default function MasterAdminDashboard() {
     driverPhone: "",
     customerName: "",
     customerPhone: "",
+    customerIdNumber: "",
     pickupCity: "",
     deliveryCity: "",
+    distanceKm: "",
     date: new Date().toISOString().split("T")[0],
     startTime: "08:00",
     endTime: "12:00",
@@ -428,6 +438,19 @@ export default function MasterAdminDashboard() {
     totalRevenue: number;
     deleteBookings: boolean;
   } | null>(null);
+
+  // ---- Complaints & Deletion Reason State ----
+  const [complaints, setComplaints] = useState<StoredComplaint[]>([]);
+  const [loadingComplaints, setLoadingComplaints] = useState(true);
+  const [complaintSearch, setComplaintSearch] = useState("");
+
+  // ---- Booking Deletion with Reason Modal State ----
+  const [deleteBookingModal, setDeleteBookingModal] = useState<{
+    booking: StoredBooking;
+    reason: string;
+    error?: string;
+  } | null>(null);
+  const [deletingBookingLoading, setDeletingBookingLoading] = useState(false);
 
   // ---- Cash Approval Modal State ----
   const [cashApprovalModal, setCashApprovalModal] = useState<{
@@ -511,8 +534,10 @@ export default function MasterAdminDashboard() {
       driverPhone: defaultDriver?.phone || "",
       customerName: "",
       customerPhone: "",
+      customerIdNumber: "",
       pickupCity: "",
       deliveryCity: "",
+      distanceKm: "",
       date: new Date().toISOString().split("T")[0],
       startTime: "08:00",
       endTime: "12:00",
@@ -696,6 +721,43 @@ export default function MasterAdminDashboard() {
       }
     );
 
+    const unsubComplaints = onSnapshot(
+      collection(db, "complaints"),
+      (snap) => {
+        const list: StoredComplaint[] = [];
+        snap.forEach((d) => {
+          const data = d.data();
+          list.push({
+            id: String(data.id || d.id),
+            bookingId: String(data.bookingId || ""),
+            customerName: String(data.customerName || ""),
+            customerPhone: String(data.customerPhone || ""),
+            customerIdNumber: data.customerIdNumber ? String(data.customerIdNumber) : undefined,
+            pickupCity: String(data.pickupCity || ""),
+            deliveryCity: String(data.deliveryCity || ""),
+            date: String(data.date || data.bookingDate || ""),
+            vehicleType: String(data.vehicleType || "Lorry"),
+            quotedAmount: typeof data.quotedAmount === "number" ? data.quotedAmount : (Number(data.quotedAmount || data.amount) || undefined),
+            distanceKm: typeof data.distanceKm === "number" ? data.distanceKm : (Number(data.distanceKm) || undefined),
+            reason: String(data.reason || "Booking deleted by admin"),
+            deletedAt: Number(data.deletedAt) || (data.deletedAt ? new Date(data.deletedAt).getTime() : Date.now()),
+            deletedBy: data.deletedBy ? String(data.deletedBy) : undefined,
+          });
+        });
+        list.sort((a, b) => (Number(b.deletedAt) || 0) - (Number(a.deletedAt) || 0));
+        setComplaints(list);
+        setLoadingComplaints(false);
+      },
+      async (err) => {
+        console.warn("Firestore complaints subscription notice:", err);
+        const res = await getAllComplaintsAction();
+        if (res.success && res.data) {
+          setComplaints(res.data);
+        }
+        setLoadingComplaints(false);
+      }
+    );
+
     return () => {
       unsubFleet();
       unsubDrivers();
@@ -703,6 +765,7 @@ export default function MasterAdminDashboard() {
       unsubSlipsMeta();
       unsubRegistrations();
       unsubInquiries();
+      unsubComplaints();
       unsubUsers();
     };
   }, [authed]);
@@ -745,6 +808,7 @@ export default function MasterAdminDashboard() {
             id: resolvedId,
             customerName: data.customerName || data.name || "Customer",
             customerPhone: data.customerPhone || data.phone || "",
+            customerIdNumber: data.customerIdNumber || data.idNumber || "",
             pickupCity: data.pickupCity || data.pickup || "",
             deliveryCity: data.deliveryCity || data.destination || "",
             pickupLat: data.pickupLat,
@@ -791,6 +855,7 @@ export default function MasterAdminDashboard() {
             paymentApprovedAt: Number(data.paymentApprovedAt) || undefined,
             paymentSlipDeletedAt: Number(data.paymentSlipDeletedAt) || undefined,
             customerArchived: Boolean(data.customerArchived),
+            distanceKm: typeof data.distanceKm === "number" ? data.distanceKm : (Number(data.distanceKm) || undefined),
             createdAt: Number(data.createdAt) || 0,
             updatedAt: Number(data.updatedAt) || Number(data.createdAt) || 0,
           });
@@ -847,6 +912,7 @@ export default function MasterAdminDashboard() {
         driverId: b.assignedDriverId || matchedDriver?.driverId || "",
         driverName: existingDriverName || matchedDriver?.name || "",
         driverPhone: b.assignedDriverPhone || matchedDriver?.phone || "",
+        distanceKm: b.distanceKm ? String(b.distanceKm) : "",
       };
     },
     [scheduleDrafts, fleetVehicles, drivers]
@@ -930,6 +996,7 @@ export default function MasterAdminDashboard() {
           assignedDriverId: draft.driverId.trim() || undefined,
           assignedDriverName: draft.driverName.trim(),
           assignedDriverPhone: draft.driverPhone.trim() || undefined,
+          distanceKm: draft.distanceKm ? Number(draft.distanceKm) : undefined,
         },
       };
     },
@@ -951,6 +1018,7 @@ export default function MasterAdminDashboard() {
         dates?: string[];
         startTime?: string;
         endTime?: string;
+        distanceKm?: number;
       },
       paymentMeta?: {
         quotedAmount?: number;
@@ -1074,27 +1142,57 @@ export default function MasterAdminDashboard() {
     await updateBooking(booking.id, nextStatus, check.assignment);
   };
 
-  const handleDeleteBooking = async (bookingId: string) => {
-    if (
-      !confirm(
-        `Are you sure you want to permanently delete booking #${bookingId}? This will remove it from the system and Firestore database.`
-      )
-    ) {
+  const promptDeleteBooking = (target: StoredBooking | string) => {
+    const booking = typeof target === "string" ? bookings.find((b) => b.id === target) : target;
+    if (!booking) return;
+    setDeleteBookingModal({
+      booking,
+      reason: "",
+      error: "",
+    });
+  };
+
+  const handleDeleteBooking = promptDeleteBooking;
+
+  const handleConfirmDeleteBookingWithReason = async () => {
+    if (!deleteBookingModal) return;
+    const { booking, reason } = deleteBookingModal;
+    const cleanReason = reason.trim();
+    if (!cleanReason) {
+      setDeleteBookingModal((p) => (p ? { ...p, error: "Booking එක delete කිරීම සඳහා හේතුවක් (Reason) ඇතුළත් කිරීම අනිවාර්ය වේ." } : null));
       return;
     }
-    setActionLoading(bookingId);
+    setDeletingBookingLoading(true);
     try {
-      const res = await deleteBookingAction(bookingId);
+      const res = await deleteBookingAction(booking.id, cleanReason, booking.customerPhone, "Admin");
       if (res.success) {
-        setBookings((prev) => prev.filter((b) => b.id !== bookingId));
-        showToast(`Booking #${bookingId} deleted permanently.`, "success");
+        setBookings((prev) => prev.filter((b) => b.id !== booking.id));
+        const newComplaint: StoredComplaint = {
+          id: `complaint-${Date.now()}`,
+          bookingId: booking.id,
+          customerName: booking.customerName || "Customer",
+          customerPhone: booking.customerPhone || "",
+          customerIdNumber: booking.customerIdNumber || undefined,
+          pickupCity: booking.pickupCity || "",
+          deliveryCity: booking.deliveryCity || "",
+          date: booking.date || (Array.isArray(booking.dates) ? booking.dates[0] : "") || "Date unspecified",
+          vehicleType: booking.vehicleType || "Lorry",
+          quotedAmount: typeof booking.quotedAmount === "number" ? booking.quotedAmount : undefined,
+          distanceKm: booking.distanceKm,
+          reason: cleanReason,
+          deletedAt: Date.now(),
+          deletedBy: "Admin",
+        };
+        setComplaints((prev) => [newComplaint, ...prev.filter((c) => c.id !== newComplaint.id)]);
+        showToast(`Booking #${booking.id} deleted. Reason recorded in Complaints.`);
+        setDeleteBookingModal(null);
       } else {
-        showToast(res.error || "Failed to delete booking.", "error");
+        setDeleteBookingModal((p) => (p ? { ...p, error: res.error || "Failed to delete booking." } : null));
       }
     } catch (e: any) {
-      showToast(e?.message || "Error deleting booking.", "error");
+      setDeleteBookingModal((p) => (p ? { ...p, error: e?.message || "Error deleting booking." } : null));
     } finally {
-      setActionLoading(null);
+      setDeletingBookingLoading(false);
     }
   };
 
@@ -1110,11 +1208,19 @@ export default function MasterAdminDashboard() {
       return;
     }
 
-    await updateBooking(booking.id, "awaiting_payment", undefined, {
-      quotedAmount: numericAmount,
-      quotedAt: Date.now(),
-      quoteNote: entry.note.trim(),
-    });
+    const draft = scheduleDrafts[booking.id];
+    const distanceVal = draft?.distanceKm ? Number(draft.distanceKm) : booking.distanceKm;
+
+    await updateBooking(
+      booking.id,
+      "awaiting_payment",
+      distanceVal !== undefined ? { distanceKm: distanceVal } : undefined,
+      {
+        quotedAmount: numericAmount,
+        quotedAt: Date.now(),
+        quoteNote: entry.note.trim(),
+      }
+    );
     setEditingQuoteId(null);
   };
 
@@ -1547,6 +1653,7 @@ export default function MasterAdminDashboard() {
       date: draft.date || booking.date || new Date().toISOString().split("T")[0],
       startTime: draft.startTime || booking.startTime || "08:00",
       endTime: draft.endTime || booking.endTime || "12:00",
+      distanceKm: draft.distanceKm || (booking.distanceKm ? String(booking.distanceKm) : ""),
     });
   };
 
@@ -1563,6 +1670,7 @@ export default function MasterAdminDashboard() {
         driverId: assignModal.driverId,
         driverName: assignModal.driverName,
         driverPhone: assignModal.driverPhone,
+        distanceKm: assignModal.distanceKm,
       });
       if (!check.valid) return;
 
@@ -1611,6 +1719,7 @@ export default function MasterAdminDashboard() {
         assignedDriverName: assignModal.driverName,
         assignedDriverPhone: assignModal.driverPhone,
         assignedPlate: assignModal.plate,
+        distanceKm: assignModal.distanceKm ? Number(assignModal.distanceKm) : undefined,
       },
       shouldAutoApprove
         ? {
@@ -1637,6 +1746,7 @@ export default function MasterAdminDashboard() {
         (b) => !b.customerArchived && phonesMatch(b.customerPhone, rawPhone)
       );
       const bookingWithRealName = matchedBookings.find((b) => isRealCustomerName(b.customerName));
+      const bookingWithIdNumber = matchedBookings.find((b) => b.customerIdNumber);
 
       const resolvedName =
         regMatch && isRealCustomerName(regMatch.name)
@@ -1644,6 +1754,8 @@ export default function MasterAdminDashboard() {
           : bookingWithRealName
           ? bookingWithRealName.customerName.trim()
           : "";
+
+      const resolvedIdNumber = regMatch?.idNumber || bookingWithIdNumber?.customerIdNumber || "";
 
       if (!regMatch && matchedBookings.length === 0) {
         return null;
@@ -1653,6 +1765,7 @@ export default function MasterAdminDashboard() {
         id: regMatch?.id || `CUST-${normalizePhoneNumber(rawPhone) || digits}`,
         name: resolvedName,
         phone: regMatch?.phone || matchedBookings[0]?.customerPhone || rawPhone,
+        idNumber: resolvedIdNumber,
         city: regMatch?.city || bookingWithRealName?.pickupCity || "",
         bookingsCount: matchedBookings.length,
         isRegisteredInUsers: Boolean(regMatch && isRealCustomerName(regMatch.name)),
@@ -1669,6 +1782,7 @@ export default function MasterAdminDashboard() {
         ...p,
         customerPhone: rawPhone,
         customerName: matched.name,
+        customerIdNumber: matched.idNumber || p.customerIdNumber,
       }));
       return;
     }
@@ -1696,12 +1810,18 @@ export default function MasterAdminDashboard() {
       showToast("Please enter the customer's full name to register this number.", "error");
       return;
     }
+    const cleanIdNumber = manualForm.customerIdNumber.trim();
+    if (!cleanIdNumber) {
+      showToast("Customer Register කිරීම සඳහා හැඳුනුම්පත් අංකය (ID / NIC Number) අනිවාර්ය වේ.", "error");
+      return;
+    }
 
     setManualRegisteringClient(true);
     try {
       const regRes = await registerCustomerAction({
         phone: manualForm.customerPhone.trim(),
         name: cleanName,
+        idNumber: cleanIdNumber,
         city: manualForm.pickupCity.trim() || undefined,
       });
       if (regRes.success) {
@@ -1865,14 +1985,17 @@ export default function MasterAdminDashboard() {
 
     const isPaymentSuccess = manualForm.paymentStatusMode === "success";
     const paymentNoteClean = manualForm.paymentNote.trim();
+    const parsedDistance = manualForm.distanceKm.trim() ? Number(manualForm.distanceKm.trim()) : undefined;
 
     setManualSubmitting(true);
     try {
       const res = await createBookingAction({
         customerName: manualForm.customerName.trim(),
         phone: manualForm.customerPhone.trim(),
+        customerIdNumber: manualForm.customerIdNumber.trim() || undefined,
         pickup: manualForm.pickupCity.trim(),
         destination: manualForm.deliveryCity.trim(),
+        distanceKm: parsedDistance,
         date: manualForm.date.trim(),
         dates: [manualForm.date.trim()],
         startTime: timeCheck.startTime,
@@ -1910,6 +2033,7 @@ export default function MasterAdminDashboard() {
         const regRes = await registerCustomerAction({
           phone: manualForm.customerPhone.trim(),
           name: manualForm.customerName.trim(),
+          idNumber: manualForm.customerIdNumber.trim() || undefined,
           city: manualForm.pickupCity.trim() || undefined,
         }).catch(() => null);
         if (regRes?.success && regRes.data) {
@@ -1942,8 +2066,10 @@ export default function MasterAdminDashboard() {
           driverPhone: manualForm.driverPhone,
           customerName: "",
           customerPhone: "",
+          customerIdNumber: "",
           pickupCity: "",
           deliveryCity: "",
+          distanceKm: "",
           date: todayStr,
           startTime: "08:00",
           endTime: "12:00",
@@ -2646,6 +2772,7 @@ export default function MasterAdminDashboard() {
         id: string;
         name: string;
         phone: string;
+        idNumber?: string;
         email?: string;
         city?: string;
         registeredAt: number;
@@ -2671,6 +2798,7 @@ export default function MasterAdminDashboard() {
         id: u.id || `CUST-${phoneNorm}`,
         name: isRealName ? rawName : "",
         phone: u.phone || phoneNorm,
+        idNumber: u.idNumber || "",
         email: u.email || "",
         city: u.city || "",
         registeredAt: u.createdAt || Date.now(),
@@ -2698,6 +2826,9 @@ export default function MasterAdminDashboard() {
 
       if (existing) {
         existing.bookings.push(b);
+        if (!existing.idNumber && b.customerIdNumber) {
+          existing.idNumber = b.customerIdNumber;
+        }
         if (!existing.name && isRealName) {
           existing.name = bName;
         }
@@ -2725,6 +2856,7 @@ export default function MasterAdminDashboard() {
           id: `CUST-${phoneNorm || b.id}`,
           name: isRealName ? bName : (phoneNorm ? `Customer (${phoneNorm.slice(-4)})` : "Valued Customer"),
           phone: bPhone,
+          idNumber: b.customerIdNumber || "",
           email: "",
           city: b.pickupCity || "",
           registeredAt: bCreatedAt,
@@ -2810,6 +2942,7 @@ export default function MasterAdminDashboard() {
         name: c.name || (c.phone ? `Customer (${c.phone.slice(-4)})` : "Valued Customer"),
         phone: c.phone,
         canonicalPhone: key,
+        idNumber: c.idNumber,
         email: c.email,
         city: c.city,
         registeredAt: c.registeredAt,
@@ -2846,6 +2979,7 @@ export default function MasterAdminDashboard() {
         return (
           c.name.toLowerCase().includes(q) ||
           c.phone.toLowerCase().includes(q) ||
+          (c.idNumber && c.idNumber.toLowerCase().includes(q)) ||
           (c.city && c.city.toLowerCase().includes(q)) ||
           (c.email && c.email.toLowerCase().includes(q))
         );
@@ -2872,6 +3006,22 @@ export default function MasterAdminDashboard() {
     () => customersWithMetrics.filter((c) => c.totalBookings === 0).length,
     [customersWithMetrics]
   );
+
+  // Filtered complaints for Complaints Audit Section
+  const filteredComplaints = useMemo(() => {
+    if (!complaintSearch.trim()) return complaints;
+    const q = complaintSearch.toLowerCase();
+    return complaints.filter(
+      (c) =>
+        c.bookingId.toLowerCase().includes(q) ||
+        c.customerName.toLowerCase().includes(q) ||
+        c.customerPhone.toLowerCase().includes(q) ||
+        (c.customerIdNumber && c.customerIdNumber.toLowerCase().includes(q)) ||
+        c.pickupCity.toLowerCase().includes(q) ||
+        c.deliveryCity.toLowerCase().includes(q) ||
+        c.reason.toLowerCase().includes(q)
+    );
+  }, [complaints, complaintSearch]);
 
   // ---- Status Badge Component ----
   const StatusBadge = ({ status }: { status: string }) => {
@@ -3171,6 +3321,33 @@ export default function MasterAdminDashboard() {
               </span>
             </button>
 
+            {/* Complaints & Deletions */}
+            <button
+              onClick={() => {
+                setActiveNav("complaints");
+                setSidebarOpen(false);
+              }}
+              className={`w-full px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all text-left flex items-center justify-between cursor-pointer ${
+                activeNav === "complaints"
+                  ? "bg-[#FFC20E] text-[#26231B]"
+                  : "text-white/75 hover:bg-white/10 hover:text-white"
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                  <line x1="12" y1="9" x2="12" y2="13"/>
+                  <line x1="12" y1="17" x2="12.01" y2="17"/>
+                </svg>
+                <span>Complaints &amp; Deletions</span>
+              </div>
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                activeNav === "complaints" ? "bg-[#26231B] text-white" : "bg-white/15 text-white/80"
+              }`}>
+                {loadingComplaints ? "..." : complaints.length}
+              </span>
+            </button>
+
             {/* Revenue & Financials */}
             <button
               onClick={() => {
@@ -3391,6 +3568,7 @@ export default function MasterAdminDashboard() {
                 {activeNav === "individual_bookings" && "Individual Vehicle Bookings"}
                 {activeNav === "online_bookings" && "Online / Live Lorry Bookings"}
                 {activeNav === "customers" && "Customers"}
+                {activeNav === "complaints" && "Complaints & Deletions"}
                 {activeNav === "revenue" && "Revenue"}
                 {activeNav === "vehicle_registrations" && "Vehicle & Partner Registrations"}
                 {activeNav === "contact_submissions" && "Contact Inquiries & Support"}
@@ -3401,6 +3579,8 @@ export default function MasterAdminDashboard() {
               <p className="text-[11px] text-[#6F6A5A]">
                 {activeNav === "customers"
                   ? "Simple list of all registered and booked customers"
+                  : activeNav === "complaints"
+                  ? "Audit log of cancelled and deleted bookings with mandatory reasons"
                   : activeNav === "revenue"
                   ? "Individual & Live Lorry · Resets daily at 12:00 AM"
                   : activeNav === "vehicle_registrations"
@@ -3418,6 +3598,13 @@ export default function MasterAdminDashboard() {
               <div className="flex items-center gap-2">
                 <span className="px-3 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-xs font-mono font-bold text-[#26231B] whitespace-nowrap shrink-0">
                   {customersWithMetrics.length} Customers
+                </span>
+              </div>
+            )}
+            {activeNav === "complaints" && (
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1.5 rounded-xl bg-red-50 border border-red-200 text-xs font-mono font-bold text-red-900 whitespace-nowrap shrink-0">
+                  {complaints.length} Audit Records
                 </span>
               </div>
             )}
@@ -3888,6 +4075,11 @@ export default function MasterAdminDashboard() {
                                   ({b.customerPhone})
                                 </span>
                               )}
+                              {b.customerIdNumber && (
+                                <span className="font-mono text-xs px-2 py-0.5 rounded bg-white/10 text-amber-300 border border-amber-300/30">
+                                  NIC: {b.customerIdNumber}
+                                </span>
+                              )}
                             </div>
 
                             <div className="flex flex-wrap items-center gap-2.5 shrink-0">
@@ -3933,7 +4125,14 @@ export default function MasterAdminDashboard() {
                             className="bg-gray-50/80 px-4 py-3 sm:px-5 border-b border-gray-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm cursor-pointer hover:bg-gray-100/60 transition-colors"
                           >
                             <div>
-                              <div className="text-xs font-medium text-gray-500">Route</div>
+                              <div className="text-xs font-medium text-gray-500 flex items-center justify-between">
+                                <span>Route</span>
+                                {b.distanceKm ? (
+                                  <span className="font-mono font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 text-[10px]">
+                                    {b.distanceKm} km
+                                  </span>
+                                ) : null}
+                              </div>
                               <div className="font-semibold text-gray-900 mt-0.5">
                                 {b.pickupCity} → {b.deliveryCity}
                               </div>
@@ -4037,6 +4236,11 @@ export default function MasterAdminDashboard() {
                                     <dt className="text-gray-500">Route</dt>
                                     <dd className="font-semibold text-gray-900">
                                       {b.pickupCity} → {b.deliveryCity}
+                                      {b.distanceKm ? (
+                                        <span className="ml-2 font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 text-xs inline-block">
+                                          🛣️ {b.distanceKm} km
+                                        </span>
+                                      ) : null}
                                     </dd>
 
                                     <dt className="text-gray-500">Trip Date(s)</dt>
@@ -4165,6 +4369,22 @@ export default function MasterAdminDashboard() {
                                           aria-label={`End time for ${b.id}`}
                                           value={draft.endTime}
                                           onChange={(e) => updateScheduleDraft(b, { endTime: e.target.value })}
+                                          className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center justify-between">
+                                          <span>Distance (කි.මී.)</span>
+                                          <span className="text-[11px] text-blue-600 font-mono font-bold">KM</span>
+                                        </label>
+                                        <input
+                                          type="number"
+                                          min="1"
+                                          step="0.1"
+                                          placeholder="e.g. 120"
+                                          aria-label={`Distance in km for ${b.id}`}
+                                          value={draft.distanceKm || ""}
+                                          onChange={(e) => updateScheduleDraft(b, { distanceKm: e.target.value })}
                                           className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
                                         />
                                       </div>
@@ -4892,6 +5112,11 @@ export default function MasterAdminDashboard() {
                               ({b.customerPhone})
                             </span>
                           )}
+                          {b.customerIdNumber && (
+                            <span className="font-mono text-xs px-2 py-0.5 rounded bg-white/10 text-amber-300 border border-amber-300/30">
+                              NIC: {b.customerIdNumber}
+                            </span>
+                          )}
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
@@ -4937,7 +5162,14 @@ export default function MasterAdminDashboard() {
                         className="bg-gray-50/80 px-4 py-3 sm:px-5 border-b border-gray-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm cursor-pointer hover:bg-gray-100/60 transition-colors"
                       >
                         <div>
-                          <div className="text-xs font-medium text-gray-500">Route</div>
+                          <div className="text-xs font-medium text-gray-500 flex items-center justify-between">
+                            <span>Route</span>
+                            {b.distanceKm ? (
+                              <span className="font-mono font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 text-[10px]">
+                                {b.distanceKm} km
+                              </span>
+                            ) : null}
+                          </div>
                           <div className="font-semibold text-gray-900 mt-0.5">
                             {b.pickupCity} → {b.deliveryCity}
                           </div>
@@ -5025,6 +5257,11 @@ export default function MasterAdminDashboard() {
                                 <dt className="text-gray-500">Route</dt>
                                 <dd className="font-semibold text-gray-900">
                                   {b.pickupCity} → {b.deliveryCity}
+                                  {b.distanceKm ? (
+                                    <span className="ml-2 font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 text-xs inline-block">
+                                      🛣️ {b.distanceKm} km
+                                    </span>
+                                  ) : null}
                                 </dd>
 
                                 <dt className="text-gray-500">Date</dt>
@@ -5550,6 +5787,15 @@ export default function MasterAdminDashboard() {
                               <span className="font-mono font-semibold text-[#26231B]">
                                 {c.phone || "No phone"}
                               </span>
+                              {c.idNumber ? (
+                                <span className="inline-flex items-center gap-1 font-mono font-bold text-[11px] px-2 py-0.5 rounded-md bg-[#F7F5EE] border border-[#E7E2D0] text-[#26231B]">
+                                  🪪 NIC: {c.idNumber}
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center font-mono text-[11px] text-[#8C877A]">
+                                  NIC: Not recorded
+                                </span>
+                              )}
                               {c.city && <span>• {c.city}</span>}
                               {c.email && <span>• {c.email}</span>}
                               <span>
@@ -5624,12 +5870,210 @@ export default function MasterAdminDashboard() {
                                   <span className="text-[#6F6A5A]">
                                     ({b.date || "Date unspecified"})
                                   </span>
+                                  {b.distanceKm ? (
+                                    <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-800 border border-blue-200 text-[10px] font-mono font-bold">
+                                      🛣️ {b.distanceKm} km
+                                    </span>
+                                  ) : null}
                                 </div>
                                 <StatusBadge status={b.status} />
                               </div>
                             ))}
                           </div>
                         )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB: COMPLAINTS & DELETION REASONS AUDIT                  */}
+          {/* ========================================================= */}
+          {activeNav === "complaints" && (
+            <div className="bg-white border border-[#E7E2D0] rounded-2xl p-4 sm:p-5 flex flex-col gap-4">
+              {/* Header & Toolbar */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-[#E7E2D0]">
+                <div>
+                  <h2 className="text-base font-bold text-[#26231B] flex items-center gap-2">
+                    <span>Complaints &amp; Deletions Log ({filteredComplaints.length})</span>
+                    <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-800 text-[11px] font-mono font-bold">
+                      Audit
+                    </span>
+                  </h2>
+                  <p className="text-xs text-[#6F6A5A]">
+                    Mandatory reasons recorded whenever a booking is cancelled or permanently deleted.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="px-3 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-xs font-mono font-bold text-[#26231B]">
+                    {complaints.length} Total Records
+                  </span>
+                </div>
+              </div>
+
+              {/* Search Bar */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2 flex-1">
+                  <label
+                    htmlFor="complaint-search-input"
+                    className="text-xs font-semibold text-[#6F6A5A] shrink-0"
+                  >
+                    Search:
+                  </label>
+                  <div className="relative flex-1">
+                    <input
+                      id="complaint-search-input"
+                      type="text"
+                      placeholder="Search by ID, customer name, phone, NIC, route, or reason..."
+                      value={complaintSearch}
+                      onChange={(e) => setComplaintSearch(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] focus:outline-none focus:border-[#26231B]"
+                    />
+                    {complaintSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setComplaintSearch("")}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-[#8C877A] hover:text-[#26231B] cursor-pointer"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Content List */}
+              {loadingComplaints && complaints.length === 0 ? (
+                <div className="py-12 text-center text-xs font-semibold text-[#6F6A5A]">
+                  Loading complaints &amp; deletion audit records...
+                </div>
+              ) : filteredComplaints.length === 0 ? (
+                <div className="py-12 px-4 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-center flex flex-col items-center justify-center gap-2">
+                  <span className="text-3xl">📋</span>
+                  <p className="text-sm font-bold text-[#26231B]">No complaints or deleted booking records found</p>
+                  <p className="text-xs text-[#6F6A5A] max-w-md">
+                    {complaintSearch
+                      ? "No records matched your search query. Try clearing the search filter."
+                      : "When an admin deletes or cancels a booking, the mandatory reason and full trip details are safely logged here."}
+                  </p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {filteredComplaints.map((c) => {
+                    const cleanPhoneDigits = (c.customerPhone || "").replace(/[^0-9]/g, "");
+                    const intlPhone = cleanPhoneDigits.startsWith("0")
+                      ? `94${cleanPhoneDigits.slice(1)}`
+                      : cleanPhoneDigits.startsWith("94")
+                      ? cleanPhoneDigits
+                      : `94${cleanPhoneDigits}`;
+                    const formattedDate = c.deletedAt
+                      ? new Date(c.deletedAt).toLocaleString("en-GB", {
+                          dateStyle: "medium",
+                          timeStyle: "short",
+                        })
+                      : "Recently";
+
+                    return (
+                      <div
+                        key={c.id}
+                        className="rounded-xl border border-red-200 bg-white p-4 sm:p-5 shadow-xs flex flex-col gap-3 hover:border-red-300 transition-colors"
+                      >
+                        {/* Top Row: Meta info */}
+                        <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#F0ECE1]">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="px-2.5 py-0.5 rounded-md bg-red-100 text-red-900 border border-red-200 text-xs font-mono font-bold">
+                              Booking #{c.bookingId}
+                            </span>
+                            <span className="text-xs text-[#6F6A5A]">
+                              Deleted on: <b className="text-[#26231B] font-mono">{formattedDate}</b>
+                            </span>
+                            {c.deletedBy && (
+                              <span className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-700 font-semibold">
+                                By: {c.deletedBy}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            {c.customerPhone && (
+                              <>
+                                <a
+                                  href={`tel:${c.customerPhone}`}
+                                  className="px-2.5 py-1 rounded-lg border border-[#E7E2D0] hover:bg-[#F7F5EE] text-[#26231B] text-xs font-semibold transition-colors"
+                                >
+                                  📞 Call
+                                </a>
+                                <a
+                                  href={`https://wa.me/${intlPhone}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-xs font-semibold transition-colors"
+                                >
+                                  WhatsApp
+                                </a>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Customer & Route Details */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                          <div>
+                            <span className="text-[#6F6A5A] font-semibold block">Customer</span>
+                            <div className="font-bold text-[#26231B] text-sm mt-0.5">{c.customerName}</div>
+                            <div className="font-mono text-[#6F6A5A]">{c.customerPhone || "No phone"}</div>
+                            {c.customerIdNumber ? (
+                              <div className="font-mono text-[11px] font-bold text-amber-900 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 mt-1 inline-block">
+                                🪪 NIC: {c.customerIdNumber}
+                              </div>
+                            ) : (
+                              <div className="text-[11px] text-[#8C877A] mt-1">NIC: Not recorded</div>
+                            )}
+                          </div>
+
+                          <div>
+                            <span className="text-[#6F6A5A] font-semibold block">Route &amp; Distance</span>
+                            <div className="font-bold text-[#26231B] mt-0.5">
+                              {c.pickupCity} → {c.deliveryCity}
+                            </div>
+                            {c.distanceKm ? (
+                              <div className="font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 text-xs mt-1 inline-block">
+                                🛣️ {c.distanceKm} km
+                              </div>
+                            ) : (
+                              <div className="text-[#8C877A] text-[11px] mt-1">Distance not entered</div>
+                            )}
+                          </div>
+
+                          <div>
+                            <span className="text-[#6F6A5A] font-semibold block">Vehicle &amp; Trip Date</span>
+                            <div className="text-[#26231B] font-medium mt-0.5">{c.vehicleType || "Lorry"}</div>
+                            <div className="text-[#6F6A5A] font-mono text-[11px]">
+                              {c.date || "Date unspecified"}
+                            </div>
+                          </div>
+
+                          <div>
+                            <span className="text-[#6F6A5A] font-semibold block">Quoted Amount</span>
+                            <div className="font-mono font-bold text-[#26231B] text-sm mt-0.5">
+                              {c.quotedAmount !== undefined ? `Rs. ${Number(c.quotedAmount).toLocaleString()}` : "Not quoted"}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Prominent Mandatory Reason Callout */}
+                        <div className="p-3.5 rounded-xl bg-red-50/70 border border-red-200 flex flex-col gap-1">
+                          <span className="text-[10px] font-black uppercase tracking-wider text-red-800 flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-red-600"></span>
+                            Booking Deletion Reason (අවලංගු කිරීමට හේතුව):
+                          </span>
+                          <p className="text-xs font-semibold text-red-950 leading-relaxed whitespace-pre-wrap pl-3.5 border-l-2 border-red-400">
+                            {c.reason}
+                          </p>
+                        </div>
                       </div>
                     );
                   })}
@@ -7524,7 +7968,7 @@ export default function MasterAdminDashboard() {
 
                   return (
                     <>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <div>
                           <label className="block text-sm font-medium text-gray-800 mb-1">Mobile Phone *</label>
                           <input
@@ -7546,6 +7990,21 @@ export default function MasterAdminDashboard() {
                             value={manualForm.customerName}
                             onChange={(e) => setManualForm((p) => ({ ...p, customerName: e.target.value }))}
                             className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-sm font-medium text-gray-800 mb-1 flex items-center justify-between">
+                            <span>ID / NIC Number</span>
+                            <span className="text-xs text-amber-700 font-semibold font-mono">Mandatory</span>
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="e.g. 199512345678 / 951234567V"
+                            aria-label="Manual booking customer NIC or ID number"
+                            value={manualForm.customerIdNumber}
+                            onChange={(e) => setManualForm((p) => ({ ...p, customerIdNumber: e.target.value }))}
+                            className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
                           />
                         </div>
                       </div>
@@ -7591,7 +8050,7 @@ export default function MasterAdminDashboard() {
                   );
                 })()}
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-sm font-medium text-gray-800 mb-1">Pickup Location *</label>
                     <input
@@ -7613,6 +8072,23 @@ export default function MasterAdminDashboard() {
                       value={manualForm.deliveryCity}
                       onChange={(e) => setManualForm((p) => ({ ...p, deliveryCity: e.target.value }))}
                       className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-800 mb-1 flex items-center justify-between">
+                      <span>Distance (කිලෝමීටර්)</span>
+                      <span className="text-xs text-blue-700 font-mono font-bold">KM</span>
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="0.1"
+                      placeholder="e.g. 85"
+                      aria-label="Manual booking distance in km"
+                      value={manualForm.distanceKm}
+                      onChange={(e) => setManualForm((p) => ({ ...p, distanceKm: e.target.value }))}
+                      className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
                     />
                   </div>
                 </div>
@@ -7931,7 +8407,7 @@ export default function MasterAdminDashboard() {
 
               <div className="flex flex-col gap-3">
                 {isIndivModal && (
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                     <div>
                       <label className="block text-[11px] font-bold text-[#26231B] mb-1">Trip Date *</label>
                       <input
@@ -7957,6 +8433,21 @@ export default function MasterAdminDashboard() {
                         value={assignModal.endTime}
                         onChange={(e) => setAssignModal((p) => (p ? { ...p, endTime: e.target.value } : null))}
                         className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#26231B] mb-1 flex items-center justify-between">
+                        <span>Distance</span>
+                        <span className="font-mono text-blue-600">KM</span>
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="0.1"
+                        placeholder="e.g. 120"
+                        value={assignModal.distanceKm || ""}
+                        onChange={(e) => setAssignModal((p) => (p ? { ...p, distanceKm: e.target.value } : null))}
+                        className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-white text-xs font-mono font-bold text-[#26231B]"
                       />
                     </div>
                   </div>
@@ -8550,6 +9041,133 @@ export default function MasterAdminDashboard() {
                 {cashApprovalModal.statusMode === "success"
                   ? "Confirm & Mark Paid (Success)"
                   : "Confirm as Cash Pending"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Booking Deletion with Mandatory Reason Modal */}
+      {deleteBookingModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-red-200 overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="px-6 py-4 bg-red-700 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <span className="w-3 h-3 rounded-full bg-white animate-pulse"></span>
+                <div>
+                  <h3 className="text-base font-bold">Delete Booking · හේතුව ඇතුළත් කරන්න</h3>
+                  <p className="text-[11px] text-red-100">Deletion reason is mandatory and will be logged in Complaints.</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeleteBookingModal(null)}
+                className="text-white/80 hover:text-white text-lg font-bold px-2 py-0.5 rounded cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-6 flex flex-col gap-4">
+              {/* Booking Summary Box */}
+              <div className="p-3.5 bg-red-50/60 rounded-xl border border-red-200 text-xs text-gray-800 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono font-bold text-red-900">
+                    Booking #{deleteBookingModal.booking.id}
+                  </span>
+                  <span className="font-semibold text-gray-800">
+                    {deleteBookingModal.booking.pickupCity} → {deleteBookingModal.booking.deliveryCity}
+                  </span>
+                </div>
+                <div className="text-gray-700 flex flex-wrap items-center gap-2">
+                  <span>Customer: <strong className="text-gray-900">{deleteBookingModal.booking.customerName}</strong></span>
+                  {deleteBookingModal.booking.customerPhone && (
+                    <span className="font-mono text-gray-600">({deleteBookingModal.booking.customerPhone})</span>
+                  )}
+                  {deleteBookingModal.booking.customerIdNumber && (
+                    <span className="font-mono text-xs px-1.5 py-0.5 bg-white border border-red-200 rounded text-red-800">
+                      NIC: {deleteBookingModal.booking.customerIdNumber}
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-3 text-[11px] text-gray-600 pt-1 border-t border-red-200/60">
+                  <span>Date: <b>{deleteBookingModal.booking.date || "Unspecified"}</b></span>
+                  {deleteBookingModal.booking.distanceKm && (
+                    <span>Distance: <b>{deleteBookingModal.booking.distanceKm} km</b></span>
+                  )}
+                  {deleteBookingModal.booking.quotedAmount !== undefined && (
+                    <span>Amount: <b>Rs. {Number(deleteBookingModal.booking.quotedAmount).toLocaleString()}</b></span>
+                  )}
+                </div>
+              </div>
+
+              {/* Mandatory Reason Input */}
+              <div>
+                <label className="block text-xs font-bold text-gray-800 uppercase tracking-wider mb-1.5">
+                  Booking එක Delete කිරීමට හේතුව (Mandatory Reason) <span className="text-red-600">*</span>
+                </label>
+                <textarea
+                  rows={3}
+                  value={deleteBookingModal.reason}
+                  onChange={(e) =>
+                    setDeleteBookingModal((p) => (p ? { ...p, reason: e.target.value, error: "" } : null))
+                  }
+                  placeholder="Booking එක Delete කිරීමට නිශ්චිත හේතුව ඇතුළත් කරන්න (උදා: පාරිභෝගිකයාගේ ඉල්ලීම මත, මිල ගණන් නොගැලපීම, වාහන නොමැතිකම...)"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 text-gray-900 text-xs focus:border-red-600 focus:outline-none focus:ring-1 focus:ring-red-600"
+                />
+              </div>
+
+              {/* Quick Preset Buttons */}
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[11px] font-semibold text-gray-500">Quick reasons (කෙටි හේතු):</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    "Customer cancelled / පාරිභෝගිකයා අවලංගු කළා",
+                    "Price disagreement / මිල ගණන් එකඟ නොවීය",
+                    "Customer unreachable / දුරකථන සම්බන්ධ කරගත නොහැකි විය",
+                    "No vehicle available / වාහන නොමැතිකම",
+                    "Duplicate booking / ද්විත්ව ලියාපදිංචියක්",
+                  ].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() =>
+                        setDeleteBookingModal((p) => (p ? { ...p, reason: preset, error: "" } : null))
+                      }
+                      className="px-2.5 py-1 rounded-lg bg-gray-100 hover:bg-red-50 hover:text-red-700 hover:border-red-200 border border-gray-200 text-[11px] font-medium text-gray-700 transition-colors cursor-pointer"
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {deleteBookingModal.error && (
+                <div className="p-2.5 rounded-lg bg-red-100 border border-red-300 text-red-800 text-xs font-semibold">
+                  ⚠️ {deleteBookingModal.error}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-3.5 bg-gray-50 border-t border-gray-200 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                disabled={deletingBookingLoading}
+                onClick={() => setDeleteBookingModal(null)}
+                className="px-4 py-2 rounded-xl border border-gray-300 text-xs font-bold text-gray-700 hover:bg-gray-100 cursor-pointer disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingBookingLoading || !deleteBookingModal.reason.trim()}
+                onClick={handleConfirmDeleteBookingWithReason}
+                className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-red-600 hover:bg-red-700 transition-all cursor-pointer shadow-sm disabled:opacity-40"
+              >
+                {deletingBookingLoading ? "Deleting..." : "Confirm & Delete Booking"}
               </button>
             </div>
           </div>

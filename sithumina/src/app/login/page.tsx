@@ -43,6 +43,7 @@ export default function CustomerPortalPage() {
   const [mounted, setMounted] = useState(false);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [idNumber, setIdNumber] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<BookingFilterTab>("all");
@@ -266,6 +267,8 @@ export default function CustomerPortalPage() {
                 paymentRejectReason: data.paymentRejectReason ? String(data.paymentRejectReason) : "",
                 paymentApprovedAt: Number(data.paymentApprovedAt) || undefined,
                 paymentSlipDeletedAt: Number(data.paymentSlipDeletedAt) || undefined,
+                customerIdNumber: data.customerIdNumber || data.idNumber || "",
+                distanceKm: typeof data.distanceKm === "number" ? data.distanceKm : (Number(data.distanceKm) || undefined),
                 createdAt: Number(data.createdAt) || 0,
                 updatedAt: docUpdatedAt,
               });
@@ -396,12 +399,23 @@ export default function CustomerPortalPage() {
       return;
     }
 
+    const cleanIdNumber = idNumber.trim();
+    if (!cleanIdNumber) {
+      setErrorMessage(
+        locale === "en"
+          ? "Please enter your National ID Number (NIC)."
+          : "කරුණාකර ඔබගේ ජාතික හැඳුනුම්පත් අංකය (NIC) ඇතුළත් කරන්න."
+      );
+      return;
+    }
+
     setIsSubmitting(true);
     setErrorMessage(null);
     try {
       const cleanName = name.trim();
       const success = await loginWithPhone(phone, "1234", "customer", {
         name: cleanName || undefined,
+        idNumber: cleanIdNumber,
       });
       if (!success) {
         setErrorMessage(
@@ -994,6 +1008,22 @@ export default function CustomerPortalPage() {
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] focus:outline-none focus:border-[var(--ink)] transition-colors"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-extrabold text-[var(--ink)] mb-1.5">
+                  {locale === "en" ? "National ID Number (NIC) *" : "ජාතික හැඳුනුම්පත් අංකය (NIC) *"}
+                  <span className="text-red-600 ml-1 font-bold">({locale === "en" ? "Mandatory" : "අනිවාර්යයි"})</span>
+                </label>
+                <input
+                  suppressHydrationWarning
+                  type="text"
+                  value={idNumber}
+                  onChange={(e) => setIdNumber(e.target.value)}
+                  required
+                  placeholder={locale === "en" ? "e.g. 199012345678 or 901234567V" : "උදා: 199012345678 හෝ 901234567V"}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] font-mono uppercase focus:outline-none focus:border-[var(--ink)] transition-colors"
                 />
               </div>
 
@@ -1607,6 +1637,11 @@ export default function CustomerPortalPage() {
                                   : ""}
                               </span>
                             )}
+                            {b.distanceKm && (
+                              <span className="font-mono text-[11px] text-[#0d47a1] bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-bold">
+                                🛣️ {b.distanceKm} km
+                              </span>
+                            )}
                           </div>
                         )}
 
@@ -1753,8 +1788,13 @@ export default function CustomerPortalPage() {
                             </div>
 
                             {/* Cargo & Spec Chips */}
-                            {(b.cargoNature || b.cargoWeight || Number(b.helpersCount) > 0 || b.packageDetails) && (
+                            {(b.cargoNature || b.cargoWeight || Number(b.helpersCount) > 0 || b.packageDetails || b.distanceKm) && (
                               <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--mut)]">
+                                {b.distanceKm && (
+                                  <span className="px-2.5 py-1 rounded-lg bg-blue-50 border border-blue-200 font-bold text-blue-900 font-mono">
+                                    🛣️ {locale === "en" ? "Distance:" : "දුර:"} {b.distanceKm} km
+                                  </span>
+                                )}
                                 {b.cargoNature && (
                                   <span className="px-2.5 py-1 rounded-lg bg-[var(--bg)] border border-[var(--line)] font-semibold text-[var(--ink)]">
                                     {locale === "en" ? "Goods:" : "භාණ්ඩ:"} {b.cargoNature}

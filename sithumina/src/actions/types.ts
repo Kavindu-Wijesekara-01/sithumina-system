@@ -18,6 +18,8 @@ export interface BookingActionInput {
   endTime?: string;
   phone: string;
   customerName?: string;
+  customerIdNumber?: string;
+  distanceKm?: number;
   weight?: string;
   notes?: string;
   assignedPlate?: string;

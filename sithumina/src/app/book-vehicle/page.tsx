@@ -283,6 +283,7 @@ function BookVehicleContent() {
     dates: string[];
     phone: string;
     customerName: string;
+    idNumber: string;
     cargoNature: string;
     daysNeeded: string;
     cargoWeight: string;
@@ -295,6 +296,7 @@ function BookVehicleContent() {
     dates: [],
     phone: profile?.phone || "",
     customerName: profile?.name && profile.name !== "Valued Customer" ? profile.name : "",
+    idNumber: profile?.idNumber || "",
     cargoNature: DEFAULT_CARGO_NATURE,
     daysNeeded: "1",
     cargoWeight: "",
@@ -302,7 +304,7 @@ function BookVehicleContent() {
     notes: "",
   });
 
-  // Sync phone & name automatically when customer profile hydrates from AuthContext
+  // Sync phone, name & idNumber automatically when customer profile hydrates from AuthContext
   useEffect(() => {
     if (!profile) return;
     setForm((prev) => ({
@@ -311,6 +313,7 @@ function BookVehicleContent() {
       customerName:
         prev.customerName ||
         (profile.name && profile.name !== "Valued Customer" ? profile.name : ""),
+      idNumber: prev.idNumber || profile.idNumber || "",
     }));
   }, [profile]);
 
@@ -424,6 +427,16 @@ function BookVehicleContent() {
       return;
     }
 
+    const cleanIdNumber = (form.idNumber || "").trim();
+    if (!cleanIdNumber) {
+      alert(
+        locale === "en"
+          ? "National ID Number (NIC) is required for customer verification."
+          : "පාරිභෝගික තහවුරු කිරීම සඳහා ජාතික හැඳුනුම්පත් අංකය (NIC) ඇතුළත් කිරීම අනිවාර්යයි."
+      );
+      return;
+    }
+
     const primaryDate = form.date || form.dates[0];
     const allSelectedDates = primaryDate ? [primaryDate] : [];
 
@@ -446,6 +459,7 @@ function BookVehicleContent() {
         dates: allSelectedDates,
         phone: cleanPhone,
         customerName: form.customerName || (profile?.name ? profile.name : undefined),
+        customerIdNumber: cleanIdNumber,
         notes: form.notes,
         assignedPlate: selectedVehicle.plate,
         assignedLorryId: selectedVehicle.id,
@@ -467,6 +481,7 @@ function BookVehicleContent() {
             undefined;
           await loginWithPhone(cleanPhone, "1234", "customer", {
             name: resolvedCustomerName,
+            idNumber: cleanIdNumber,
           });
         }
         setSubmittedBooking({
@@ -1100,8 +1115,8 @@ function BookVehicleContent() {
               </p>
             </div>
 
-            {/* Mobile Phone & Customer Name */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Mobile Phone, Customer Name & National ID Number (NIC) */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label className="block text-xs font-black text-[var(--ink)] mb-1">
                   {locale === "en" ? "Mobile Phone Number *" : "ජංගම දුරකථන අංකය *"}
@@ -1113,6 +1128,21 @@ function BookVehicleContent() {
                   value={form.phone}
                   onChange={(e) => setForm({ ...form, phone: e.target.value })}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm font-mono font-bold text-[var(--ink)] focus:outline-none focus:border-[#26231B]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-black text-[var(--ink)] mb-1">
+                  {locale === "en" ? "National ID (NIC) *" : "ජාතික හැඳුනුම්පත් අංකය (NIC) *"}
+                  <span className="text-red-600 ml-1 font-bold">({locale === "en" ? "Mandatory" : "අනිවාර්යයි"})</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder={locale === "en" ? "e.g. 199012345678 or 901234567V" : "උදා: 199012345678 හෝ 901234567V"}
+                  value={form.idNumber}
+                  onChange={(e) => setForm({ ...form, idNumber: e.target.value })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm font-mono uppercase text-[var(--ink)] focus:outline-none focus:border-[#26231B]"
                 />
               </div>
 
@@ -1302,6 +1332,7 @@ function BookVehicleContent() {
                   phone: profile?.phone || "",
                   customerName:
                     profile?.name && profile.name !== "Valued Customer" ? profile.name : "",
+                  idNumber: profile?.idNumber || "",
                   cargoNature: DEFAULT_CARGO_NATURE,
                   daysNeeded: "1",
                   cargoWeight: "",

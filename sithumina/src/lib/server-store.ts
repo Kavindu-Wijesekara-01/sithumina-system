@@ -64,6 +64,7 @@ export interface StoredCustomer {
   phone: string;
   email?: string;
   city?: string;
+  idNumber?: string;
   createdAt: number;
   lastLoginAt: number;
 }
@@ -96,6 +97,8 @@ export interface StoredBooking {
   customerName: string;
   customerPhone: string;
   customerWhatsapp?: string;
+  customerIdNumber?: string;
+  distanceKm?: number;
   pickupCity: string;
   deliveryCity: string;
   pickupLat?: number;
@@ -171,11 +174,29 @@ export interface StoredReview {
   createdAt: number;
 }
 
+export interface StoredComplaint {
+  id: string;
+  bookingId: string;
+  customerName: string;
+  customerPhone: string;
+  customerIdNumber?: string;
+  pickupCity: string;
+  deliveryCity: string;
+  date: string;
+  vehicleType?: string;
+  quotedAmount?: number;
+  distanceKm?: number;
+  reason: string;
+  deletedAt: number;
+  deletedBy?: string;
+}
+
 interface FleetStoreData {
   drivers: StoredDriver[];
   lorries: StoredLorry[];
   customers: StoredCustomer[];
   bookings: StoredBooking[];
+  complaints: StoredComplaint[];
   registrations: StoredRegistration[];
   inquiries: StoredInquiry[];
   reviews: StoredReview[];
@@ -228,6 +249,7 @@ function readStore(): FleetStoreData {
         lorries: DEFAULT_LORRIES_SEED,
         customers: [],
         bookings: [],
+        complaints: [],
         registrations: [],
         inquiries: [],
         reviews: DEFAULT_REVIEWS_SEED,
@@ -263,6 +285,7 @@ function readStore(): FleetStoreData {
       lorries: rawLorries,
       customers: Array.isArray(parsed.customers) ? parsed.customers : [],
       bookings: Array.isArray(parsed.bookings) ? parsed.bookings : [],
+      complaints: Array.isArray(parsed.complaints) ? parsed.complaints : [],
       registrations: Array.isArray(parsed.registrations) ? parsed.registrations : [],
       inquiries: Array.isArray(parsed.inquiries) ? parsed.inquiries : [],
       reviews: Array.isArray(parsed.reviews) ? parsed.reviews : [],
@@ -280,6 +303,7 @@ function readStore(): FleetStoreData {
       lorries: DEFAULT_LORRIES_SEED,
       customers: [],
       bookings: [],
+      complaints: [],
       registrations: [],
       inquiries: [],
       reviews: DEFAULT_REVIEWS_SEED,
@@ -742,6 +766,7 @@ export function upsertCustomerInStore(input: {
   phone: string;
   email?: string;
   city?: string;
+  idNumber?: string;
 }): StoredCustomer {
   const store = readStore();
   const canonicalPhone = normalizePhoneNumber(input.phone) || input.phone.trim();
@@ -778,6 +803,7 @@ export function upsertCustomerInStore(input: {
     phone: canonicalPhone,
     email: input.email?.trim() || existingCustomer?.email || "",
     city: input.city?.trim() || existingCustomer?.city || "",
+    idNumber: input.idNumber?.trim() || existingCustomer?.idNumber || "",
     createdAt: existingCustomer ? existingCustomer.createdAt : Date.now(),
     lastLoginAt: Date.now(),
   };
@@ -904,6 +930,9 @@ export function upsertBookingInStore(booking: StoredBooking): StoredBooking {
 export function createBookingInStore(input: {
   customerName: string;
   customerPhone: string;
+  customerWhatsapp?: string;
+  customerIdNumber?: string;
+  distanceKm?: number;
   pickupCity: string;
   deliveryCity: string;
   pickupLat?: number;
@@ -961,6 +990,9 @@ export function createBookingInStore(input: {
     id,
     customerName: input.customerName.trim(),
     customerPhone: normalizedPhone,
+    customerWhatsapp: input.customerWhatsapp?.trim(),
+    customerIdNumber: input.customerIdNumber?.trim(),
+    distanceKm: input.distanceKm !== undefined && !Number.isNaN(Number(input.distanceKm)) ? Number(input.distanceKm) : undefined,
     pickupCity: input.pickupCity.trim(),
     deliveryCity: input.deliveryCity.trim(),
     pickupLat: input.pickupLat,
@@ -1010,6 +1042,7 @@ export function createBookingInStore(input: {
   upsertCustomerInStore({
     name: booking.customerName,
     phone: booking.customerPhone,
+    idNumber: booking.customerIdNumber,
   });
 
   return booking;
@@ -1028,6 +1061,8 @@ export function updateBookingStatusInStore(
     dates?: string[];
     startTime?: string;
     endTime?: string;
+    distanceKm?: number;
+    customerIdNumber?: string;
   },
   paymentMeta?: {
     quotedAmount?: number;
@@ -1092,6 +1127,12 @@ export function updateBookingStatusInStore(
     if (assignment.endTime !== undefined && assignment.endTime.trim() !== "") {
       store.bookings[idx].endTime = assignment.endTime.trim();
     }
+    if (assignment.distanceKm !== undefined && !Number.isNaN(Number(assignment.distanceKm))) {
+      store.bookings[idx].distanceKm = Number(assignment.distanceKm);
+    }
+    if (assignment.customerIdNumber !== undefined && assignment.customerIdNumber.trim() !== "") {
+      store.bookings[idx].customerIdNumber = assignment.customerIdNumber.trim();
+    }
   }
 
   if (paymentMeta) {
@@ -1125,6 +1166,26 @@ export function deleteBookingFromStore(id: string): boolean {
     return true;
   }
   return false;
+}
+
+/* ============================================================
+ * COMPLAINTS & DELETION REASONS
+ * ============================================================ */
+
+export function getAllStoredComplaints(): StoredComplaint[] {
+  return readStore().complaints;
+}
+
+export function recordComplaintInStore(complaint: StoredComplaint): StoredComplaint {
+  const store = readStore();
+  const existingIdx = store.complaints.findIndex((c) => c.id === complaint.id);
+  if (existingIdx >= 0) {
+    store.complaints[existingIdx] = complaint;
+  } else {
+    store.complaints.unshift(complaint);
+  }
+  writeStore(store);
+  return complaint;
 }
 
 /* ============================================================

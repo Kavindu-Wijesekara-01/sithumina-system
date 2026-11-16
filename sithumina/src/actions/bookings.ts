@@ -7,7 +7,10 @@ import {
   updateBookingStatusInStore,
   upsertBookingInStore,
   deleteBookingFromStore,
+  getAllStoredComplaints,
+  recordComplaintInStore,
   StoredBooking,
+  StoredComplaint,
   BookingStatusValue,
   PaymentSlipStatus,
   BookingPaymentMethod,
@@ -62,6 +65,13 @@ function mapFirestoreBooking(
     id: resolvedId,
     customerName: data.customerName || data.name || "Customer",
     customerPhone: String(data.customerPhone || data.phone || "").trim(),
+    customerIdNumber: data.customerIdNumber ? String(data.customerIdNumber).trim() : undefined,
+    distanceKm:
+      typeof data.distanceKm === "number" && !Number.isNaN(data.distanceKm)
+        ? data.distanceKm
+        : data.distanceKm !== undefined && !Number.isNaN(Number(data.distanceKm))
+        ? Number(data.distanceKm)
+        : undefined,
     pickupCity: data.pickupCity || data.pickup || "",
     deliveryCity: data.deliveryCity || data.destination || "",
     pickupLat: data.pickupLat,
@@ -504,6 +514,8 @@ export async function createBookingAction(
       pickupLng: input.pickupLng,
       deliveryLat: input.deliveryLat,
       deliveryLng: input.deliveryLng,
+      customerIdNumber: input.customerIdNumber?.trim(),
+      distanceKm: input.distanceKm !== undefined && !Number.isNaN(Number(input.distanceKm)) ? Number(input.distanceKm) : undefined,
       date,
       dates: input.dates,
       startTime: cleanStartTime || undefined,
@@ -582,6 +594,8 @@ export async function createBookingAction(
         helpersCount: booking.helpersCount ?? "0",
         status: booking.status,
         paymentSlipStatus: booking.paymentSlipStatus || "none",
+        customerIdNumber: booking.customerIdNumber || "",
+        distanceKm: booking.distanceKm ?? null,
         createdAt: booking.createdAt,
         updatedAt: booking.updatedAt,
       };
@@ -870,6 +884,8 @@ export async function updateBookingStatusAction(
     dates?: string[];
     startTime?: string;
     endTime?: string;
+    distanceKm?: number;
+    customerIdNumber?: string;
   },
   paymentMeta?: {
     quotedAmount?: number;
@@ -903,6 +919,8 @@ export async function updateBookingStatusAction(
           dates: Array.isArray(assignment.dates) && assignment.dates.length > 0 ? assignment.dates : undefined,
           startTime: assignment.startTime?.trim() || undefined,
           endTime: assignment.endTime?.trim() || undefined,
+          distanceKm: assignment.distanceKm !== undefined && !Number.isNaN(Number(assignment.distanceKm)) ? Number(assignment.distanceKm) : undefined,
+          customerIdNumber: assignment.customerIdNumber?.trim() || undefined,
         }
       : undefined;
 
@@ -1115,6 +1133,12 @@ export async function updateBookingStatusAction(
       if ("endTime" in effectiveAssignment && effectiveAssignment.endTime) {
         updateFields.endTime = effectiveAssignment.endTime;
       }
+      if ("distanceKm" in effectiveAssignment && effectiveAssignment.distanceKm !== undefined) {
+        updateFields.distanceKm = effectiveAssignment.distanceKm;
+      }
+      if ("customerIdNumber" in effectiveAssignment && effectiveAssignment.customerIdNumber) {
+        updateFields.customerIdNumber = effectiveAssignment.customerIdNumber;
+      }
 
       if (paymentMeta) {
         if (paymentMeta.quotedAmount !== undefined) updateFields.quotedAmount = paymentMeta.quotedAmount;
@@ -1220,23 +1244,73 @@ export async function updateBookingStatusAction(
 }
 
 /**
- * Server Action to permanently delete a booking from local store and Firestore database.
- * Also cleans up any related dispatches in Firestore so drivers no longer see it.
+ * Server Action to delete a booking with a mandatory reason.
+ * The deletion reason and booking details are saved as a Complaint record
+ * in Firestore and local store, before removing the booking and dispatch records.
  */
 export async function deleteBookingAction(
   id: string,
-  requesterPhone?: string
-): Promise<ActionResult<{ deletedId: string }>> {
+  reason: string,
+  requesterPhone?: string,
+  deletedBy?: string
+): Promise<ActionResult<{ deletedId: string; complaintId: string }>> {
   try {
     const cleanId = (id || "").trim();
     if (!cleanId) {
       return { success: false, error: "Booking ID is required." };
     }
+    const cleanReason = (reason || "").trim();
+    if (!cleanReason) {
+      return {
+        success: false,
+        error: "Booking එක delete කිරීම සඳහා හේතුවක් (Reason) ඇතුළත් කිරීම අනිවාර්ය වේ.",
+      };
+    }
 
-    // 1. Delete from local server file store
+    // 1. Fetch booking details to record in complaints before deleting
+    let targetBooking = getAllStoredBookings().find((b) => b.id === cleanId);
+    if (!targetBooking) {
+      try {
+        const snap = await getDoc(doc(db, "bookings", cleanId));
+        if (snap.exists()) {
+          targetBooking = mapFirestoreBooking(snap.id, snap.data());
+        }
+      } catch {
+        // non-blocking
+      }
+    }
+
+    // 2. Create and persist complaint record
+    const complaintId = `complaint-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+    const complaint: StoredComplaint = {
+      id: complaintId,
+      bookingId: cleanId,
+      customerName: targetBooking?.customerName || "Customer",
+      customerPhone: targetBooking?.customerPhone || requesterPhone || "",
+      customerIdNumber: targetBooking?.customerIdNumber || "",
+      pickupCity: targetBooking?.pickupCity || "",
+      deliveryCity: targetBooking?.deliveryCity || "",
+      date: targetBooking?.date || new Date().toISOString().split("T")[0],
+      vehicleType: targetBooking?.vehicleType || "",
+      quotedAmount: targetBooking?.quotedAmount,
+      distanceKm: targetBooking?.distanceKm,
+      reason: cleanReason,
+      deletedAt: Date.now(),
+      deletedBy: deletedBy || "Admin",
+    };
+
+    recordComplaintInStore(complaint);
+
+    try {
+      await setDoc(doc(db, "complaints", complaintId), complaint);
+    } catch (compErr) {
+      console.warn("Firestore save complaint notice:", compErr);
+    }
+
+    // 3. Delete from local server file store
     deleteBookingFromStore(cleanId);
 
-    // 2. Delete from Firestore bookings collection
+    // 4. Delete from Firestore bookings collection
     try {
       const docRef = doc(db, "bookings", cleanId);
       await deleteDoc(docRef);
@@ -1252,7 +1326,7 @@ export async function deleteBookingAction(
       console.warn("Firestore delete booking warning:", fsErr);
     }
 
-    // 3. Clean corresponding dispatch in dispatches collection
+    // 5. Clean corresponding dispatch in dispatches collection
     try {
       const dispatchDocId = `dispatch-${cleanId}`;
       await deleteDoc(doc(db, "dispatches", dispatchDocId));
@@ -1267,7 +1341,7 @@ export async function deleteBookingAction(
       console.warn("Firestore delete dispatch warning:", dispErr);
     }
 
-    // 4. Revalidate pages
+    // 6. Revalidate pages
     try {
       revalidatePath("/admin");
       revalidatePath("/login");
@@ -1280,13 +1354,47 @@ export async function deleteBookingAction(
 
     return {
       success: true,
-      data: { deletedId: cleanId },
+      data: { deletedId: cleanId, complaintId },
     };
   } catch (err: unknown) {
     console.error("deleteBookingAction error:", err);
     return {
       success: false,
       error: "Failed to delete booking.",
+    };
+  }
+}
+
+/**
+ * Server Action to fetch all recorded complaints and cancellation reasons.
+ */
+export async function getAllComplaintsAction(): Promise<ActionResult<StoredComplaint[]>> {
+  try {
+    const localComplaints = getAllStoredComplaints();
+    const map = new Map<string, StoredComplaint>();
+    localComplaints.forEach((c) => map.set(c.id, c));
+
+    try {
+      const snap = await getDocs(collection(db, "complaints"));
+      snap.docs.forEach((d) => {
+        const data = d.data() as StoredComplaint;
+        map.set(d.id, {
+          ...data,
+          id: d.id,
+          deletedAt: Number(data.deletedAt) || Date.now(),
+        });
+      });
+    } catch (e) {
+      console.warn("Firestore fetch complaints warning:", e);
+    }
+
+    const list = Array.from(map.values()).sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
+    return { success: true, data: list };
+  } catch (err: unknown) {
+    console.error("getAllComplaintsAction error:", err);
+    return {
+      success: false,
+      error: "Failed to fetch complaints.",
     };
   }
 }

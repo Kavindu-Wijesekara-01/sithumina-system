@@ -184,6 +184,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     hasPaymentSlip?: boolean;
     paymentSlipStatus?: string;
     quotedAmount?: number;
+    distanceKm?: number;
     createdAt: number;
     updatedAt?: number;
   }
@@ -296,6 +297,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
           ),
           paymentSlipStatus: data.paymentSlipStatus || "",
           quotedAmount: typeof data.quotedAmount === "number" ? data.quotedAmount : undefined,
+          distanceKm: typeof data.distanceKm === "number" ? data.distanceKm : (Number(data.distanceKm) || undefined),
           createdAt: Number(data.createdAt) || Date.now(),
           updatedAt: Number(data.updatedAt) || Number(data.createdAt) || 0,
         };
@@ -1128,6 +1130,12 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                   <Text style={styles.dispatchLabel}>DESTINATION</Text>
                   <Text style={styles.dispatchValue}>{dispatch.deliveryCity}</Text>
                 </View>
+                {dispatch.distanceKm ? (
+                  <View style={styles.dispatchRow}>
+                    <Text style={styles.dispatchLabel}>DISTANCE</Text>
+                    <Text style={[styles.dispatchValue, { color: '#0284c7', fontWeight: 'bold' }]}>{dispatch.distanceKm} km</Text>
+                  </View>
+                ) : null}
                 {dispatch.date ? (
                   <View style={styles.dispatchRow}>
                     <Text style={styles.dispatchLabel}>DATE</Text>

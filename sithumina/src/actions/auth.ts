@@ -19,7 +19,8 @@ import { collection, deleteDoc, doc, getDocs, setDoc, updateDoc } from "firebase
  */
 export async function loginCustomerAction(
   phone: string,
-  name?: string
+  name?: string,
+  idNumber?: string
 ): Promise<ActionResult<StoredCustomer>> {
   try {
     const rawPhone = phone?.trim();
@@ -29,6 +30,7 @@ export async function loginCustomerAction(
     }
 
     const cleanInputName = name?.trim();
+    const cleanIdNumber = idNumber?.trim();
     const isGenericName =
       !cleanInputName ||
       cleanInputName === "Valued Customer" ||
@@ -84,6 +86,7 @@ export async function loginCustomerAction(
     const customer = upsertCustomerInStore({
       phone: canonicalPhone,
       name: resolvedName,
+      idNumber: cleanIdNumber,
     });
 
     try {
@@ -95,6 +98,7 @@ export async function loginCustomerAction(
           phone: customer.phone,
           name: customer.name,
           role: "customer",
+          idNumber: customer.idNumber || cleanIdNumber || "",
           createdAt: customer.createdAt,
           lastLoginAt: customer.lastLoginAt,
         },
@@ -190,6 +194,7 @@ export async function loginDriverAction(
 export async function registerCustomerAction(input: {
   phone: string;
   name: string;
+  idNumber?: string;
   city?: string;
   email?: string;
 }): Promise<ActionResult<StoredCustomer>> {
@@ -209,6 +214,7 @@ export async function registerCustomerAction(input: {
     const customer = upsertCustomerInStore({
       phone: canonicalPhone,
       name: cleanName,
+      idNumber: input.idNumber?.trim(),
       city: input.city?.trim(),
       email: input.email?.trim(),
     });
@@ -222,6 +228,7 @@ export async function registerCustomerAction(input: {
           name: customer.name,
           email: customer.email || "",
           city: customer.city || "",
+          idNumber: customer.idNumber || input.idNumber?.trim() || "",
           role: "customer",
           createdAt: customer.createdAt,
           lastLoginAt: customer.lastLoginAt,
@@ -382,6 +389,7 @@ export async function getCustomersAction(): Promise<ActionResult<StoredCustomer[
         phone: prev.phone || entry.phone,
         email: entry.email || prev.email || "",
         city: entry.city || prev.city || "",
+        idNumber: entry.idNumber || prev.idNumber || "",
         createdAt:
           prev.createdAt && entry.createdAt
             ? Math.min(prev.createdAt, entry.createdAt)
@@ -403,6 +411,7 @@ export async function getCustomersAction(): Promise<ActionResult<StoredCustomer[
           phone: String(data.phone || ""),
           email: data.email || "",
           city: data.city || "",
+          idNumber: String(data.idNumber || data.nic || "").trim(),
           createdAt: Number(data.createdAt) || 0,
           lastLoginAt: Number(data.lastLoginAt) || Number(data.createdAt) || 0,
         });

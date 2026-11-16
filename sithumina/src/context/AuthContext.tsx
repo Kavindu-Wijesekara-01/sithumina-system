@@ -21,6 +21,7 @@ export interface UserProfile {
   phone: string;
   role: UserRole;
   name: string;
+  idNumber?: string;
   plateNumber?: string;
   assignedLorryId?: string;
   createdAt: number;
@@ -35,7 +36,7 @@ interface AuthContextType {
     phone: string,
     pin: string,
     role: UserRole,
-    extra?: { name?: string; plateNumber?: string }
+    extra?: { name?: string; plateNumber?: string; idNumber?: string }
   ) => Promise<boolean>;
   loginAsAdmin: () => Promise<boolean>;
   logout: () => Promise<void>;
@@ -125,7 +126,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     phone: string,
     _pin: string,
     _selectedRole: UserRole,
-    extra?: { name?: string; plateNumber?: string }
+    extra?: { name?: string; plateNumber?: string; idNumber?: string }
   ): Promise<boolean> => {
     try {
       const canonicalPhone = normalizePhoneNumber(phone) || phone.trim();
@@ -137,16 +138,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       // 1. Sync to Central Store & canonical users/{uid} via Server Action (bounded 3.5s)
       let customerName = extra?.name?.trim() || "";
+      let customerIdNumber = extra?.idNumber?.trim() || "";
       let resolvedUid = canonicalUid;
       try {
         const { loginCustomerAction } = await import("@/actions");
         const res = await withTimeout(
-          loginCustomerAction(canonicalPhone, customerName || undefined),
+          loginCustomerAction(canonicalPhone, customerName || undefined, customerIdNumber || undefined),
           3500,
           null
         );
         if (res && res.success && res.data) {
           if (res.data.name) customerName = res.data.name;
+          if (res.data.idNumber) customerIdNumber = res.data.idNumber;
           if (res.data.id) resolvedUid = res.data.id;
         }
       } catch (e) {
@@ -176,6 +179,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         phone: canonicalPhone,
         role: "customer", // Web platform is exclusively for customers
         name: customerName || "Valued Customer",
+        ...(customerIdNumber ? { idNumber: customerIdNumber } : {}),
         ...(extra?.plateNumber ? { plateNumber: extra.plateNumber } : {}),
         createdAt: Date.now(),
       };

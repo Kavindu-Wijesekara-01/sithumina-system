@@ -35,6 +35,7 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
 
   const [customerName, setCustomerName] = useState("");
   const [phone, setPhone] = useState("");
+  const [idNumber, setIdNumber] = useState("");
   const [whatsapp, setWhatsapp] = useState("");
   const [pickupCity, setPickupCity] = useState(lorry?.startLocation || "");
   const [deliveryCity, setDeliveryCity] = useState(lorry?.endLocation || "");
@@ -54,6 +55,7 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
 
     const cName = customerName.trim();
     const cPhone = phone.trim();
+    const cIdNumber = idNumber.trim();
     const cWhatsapp = whatsapp.trim();
     const pCity = pickupCity.trim();
     const dCity = deliveryCity.trim();
@@ -65,6 +67,10 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
     }
     if (!cPhone || cPhone.length < 9) {
       setErrorMessage(locale === "en" ? "Please enter a valid Mobile Number" : "වලංගු ජංගම දුරකථන අංකයක් ඇතුළත් කරන්න");
+      return;
+    }
+    if (!cIdNumber) {
+      setErrorMessage(locale === "en" ? "Please enter your National ID Number (NIC)" : "කරුණාකර ඔබගේ ජාතික හැඳුනුම්පත් අංකය (NIC) ඇතුළත් කරන්න");
       return;
     }
     if (!cWhatsapp || cWhatsapp.length < 9) {
@@ -96,6 +102,7 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
       const res = await createBookingAction({
         customerName: cName,
         phone: cPhone,
+        customerIdNumber: cIdNumber,
         pickup: pCity,
         destination: dCity,
         pickupLat: pCoords ? pCoords[0] : undefined,
@@ -116,7 +123,7 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
       if (res.success && res.data?.id) {
         setCreatedBookingId(res.data.id);
         try {
-          await loginWithPhone(cPhone, "1234", "customer", { name: cName });
+          await loginWithPhone(cPhone, "1234", "customer", { name: cName, idNumber: cIdNumber });
         } catch {
           // ignore auto-login failure
         }
@@ -233,8 +240,8 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
               </div>
             )}
 
-            {/* Customer Name & Phone */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Customer Name, Phone & National ID (NIC) */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label className="block text-[11px] font-black text-[#26231B] mb-1">
                   {locale === "en" ? "Customer Name *" : "පාරිභෝගිකයාගේ නම *"}
@@ -250,7 +257,7 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
 
               <div>
                 <label className="block text-[11px] font-black text-[#26231B] mb-1">
-                  {locale === "en" ? "Mobile Phone Number *" : "ජංගම දුරකථන අංකය *"}
+                  {locale === "en" ? "Mobile Phone *" : "ජංගම දුරකථන අංකය *"}
                 </label>
                 <input
                   type="tel"
@@ -258,6 +265,20 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
                   value={phone}
                   onChange={(e) => setPhone(e.target.value)}
                   className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] font-mono font-bold focus:outline-none focus:border-[#FFC20E]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-black text-[#26231B] mb-1">
+                  {locale === "en" ? "National ID (NIC) *" : "හැඳුනුම්පත් අංකය (NIC) *"}
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder={locale === "en" ? "e.g. 199012345678" : "උදා: 199012345678"}
+                  value={idNumber}
+                  onChange={(e) => setIdNumber(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] font-mono uppercase font-bold focus:outline-none focus:border-[#FFC20E]"
                 />
               </div>
             </div>
