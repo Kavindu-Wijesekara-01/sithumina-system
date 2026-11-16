@@ -356,7 +356,7 @@ export default function MasterAdminDashboard() {
     vehicleType: VEHICLE_TYPE_OPTIONS[0],
     capacity: "14.5ft × 6.5ft × 7ft Cargo Space",
     maxWeight: "3.5 Tons (3,500 kg)",
-    baseCity: "Peliyagoda / Colombo",
+    baseCity: "",
     description: "Dedicated fleet lorry available for individual bookings across Sri Lanka.",
     rider: "Unassigned",
     images: [],
@@ -2099,7 +2099,7 @@ export default function MasterAdminDashboard() {
       vehicleType: VEHICLE_TYPE_OPTIONS[0],
       capacity: "14.5ft × 6.5ft × 7ft Cargo Space",
       maxWeight: "3.5 Tons (3,500 kg)",
-      baseCity: "Peliyagoda / Colombo",
+      baseCity: "",
       description: "Dedicated fleet lorry available for individual bookings across Sri Lanka.",
       rider: drivers[0]?.name || "Unassigned",
       images: [],
@@ -2118,7 +2118,7 @@ export default function MasterAdminDashboard() {
       vehicleType: v.vehicleType || VEHICLE_TYPE_OPTIONS[0],
       capacity: (v as any).capacity || "14.5ft × 6.5ft × 7ft Cargo Space",
       maxWeight: (v as any).maxWeight || "3.5 Tons (3,500 kg)",
-      baseCity: v.startLocation || "Peliyagoda / Colombo",
+      baseCity: v.startLocation || (v as any).baseCity || "",
       description: (v as any).description || "",
       rider: v.driverName || "Unassigned",
       images: existingImgs,
@@ -7683,10 +7683,13 @@ export default function MasterAdminDashboard() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-bold text-[#26231B] mb-1">Base Terminal / City</label>
+                  <label className="block text-xs font-bold text-[#26231B] mb-1 flex items-center justify-between">
+                    <span>Base Terminal / City</span>
+                    <span className="text-[10px] font-normal text-[#8C877A]">(Optional)</span>
+                  </label>
                   <input
                     type="text"
-                    placeholder="Peliyagoda / Colombo"
+                    placeholder="e.g. Peliyagoda / Colombo (Optional)"
                     value={lorryForm.baseCity}
                     onChange={(e) => setLorryForm((p) => ({ ...p, baseCity: e.target.value }))}
                     className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
