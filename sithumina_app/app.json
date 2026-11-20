@@ -11,7 +11,8 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Sithumina Driver needs your GPS location to track your lorry on the live transport map.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "Sithumina Driver needs continuous GPS tracking to update live trip routes on the web map."
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Sithumina Driver needs continuous GPS tracking to update live trip routes on the web map.",
+        "UIBackgroundModes": ["location"]
       }
     },
     "android": {
@@ -43,6 +44,14 @@
           "imageWidth": 200,
           "resizeMode": "contain",
           "backgroundColor": "#FFC20E"
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Sithumina Driver needs continuous GPS tracking to update live trip routes on the web map.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
         }
       ]
     ],

@@ -13,10 +13,17 @@ import {
 } from "@/lib/server-store";
 import { normalizePlate, normalizePhoneNumber, phonesMatch } from "@/lib/phone-utils";
 import {
+  addDaysToYYYYMMDD,
   cleanRiderName,
   findBookingScheduleConflict,
+  formatJourneyScheduleSummary,
   formatTimeDurationLabel,
+  formatTime12h,
+  getDatesBetween,
+  getSriLankaTimestampForDateTime,
   hasAssignedRider,
+  parseTimeToMinutes,
+  validateScheduleTimeAndDates,
   validateTimeRange,
 } from "@/lib/booking-schedule";
 import {
@@ -63,11 +70,14 @@ import {
   registerCustomerAction,
   deleteCustomerAction,
 } from "@/actions";
+import { SRI_LANKA_CITIES } from "@/lib/sri-lanka-routes";
+import { getDistanceFromLatLonInKm } from "@/lib/geo-utils";
 
 const ADMIN_PIN = process.env.NEXT_PUBLIC_ADMIN_PIN || "ST@2024";
 
 type NavSection =
   | "overview"
+  | "all_bookings"
   | "individual_bookings"
   | "online_bookings"
   | "customers"
@@ -111,6 +121,8 @@ interface AssignModalState {
   driverPhone: string;
   plate: string;
   date: string;
+  endDate?: string;
+  isMultiDate?: boolean;
   startTime: string;
   endTime: string;
   distanceKm?: string;
@@ -118,6 +130,9 @@ interface AssignModalState {
 
 interface ScheduleDraft {
   date: string;
+  endDate?: string;
+  isMultiDate?: boolean;
+  dates?: string[];
   startTime: string;
   endTime: string;
   plate: string;
@@ -141,10 +156,15 @@ interface ManualBookingForm {
   deliveryCity: string;
   distanceKm: string;
   date: string;
+  endDate?: string;
+  isMultiDate?: boolean;
   startTime: string;
   endTime: string;
   quotedAmount: string;
-  paymentStatusMode: "pending" | "success";
+  paymentStatusMode: "pending" | "success" | "partial";
+  advanceAmount: string;
+  paymentMethod: "cash_manual" | "bank_transfer";
+  paymentBankUsed: string;
   paymentNote: string;
   cargoNature: string;
   cargoWeight: string;
@@ -258,6 +278,142 @@ function getSriLankaMidnightTimestamp(timestamp: number = Date.now()): number {
   return Date.UTC(y, m, dt) - SRI_LANKA_OFFSET_MS;
 }
 
+function getRouteDistanceKm(pickup?: string, delivery?: string, recordedKm?: number | string): string {
+  if (recordedKm && !Number.isNaN(Number(recordedKm)) && Number(recordedKm) > 0) {
+    return `${Number(recordedKm)} km`;
+  }
+  if (!pickup || !delivery) return "—";
+  const pNorm = pickup.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  const dNorm = delivery.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  const pCoord = SRI_LANKA_CITIES[pNorm];
+  const dCoord = SRI_LANKA_CITIES[dNorm];
+  if (pCoord && dCoord) {
+    const rawDist = getDistanceFromLatLonInKm(pCoord[0], pCoord[1], dCoord[0], dCoord[1]);
+    const roadDist = Math.max(10, Math.round(rawDist * 1.3));
+    return `~${roadDist} km`;
+  }
+  return "Island-wide";
+}
+
+function addMinutesToHHMM(hhmm?: string | null, minsToAdd: number = 5): string {
+  if (!hhmm) return "";
+  const m = parseTimeToMinutes(hhmm);
+  if (m === null) return hhmm;
+  const nextM = Math.min(1440, m + minsToAdd);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(Math.floor(nextM / 60))}:${pad(nextM % 60)}`;
+}
+
+export interface BookingRideLifecycle {
+  stage: "upcoming" | "ongoing" | "completed" | "cancelled" | "unscheduled";
+  isUpcoming: boolean;
+  isOngoing: boolean;
+  isCompleted: boolean;
+  isCancelled: boolean;
+  startTimestamp: number | null;
+  endTimestamp: number | null;
+  startPlus15: number | null;
+  endPlus5: number | null;
+}
+
+/**
+ * Evaluates real-time dispatch trip lifecycle:
+ * - Upcoming: Scheduled trip before start time + 15 min grace window (e.g. before 09:15 for 09:00 start)
+ * - Ongoing: Active trip on the road from start time up to end time + 5 min (e.g. 09:00 - 11:00 until 11:05)
+ * - Completed: Finished/delivered trip once end time + 5 min passes (11:05 onwards) or marked delivered
+ *   -> Once completed, time slot is released and becomes available for new bookings!
+ */
+export function getBookingLifecycle(b: StoredBooking, nowMs: number = Date.now()): BookingRideLifecycle {
+  if (b.status === "cancelled") {
+    return {
+      stage: "cancelled",
+      isUpcoming: false,
+      isOngoing: false,
+      isCompleted: false,
+      isCancelled: true,
+      startTimestamp: null,
+      endTimestamp: null,
+      startPlus15: null,
+      endPlus5: null,
+    };
+  }
+
+  // Explicit delivered/completed status
+  if (b.status === "delivered") {
+    return {
+      stage: "completed",
+      isUpcoming: false,
+      isOngoing: false,
+      isCompleted: true,
+      isCancelled: false,
+      startTimestamp: null,
+      endTimestamp: null,
+      startPlus15: null,
+      endPlus5: null,
+    };
+  }
+
+  const bDates = Array.isArray(b.dates) && b.dates.length > 0 ? b.dates : (b.date ? [b.date] : []);
+  const bDate = b.date || bDates[0] || "";
+  const bEndDate = bDates.length > 1 ? bDates[bDates.length - 1] : bDate;
+  const startTime = b.startTime || "";
+  const endTime = b.endTime || "";
+
+  if (!bDate) {
+    return {
+      stage: "unscheduled",
+      isUpcoming: true,
+      isOngoing: false,
+      isCompleted: false,
+      isCancelled: false,
+      startTimestamp: null,
+      endTimestamp: null,
+      startPlus15: null,
+      endPlus5: null,
+    };
+  }
+
+  const startTimestamp = getSriLankaTimestampForDateTime(bDate, startTime || "08:00");
+  const endTimestamp = getSriLankaTimestampForDateTime(bEndDate, endTime || (startTime ? "12:00" : "17:00"));
+  const startPlus15 = startTimestamp !== null ? startTimestamp + 15 * 60 * 1000 : null;
+  const endPlus5 = endTimestamp !== null ? endTimestamp + 5 * 60 * 1000 : null;
+
+  // Active on Road / Ongoing check:
+  // - Explicitly marked in_transit or goods_collected
+  // - OR scheduled departure time has arrived (now >= startTimestamp)
+  // CRITICAL REQUIREMENT: A ride is NEVER automatically completed or freed by clock expiration!
+  // It remains ONGOING until the Admin or Driver manually verifies/marks it as "Delivered / Completed".
+  const isManuallyOngoing = b.status === "in_transit" || b.status === "goods_collected";
+  const isTimeOngoing = startTimestamp !== null && nowMs >= startTimestamp;
+
+  if (isManuallyOngoing || isTimeOngoing) {
+    return {
+      stage: "ongoing",
+      isUpcoming: false,
+      isOngoing: true,
+      isCompleted: false,
+      isCancelled: false,
+      startTimestamp,
+      endTimestamp,
+      startPlus15,
+      endPlus5,
+    };
+  }
+
+  // Upcoming check: before departure start time
+  return {
+    stage: "upcoming",
+    isUpcoming: true,
+    isOngoing: false,
+    isCompleted: false,
+    isCancelled: false,
+    startTimestamp,
+    endTimestamp,
+    startPlus15,
+    endPlus5,
+  };
+}
+
 type RevenueTimeFilter = "today" | "yesterday" | "pick_date" | "days_count" | "this_month" | "last_month" | "all_time" | "custom";
 
 export default function MasterAdminDashboard() {
@@ -345,6 +501,29 @@ export default function MasterAdminDashboard() {
     }));
   };
 
+  // ---- Dashboard Overview States ----
+  const [dashboardFilterMode, setDashboardFilterMode] = useState<
+    "upcoming" | "ongoing" | "completed" | "unpaid" | "all" | "today"
+  >("upcoming");
+  const [dashboardDateFrom, setDashboardDateFrom] = useState<string>("");
+  const [dashboardDateTo, setDashboardDateTo] = useState<string>("");
+  const [expandedDashboardBookings, setExpandedDashboardBookings] = useState<Record<string, boolean>>({});
+
+  // ---- Dedicated Ongoing, Pending Payment & Completed Sections States ----
+  const [allBookingsTab, setAllBookingsTab] = useState<"ongoing" | "pending_payment" | "completed">("ongoing");
+  const [ongoingSearch, setOngoingSearch] = useState<string>("");
+  const [pendingPaymentSearch, setPendingPaymentSearch] = useState<string>("");
+  const [completedSearch, setCompletedSearch] = useState<string>("");
+  const [completedDateFrom, setCompletedDateFrom] = useState<string>("");
+  const [completedDateTo, setCompletedDateTo] = useState<string>("");
+
+  const toggleDashboardBookingCard = (bookingId: string, currentExpanded: boolean) => {
+    setExpandedDashboardBookings((prev) => ({
+      ...prev,
+      [bookingId]: !currentExpanded,
+    }));
+  };
+
   // ---- Fleet Vehicles State ----
   const [fleetVehicles, setFleetVehicles] = useState<Lorry[]>([]);
   const [loadingFleet, setLoadingFleet] = useState(true);
@@ -419,6 +598,9 @@ export default function MasterAdminDashboard() {
     endTime: "12:00",
     quotedAmount: "",
     paymentStatusMode: "pending",
+    advanceAmount: "",
+    paymentMethod: "cash_manual",
+    paymentBankUsed: "",
     paymentNote: "",
     cargoNature: CARGO_NATURE_OPTIONS[0],
     cargoWeight: "",
@@ -452,12 +634,23 @@ export default function MasterAdminDashboard() {
   } | null>(null);
   const [deletingBookingLoading, setDeletingBookingLoading] = useState(false);
 
-  // ---- Cash Approval Modal State ----
-  const [cashApprovalModal, setCashApprovalModal] = useState<{
+  // ---- Payment Approval & Settle Modals State ----
+  const [paymentApprovalModal, setPaymentApprovalModal] = useState<{
     booking: StoredBooking;
-    amount: string;
+    totalAmount: string;
+    collectionMode: "full_paid" | "partial_advance" | "full_pending";
+    advanceAmount: string;
+    paymentMethod: "cash_manual" | "bank_transfer";
+    bankUsed: string;
     note: string;
-    statusMode: "pending" | "success";
+  } | null>(null);
+
+  const [settleBalanceModal, setSettleBalanceModal] = useState<{
+    booking: StoredBooking;
+    pendingAmount: number;
+    settleMethod: "cash_manual" | "bank_transfer";
+    bankUsed: string;
+    note: string;
   } | null>(null);
 
   const isRealCustomerName = useCallback((raw?: string) => {
@@ -543,6 +736,9 @@ export default function MasterAdminDashboard() {
       endTime: "12:00",
       quotedAmount: "",
       paymentStatusMode: "pending",
+      advanceAmount: "",
+      paymentMethod: "cash_manual",
+      paymentBankUsed: "",
       paymentNote: "",
       cargoNature: CARGO_NATURE_OPTIONS[0],
       cargoWeight: "",
@@ -845,6 +1041,17 @@ export default function MasterAdminDashboard() {
             quoteNote: data.quoteNote ? String(data.quoteNote) : undefined,
             paymentMethod: (data.paymentMethod as BookingPaymentMethod) || undefined,
             paymentBankUsed: data.paymentBankUsed ? String(data.paymentBankUsed) : undefined,
+            advanceAmount:
+              typeof data.advanceAmount === "number" && !Number.isNaN(data.advanceAmount)
+                ? data.advanceAmount
+                : undefined,
+            pendingAmount:
+              typeof data.pendingAmount === "number" && !Number.isNaN(data.pendingAmount)
+                ? data.pendingAmount
+                : undefined,
+            finalPaymentMethod: (data.finalPaymentMethod as BookingPaymentMethod) || undefined,
+            finalPaymentBankUsed: data.finalPaymentBankUsed ? String(data.finalPaymentBankUsed) : undefined,
+            finalPaymentAt: Number(data.finalPaymentAt) || undefined,
             paymentSlipId: data.paymentSlipId ? String(data.paymentSlipId) : "",
             paymentSlipName: data.paymentSlipName ? String(data.paymentSlipName) : "",
             paymentSlipType: data.paymentSlipType ? String(data.paymentSlipType) : "",
@@ -903,8 +1110,15 @@ export default function MasterAdminDashboard() {
             (b.assignedDriverPhone && phonesMatch(d.phone, b.assignedDriverPhone)) ||
             (existingDriverName && d.name.toLowerCase() === existingDriverName.toLowerCase())
         ) || null;
+      const bDates = Array.isArray(b.dates) && b.dates.length > 0 ? b.dates : (b.date ? [b.date] : []);
+      const startDate = b.date || bDates[0] || new Date().toISOString().split("T")[0];
+      const endDate = bDates.length > 1 ? bDates[bDates.length - 1] : startDate;
+      const isMultiDate = bDates.length > 1 || (b.daysNeeded !== undefined && Number(b.daysNeeded) > 1);
       return {
-        date: b.date || (Array.isArray(b.dates) && b.dates[0]) || new Date().toISOString().split("T")[0],
+        date: startDate,
+        endDate: endDate,
+        isMultiDate: isMultiDate,
+        dates: bDates.length > 0 ? bDates : [startDate],
         startTime: b.startTime || "",
         endTime: b.endTime || "",
         plate: b.assignedPlate || matchedVehicle?.plate || "",
@@ -940,12 +1154,19 @@ export default function MasterAdminDashboard() {
       draft: ScheduleDraft
     ): { valid: true; assignment: NonNullable<Parameters<typeof updateBookingStatusAction>[2]> } | { valid: false } => {
       if (!draft.date || !draft.date.trim()) {
-        showToast("Please select a Trip Date before allocating a schedule.", "error");
+        showToast("Please select a Trip Departure Date before allocating a schedule.", "error");
         return { valid: false };
       }
-      const timeCheck = validateTimeRange(draft.startTime, draft.endTime);
-      if (!timeCheck.valid) {
-        showToast(timeCheck.error, "error");
+      const resolvedEndDate = draft.isMultiDate && draft.endDate ? draft.endDate.trim() : draft.date.trim();
+      const scheduleCheck = validateScheduleTimeAndDates(
+        draft.date.trim(),
+        draft.startTime,
+        resolvedEndDate,
+        draft.endTime,
+        draft.dates
+      );
+      if (!scheduleCheck.valid) {
+        showToast(scheduleCheck.error, "error");
         return { valid: false };
       }
       if (!draft.plate.trim()) {
@@ -966,10 +1187,10 @@ export default function MasterAdminDashboard() {
       const conflict = findBookingScheduleConflict(
         {
           excludeBookingId: bookingId,
-          date: draft.date.trim(),
-          dates: [draft.date.trim()],
-          startTime: timeCheck.startTime,
-          endTime: timeCheck.endTime,
+          date: scheduleCheck.startDate,
+          dates: scheduleCheck.dates,
+          startTime: scheduleCheck.startTime,
+          endTime: scheduleCheck.endTime,
           assignedPlate: draft.plate.trim(),
           assignedLorryId: draft.lorryId.trim() || `lorry-${normalizePlate(draft.plate).toLowerCase()}`,
           assignedDriverId: draft.driverId.trim(),
@@ -987,10 +1208,12 @@ export default function MasterAdminDashboard() {
       return {
         valid: true,
         assignment: {
-          date: draft.date.trim(),
-          dates: [draft.date.trim()],
-          startTime: timeCheck.startTime,
-          endTime: timeCheck.endTime,
+          date: scheduleCheck.startDate,
+          dates: scheduleCheck.dates,
+          endDate: scheduleCheck.endDate,
+          daysNeeded: scheduleCheck.daysCount,
+          startTime: scheduleCheck.startTime,
+          endTime: scheduleCheck.endTime,
           assignedPlate: draft.plate.trim(),
           assignedLorryId: draft.lorryId.trim() || `lorry-${normalizePlate(draft.plate).toLowerCase()}`,
           assignedDriverId: draft.driverId.trim() || undefined,
@@ -1025,6 +1248,12 @@ export default function MasterAdminDashboard() {
         quotedAt?: number;
         quoteNote?: string;
         paymentMethod?: BookingPaymentMethod;
+        paymentBankUsed?: string;
+        advanceAmount?: number;
+        pendingAmount?: number;
+        finalPaymentMethod?: BookingPaymentMethod;
+        finalPaymentBankUsed?: string;
+        finalPaymentAt?: number;
         paymentSlipStatus?: PaymentSlipStatus;
         paymentRejectReason?: string;
         paymentApprovedAt?: number;
@@ -1295,27 +1524,101 @@ export default function MasterAdminDashboard() {
     }
   };
 
-  const openCashApprovalModal = (booking: StoredBooking) => {
+  const openPaymentApprovalModal = (booking: StoredBooking) => {
     const entry = quoteInputs[booking.id];
     const defaultAmount =
       entry?.amount || (booking.quotedAmount ? String(booking.quotedAmount) : "");
     const defaultNote =
       entry?.note || booking.quoteNote || "";
-    setCashApprovalModal({
+
+    const activeBank = bankAccounts.find((a) => a.active);
+    const defaultBankLabel = activeBank
+      ? `${activeBank.bankName} - ${activeBank.accountNumber} (${activeBank.accountName})`
+      : bankAccounts.length > 0
+      ? `${bankAccounts[0].bankName} - ${bankAccounts[0].accountNumber}`
+      : "Commercial Bank - 100029384920";
+
+    const isPartial =
+      typeof booking.pendingAmount === "number" &&
+      booking.pendingAmount > 0 &&
+      typeof booking.advanceAmount === "number" &&
+      booking.advanceAmount > 0;
+
+    const isFullPending =
+      booking.paymentSlipStatus === "cash_pending" ||
+      (typeof booking.pendingAmount === "number" && booking.pendingAmount > 0 && (!booking.advanceAmount || booking.advanceAmount <= 0));
+
+    const initialMode: "full_paid" | "partial_advance" | "full_pending" = isPartial
+      ? "partial_advance"
+      : isFullPending
+      ? "full_pending"
+      : "full_paid";
+
+    setPaymentApprovalModal({
       booking,
-      amount: defaultAmount,
+      totalAmount: defaultAmount,
+      collectionMode: initialMode,
+      advanceAmount: booking.advanceAmount ? String(booking.advanceAmount) : "",
+      paymentMethod: (booking.paymentMethod === "bank_transfer" ? "bank_transfer" : "cash_manual"),
+      bankUsed: booking.paymentBankUsed || defaultBankLabel,
       note: defaultNote,
-      statusMode: "pending",
     });
   };
 
-  const handleConfirmCashApproval = async () => {
-    if (!cashApprovalModal) return;
-    const { booking, amount, note, statusMode } = cashApprovalModal;
-    const numAmount = Number(String(amount || "").replace(/[^0-9.]/g, ""));
-    if (!numAmount || numAmount <= 0) {
+  const openCashApprovalModal = openPaymentApprovalModal;
+
+  const openSettleBalanceModal = (booking: StoredBooking) => {
+    const activeBank = bankAccounts.find((a) => a.active);
+    const defaultBankLabel = activeBank
+      ? `${activeBank.bankName} - ${activeBank.accountNumber} (${activeBank.accountName})`
+      : bankAccounts.length > 0
+      ? `${bankAccounts[0].bankName} - ${bankAccounts[0].accountNumber}`
+      : "Commercial Bank - 100029384920";
+
+    const pending =
+      typeof booking.pendingAmount === "number" && booking.pendingAmount > 0
+        ? booking.pendingAmount
+        : Math.max(0, (booking.quotedAmount || 0) - (booking.advanceAmount || 0));
+
+    setSettleBalanceModal({
+      booking,
+      pendingAmount: pending || (booking.quotedAmount || 0),
+      settleMethod: "cash_manual",
+      bankUsed: defaultBankLabel,
+      note: "",
+    });
+  };
+
+  const handleConfirmPaymentApproval = async () => {
+    if (!paymentApprovalModal) return;
+    const { booking, totalAmount, collectionMode, advanceAmount, paymentMethod, bankUsed, note } = paymentApprovalModal;
+    const numTotal = Number(String(totalAmount || "").replace(/[^0-9.]/g, ""));
+    if (!numTotal || numTotal <= 0) {
       showToast("Please enter a valid Amount (LKR) greater than 0.", "error");
       return;
+    }
+
+    let numAdvance = 0;
+    let numPending = 0;
+
+    if (collectionMode === "full_paid") {
+      numAdvance = numTotal;
+      numPending = 0;
+    } else if (collectionMode === "partial_advance") {
+      numAdvance = Number(String(advanceAmount || "").replace(/[^0-9.]/g, ""));
+      if (!numAdvance || numAdvance <= 0) {
+        showToast("Please enter a valid Advance Amount greater than 0.", "error");
+        return;
+      }
+      if (numAdvance >= numTotal) {
+        showToast("Advance Amount must be less than Total Amount. Select Full Paid if entire amount is paid.", "error");
+        return;
+      }
+      numPending = numTotal - numAdvance;
+    } else {
+      // full_pending
+      numAdvance = 0;
+      numPending = numTotal;
     }
 
     let scheduleAssignment: Parameters<typeof updateBookingStatusAction>[2] | undefined;
@@ -1345,26 +1648,70 @@ export default function MasterAdminDashboard() {
       targetStatus = "accepted";
     }
 
-    const isSuccess = statusMode === "success";
+    const isFullySettled = numPending === 0;
 
     const ok = await updateBooking(booking.id, targetStatus, scheduleAssignment, {
-      quotedAmount: numAmount,
+      quotedAmount: numTotal,
       quotedAt: booking.quotedAt || Date.now(),
-      quoteNote: note.trim() || (isSuccess ? "Cash paid in full" : "Cash pending / pay later"),
-      paymentMethod: "cash_manual",
-      paymentSlipStatus: isSuccess ? "manual_approved" : "cash_pending",
-      paymentApprovedAt: isSuccess ? Date.now() : 0,
+      quoteNote: note.trim() || undefined,
+      advanceAmount: numAdvance,
+      pendingAmount: numPending,
+      paymentMethod: collectionMode === "full_pending" ? "cash_manual" : paymentMethod,
+      paymentBankUsed: collectionMode !== "full_pending" && paymentMethod === "bank_transfer" ? bankUsed : undefined,
+      paymentSlipStatus: isFullySettled ? "manual_approved" : "cash_pending",
+      paymentApprovedAt: numAdvance > 0 ? Date.now() : 0,
       paymentRejectReason: "",
     });
 
     if (ok) {
       setEditingQuoteId(null);
       setManualStageDraft((prev) => ({ ...prev, [booking.id]: targetStatus }));
-      setCashApprovalModal(null);
+      setPaymentApprovalModal(null);
       showToast(
-        isSuccess
-          ? `Cash payment of Rs. ${numAmount.toLocaleString()} approved and marked as Paid (Success)!`
-          : `Booking approved as Cash Pending (Rs. ${numAmount.toLocaleString()}). Mark as Paid once collected.`,
+        collectionMode === "full_paid"
+          ? `Payment of Rs. ${numTotal.toLocaleString()} approved as Full Paid (${paymentMethod === "bank_transfer" ? `Bank: ${bankUsed}` : "Cash"}).`
+          : collectionMode === "partial_advance"
+          ? `Advance Rs. ${numAdvance.toLocaleString()} approved. Pending balance Rs. ${numPending.toLocaleString()} set.`
+          : `Booking approved as Pending (Rs. ${numTotal.toLocaleString()}).`,
+        "success"
+      );
+    }
+  };
+
+  const handleConfirmSettleBalance = async () => {
+    if (!settleBalanceModal) return;
+    const { booking, pendingAmount, settleMethod, bankUsed, note } = settleBalanceModal;
+    const totalAmount = booking.quotedAmount || pendingAmount;
+    const noteClean = note.trim();
+    const finalNote = noteClean
+      ? `${booking.quoteNote ? `${booking.quoteNote} · ` : ""}Settled balance: ${noteClean}`
+      : booking.quoteNote || "Balance settled";
+
+    const originalAdvance =
+      typeof booking.advanceAmount === "number" && booking.advanceAmount > 0 && booking.advanceAmount < totalAmount
+        ? booking.advanceAmount
+        : totalAmount - pendingAmount > 0
+        ? totalAmount - pendingAmount
+        : undefined;
+
+    const ok = await updateBooking(booking.id, booking.status, undefined, {
+      quotedAmount: totalAmount,
+      advanceAmount: originalAdvance ?? totalAmount,
+      pendingAmount: 0,
+      finalPaymentMethod: settleMethod,
+      finalPaymentBankUsed: settleMethod === "bank_transfer" ? bankUsed : undefined,
+      finalPaymentAt: Date.now(),
+      paymentSlipStatus: "manual_approved",
+      paymentApprovedAt: booking.paymentApprovedAt || Date.now(),
+      quoteNote: finalNote,
+    });
+
+    if (ok) {
+      setSettleBalanceModal(null);
+      showToast(
+        `Balance of Rs. ${pendingAmount.toLocaleString()} settled successfully via ${
+          settleMethod === "bank_transfer" ? `Bank (${bankUsed})` : "Cash"
+        }! Marked as Full Paid.`,
         "success"
       );
     }
@@ -1373,12 +1720,17 @@ export default function MasterAdminDashboard() {
   const handleMarkCashAsPaid = async (booking: StoredBooking) => {
     const amt = booking.quotedAmount || 0;
     const ok = await updateBooking(booking.id, booking.status, undefined, {
-      paymentMethod: "cash_manual",
+      quotedAmount: amt,
+      advanceAmount: amt,
+      pendingAmount: 0,
+      finalPaymentMethod: "cash_manual",
+      finalPaymentAt: Date.now(),
+      paymentMethod: booking.paymentMethod || "cash_manual",
       paymentSlipStatus: "manual_approved",
-      paymentApprovedAt: Date.now(),
+      paymentApprovedAt: booking.paymentApprovedAt || Date.now(),
     });
     if (ok) {
-      showToast(`Cash payment of Rs. ${amt.toLocaleString()} marked as Success! Added to Revenue.`, "success");
+      showToast(`Payment of Rs. ${amt.toLocaleString()} marked as Success! Added to Revenue.`, "success");
     }
   };
 
@@ -1520,7 +1872,16 @@ export default function MasterAdminDashboard() {
       if (ok) {
         setManualStageDraft((prev) => ({ ...prev, [booking.id]: targetStatus }));
         const lbl = BOOKING_STAGES.find((s) => s.key === targetStatus)?.label || targetStatus;
-        showToast(`Stage updated to: ${lbl}`, "success");
+        if (targetStatus === "delivered") {
+          const isPending = isBookingPaymentPending(booking);
+          if (isPending) {
+            showToast("Trip marked Delivered! Balance pending — moved to 'Pending Payment' tab & slot released.", "success");
+          } else {
+            showToast("Trip marked Delivered & Completed! Moved to 'Completed Bookings' tab & slot released.", "success");
+          }
+        } else {
+          showToast(`Stage updated to: ${lbl}`, "success");
+        }
       }
       return;
     }
@@ -1643,6 +2004,11 @@ export default function MasterAdminDashboard() {
     const resolvedDriverId = draft.driverId || matchedDriver?.driverId || "";
     const resolvedDriverName = draft.driverName || matchedDriver?.name || "";
     const resolvedDriverPhone = draft.driverPhone || matchedDriver?.phone || "";
+    const bDates = Array.isArray(booking.dates) && booking.dates.length > 0 ? booking.dates : (booking.date ? [booking.date] : []);
+    const bStartDate = draft.date || booking.date || bDates[0] || new Date().toISOString().split("T")[0];
+    const bEndDate = draft.endDate || (bDates.length > 1 ? bDates[bDates.length - 1] : bStartDate);
+    const isMultiDate = draft.isMultiDate !== undefined ? draft.isMultiDate : (bDates.length > 1);
+
     setAssignModal({
       booking,
       lorryId: targetLorry?.id || draft.lorryId || booking.assignedLorryId || "",
@@ -1650,7 +2016,9 @@ export default function MasterAdminDashboard() {
       driverName: resolvedDriverName,
       driverPhone: resolvedDriverPhone,
       plate: targetLorry?.plate || draft.plate || booking.assignedPlate || "",
-      date: draft.date || booking.date || new Date().toISOString().split("T")[0],
+      date: bStartDate,
+      endDate: bEndDate,
+      isMultiDate: isMultiDate,
       startTime: draft.startTime || booking.startTime || "08:00",
       endTime: draft.endTime || booking.endTime || "12:00",
       distanceKm: draft.distanceKm || (booking.distanceKm ? String(booking.distanceKm) : ""),
@@ -1663,6 +2031,9 @@ export default function MasterAdminDashboard() {
     if (b.bookingType !== "live_lorry") {
       const check = validateIndividualScheduleOrToast(b.id, {
         date: assignModal.date,
+        endDate: assignModal.endDate,
+        isMultiDate: assignModal.isMultiDate,
+        dates: assignModal.isMultiDate && assignModal.endDate ? getDatesBetween(assignModal.date, assignModal.endDate) : [assignModal.date],
         startTime: assignModal.startTime,
         endTime: assignModal.endTime,
         plate: assignModal.plate,
@@ -1692,7 +2063,10 @@ export default function MasterAdminDashboard() {
         setScheduleDrafts((prev) => ({
           ...prev,
           [b.id]: {
-            date: assignModal.date,
+            date: check.assignment.date || assignModal.date,
+            endDate: (check.assignment as any).endDate || assignModal.endDate,
+            isMultiDate: Boolean(assignModal.isMultiDate),
+            dates: check.assignment.dates,
             startTime: check.assignment.startTime || assignModal.startTime,
             endTime: check.assignment.endTime || assignModal.endTime,
             plate: assignModal.plate,
@@ -1940,9 +2314,22 @@ export default function MasterAdminDashboard() {
       return;
     }
 
-    const timeCheck = validateTimeRange(manualForm.startTime, manualForm.endTime);
-    if (!timeCheck.valid) {
-      showToast(timeCheck.error, "error");
+    const resolvedEndDate =
+      manualForm.isMultiDate && manualForm.endDate ? manualForm.endDate.trim() : manualForm.date.trim();
+    const rawDates =
+      manualForm.isMultiDate && manualForm.endDate
+        ? getDatesBetween(manualForm.date.trim(), manualForm.endDate.trim())
+        : [manualForm.date.trim()];
+
+    const scheduleCheck = validateScheduleTimeAndDates(
+      manualForm.date.trim(),
+      manualForm.startTime,
+      resolvedEndDate,
+      manualForm.endTime,
+      rawDates
+    );
+    if (!scheduleCheck.valid) {
+      showToast(scheduleCheck.error, "error");
       return;
     }
 
@@ -1959,10 +2346,10 @@ export default function MasterAdminDashboard() {
 
     const conflict = findBookingScheduleConflict(
       {
-        date: manualForm.date.trim(),
-        dates: [manualForm.date.trim()],
-        startTime: timeCheck.startTime,
-        endTime: timeCheck.endTime,
+        date: scheduleCheck.startDate,
+        dates: scheduleCheck.dates,
+        startTime: scheduleCheck.startTime,
+        endTime: scheduleCheck.endTime,
         assignedPlate: resolvedPlate,
         assignedLorryId: resolvedLorryId,
         assignedDriverId: manualForm.driverId.trim(),
@@ -1984,6 +2371,30 @@ export default function MasterAdminDashboard() {
     }
 
     const isPaymentSuccess = manualForm.paymentStatusMode === "success";
+    const isPaymentPartial = manualForm.paymentStatusMode === "partial";
+    const parsedAdvance = isPaymentPartial
+      ? Number(String(manualForm.advanceAmount || "").replace(/[^0-9.]/g, ""))
+      : isPaymentSuccess
+      ? parsedAmount
+      : 0;
+
+    if (isPaymentPartial) {
+      if (!parsedAdvance || parsedAdvance <= 0) {
+        showToast("Please enter an advance amount greater than 0.", "error");
+        return;
+      }
+      if (parsedAdvance >= parsedAmount) {
+        showToast("Advance amount must be less than total amount. Select Payment Success for full payment.", "error");
+        return;
+      }
+    }
+
+    const calculatedPending = isPaymentPartial
+      ? parsedAmount - parsedAdvance
+      : isPaymentSuccess
+      ? 0
+      : parsedAmount;
+
     const paymentNoteClean = manualForm.paymentNote.trim();
     const parsedDistance = manualForm.distanceKm.trim() ? Number(manualForm.distanceKm.trim()) : undefined;
 
@@ -1996,10 +2407,11 @@ export default function MasterAdminDashboard() {
         pickup: manualForm.pickupCity.trim(),
         destination: manualForm.deliveryCity.trim(),
         distanceKm: parsedDistance,
-        date: manualForm.date.trim(),
-        dates: [manualForm.date.trim()],
-        startTime: timeCheck.startTime,
-        endTime: timeCheck.endTime,
+        date: scheduleCheck.startDate,
+        dates: scheduleCheck.dates,
+        endDate: scheduleCheck.endDate,
+        startTime: scheduleCheck.startTime,
+        endTime: scheduleCheck.endTime,
         vehicleType: resolvedType,
         assignedPlate: resolvedPlate,
         assignedLorryId: resolvedLorryId,
@@ -2008,22 +2420,41 @@ export default function MasterAdminDashboard() {
         assignedDriverPhone: manualForm.driverPhone.trim() || undefined,
         bookingType: "individual_vehicle",
         cargoNature: manualForm.cargoNature,
-        daysNeeded: 1,
+        daysNeeded: scheduleCheck.daysCount,
         cargoWeight: manualForm.cargoWeight.trim() || undefined,
         helpersCount: Number(manualForm.helpersCount) || 0,
-        status: isPaymentSuccess ? "assigned" : "awaiting_payment",
+        status: isPaymentSuccess || isPaymentPartial ? "assigned" : "awaiting_payment",
         quotedAmount: parsedAmount,
+        advanceAmount: parsedAdvance,
+        pendingAmount: calculatedPending,
+        paymentMethod: manualForm.paymentMethod || "cash_manual",
+        paymentBankUsed:
+          manualForm.paymentMethod === "bank_transfer"
+            ? (manualForm.paymentBankUsed.trim() ||
+                (bankAccounts.find((a) => a.active)?.bankName
+                  ? `${bankAccounts.find((a) => a.active)!.bankName} - ${bankAccounts.find((a) => a.active)!.accountNumber}`
+                  : "Commercial Bank - 100029384920"))
+            : undefined,
         quoteNote:
           paymentNoteClean ||
-          (isPaymentSuccess ? "Cash / Direct payment approved manually" : undefined),
+          (isPaymentSuccess
+            ? `Paid in full (${manualForm.paymentMethod === "bank_transfer" ? "Bank Transfer" : "Cash"})`
+            : isPaymentPartial
+            ? `Advance Rs. ${parsedAdvance.toLocaleString()} paid. Balance Rs. ${calculatedPending.toLocaleString()} pending.`
+            : undefined),
         ...(isPaymentSuccess
           ? {
-              paymentMethod: "cash_manual" as const,
               paymentSlipStatus: "manual_approved" as const,
               paymentApprovedAt: Date.now(),
             }
+          : isPaymentPartial
+          ? {
+              paymentSlipStatus: "cash_pending" as const,
+              paymentApprovedAt: Date.now(),
+            }
           : {
-              paymentSlipStatus: "none" as const,
+              paymentSlipStatus: "cash_pending" as const,
+              paymentApprovedAt: 0,
             }),
         notes: manualForm.notes.trim() || undefined,
       });
@@ -2050,10 +2481,13 @@ export default function MasterAdminDashboard() {
         showToast(
           `Manual booking created (Rs. ${parsedAmount.toLocaleString()} · ${
             isPaymentSuccess ? "Payment Success" : "Payment Pending"
-          }) for ${manualForm.date} (${formatTimeDurationLabel(
-            timeCheck.startTime,
-            timeCheck.endTime
-          )}) with ${manualForm.driverName}.`
+          }) for ${formatJourneyScheduleSummary(
+            scheduleCheck.startDate,
+            scheduleCheck.startTime,
+            scheduleCheck.endDate,
+            scheduleCheck.endTime,
+            scheduleCheck.dates
+          )} with ${manualForm.driverName}.`
         );
         setShowManualModal(false);
         manualAutoFilledNameRef.current = "";
@@ -2071,10 +2505,15 @@ export default function MasterAdminDashboard() {
           deliveryCity: "",
           distanceKm: "",
           date: todayStr,
+          endDate: todayStr,
+          isMultiDate: false,
           startTime: "08:00",
           endTime: "12:00",
           quotedAmount: "",
           paymentStatusMode: "pending",
+          advanceAmount: "",
+          paymentMethod: "cash_manual",
+          paymentBankUsed: "",
           paymentNote: "",
           cargoNature: CARGO_NATURE_OPTIONS[0],
           cargoWeight: "",
@@ -2526,7 +2965,7 @@ export default function MasterAdminDashboard() {
 
   const [clockTick, setClockTick] = useState<number>(() => Date.now());
   useEffect(() => {
-    const timer = setInterval(() => setClockTick(Date.now()), 60000);
+    const timer = setInterval(() => setClockTick(Date.now()), 15000);
     return () => clearInterval(timer);
   }, []);
 
@@ -2535,8 +2974,9 @@ export default function MasterAdminDashboard() {
       if (b.status === "cancelled") return false;
       const amt = Number(b.quotedAmount || 0);
       if (amt <= 0) return false;
-      if (b.paymentSlipStatus === "cash_pending") return false;
-      if (b.paymentMethod === "cash_manual" && (!b.paymentApprovedAt || b.paymentApprovedAt <= 0)) return false;
+      if (typeof b.advanceAmount === "number" && b.advanceAmount > 0) return true;
+      if (b.paymentSlipStatus === "cash_pending" && (!b.advanceAmount || b.advanceAmount <= 0)) return false;
+      if (b.paymentMethod === "cash_manual" && (!b.paymentApprovedAt || b.paymentApprovedAt <= 0) && (!b.advanceAmount || b.advanceAmount <= 0)) return false;
       if (b.paymentApprovedAt && b.paymentApprovedAt > 0) return true;
       if (b.paymentSlipStatus === "approved" || (b.paymentSlipStatus as string) === "manual_approved") return true;
       if (["accepted", "booked", "assigned", "goods_collected", "in_transit", "delivered"].includes(b.status)) {
@@ -2545,7 +2985,15 @@ export default function MasterAdminDashboard() {
       return false;
     };
 
+    const getBookingPaidAmount = (b: StoredBooking): number => {
+      if (typeof b.pendingAmount === "number" && b.pendingAmount > 0) {
+        return Number(b.advanceAmount || 0);
+      }
+      return Number(b.quotedAmount || 0);
+    };
+
     const getPayTs = (b: StoredBooking): number => {
+      if (b.finalPaymentAt && b.finalPaymentAt > 0) return b.finalPaymentAt;
       if (b.paymentApprovedAt && b.paymentApprovedAt > 0) return b.paymentApprovedAt;
       if (b.paymentSlipUploadedAt && b.paymentSlipUploadedAt > 0) return b.paymentSlipUploadedAt;
       return b.updatedAt || b.createdAt || clockTick;
@@ -2566,19 +3014,36 @@ export default function MasterAdminDashboard() {
     const lastMonthStart = Date.UTC(slNow.getUTCFullYear(), slNow.getUTCMonth() - 1, 1) - SRI_LANKA_OFFSET_MS;
     const lastMonthEnd = thisMonthStart;
 
-    const todayBookings = allPaid.filter((b) => {
-      const t = getPayTs(b);
-      return t >= todayStart && t < todayEnd;
-    });
-    const todayRevenue = todayBookings.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+    const computeBookingRevenueForRange = (b: StoredBooking, start: number, end: number): number => {
+      let revenue = 0;
+      const initialPaidTs = b.paymentApprovedAt || b.paymentSlipUploadedAt || b.updatedAt || b.createdAt;
+      const finalPaidTs = b.finalPaymentAt;
+      const totalQuoted = Number(b.quotedAmount || 0);
+      const adv = typeof b.advanceAmount === "number" ? b.advanceAmount : (b.pendingAmount === 0 ? totalQuoted : 0);
+      const rem = Math.max(0, totalQuoted - adv);
 
-    const thisMonthBookings = allPaid.filter((b) => {
-      const t = getPayTs(b);
-      return t >= thisMonthStart && t < thisMonthEnd;
-    });
-    const thisMonthRevenue = thisMonthBookings.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+      if (adv > 0 && initialPaidTs && initialPaidTs >= start && initialPaidTs < end) {
+        revenue += adv;
+      }
+      if (rem > 0 && finalPaidTs && finalPaidTs >= start && finalPaidTs < end) {
+        revenue += rem;
+      }
+      if (revenue === 0 && (!b.pendingAmount || b.pendingAmount <= 0)) {
+        const payTs = getPayTs(b);
+        if (payTs >= start && payTs < end) {
+          revenue = totalQuoted;
+        }
+      }
+      return revenue;
+    };
 
-    const allTimeRevenue = allPaid.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+    const todayBookings = allPaid.filter((b) => computeBookingRevenueForRange(b, todayStart, todayEnd) > 0);
+    const todayRevenue = allPaid.reduce((sum, b) => sum + computeBookingRevenueForRange(b, todayStart, todayEnd), 0);
+
+    const thisMonthBookings = allPaid.filter((b) => computeBookingRevenueForRange(b, thisMonthStart, thisMonthEnd) > 0);
+    const thisMonthRevenue = allPaid.reduce((sum, b) => sum + computeBookingRevenueForRange(b, thisMonthStart, thisMonthEnd), 0);
+
+    const allTimeRevenue = allPaid.reduce((sum, b) => sum + getBookingPaidAmount(b), 0);
 
     let rangeStart = 0;
     let rangeEnd = Infinity;
@@ -2637,18 +3102,18 @@ export default function MasterAdminDashboard() {
       return true;
     });
 
-    const periodTotal = periodBookings.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+    const periodTotal = periodBookings.reduce((sum, b) => sum + computeBookingRevenueForRange(b, rangeStart, rangeEnd), 0);
     const periodIndividual = periodBookings.filter((b) => b.bookingType === "individual_vehicle");
     const periodLive = periodBookings.filter((b) => b.bookingType !== "individual_vehicle");
-    const periodIndividualRevenue = periodIndividual.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
-    const periodLiveRevenue = periodLive.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+    const periodIndividualRevenue = periodIndividual.reduce((sum, b) => sum + computeBookingRevenueForRange(b, rangeStart, rangeEnd), 0);
+    const periodLiveRevenue = periodLive.reduce((sum, b) => sum + computeBookingRevenueForRange(b, rangeStart, rangeEnd), 0);
 
     const periodBankSlip = periodBookings.filter(
-      (b) => b.paymentMethod !== "cash_manual" && (b.paymentSlipId || b.paymentSlipStatus === "approved")
+      (b) => b.paymentMethod !== "cash_manual"
     );
     const periodCash = periodBookings.filter((b) => !periodBankSlip.includes(b));
-    const periodBankRevenue = periodBankSlip.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
-    const periodCashRevenue = periodCash.reduce((sum, b) => sum + Number(b.quotedAmount || 0), 0);
+    const periodBankRevenue = periodBankSlip.reduce((sum, b) => sum + computeBookingRevenueForRange(b, rangeStart, rangeEnd), 0);
+    const periodCashRevenue = periodCash.reduce((sum, b) => sum + computeBookingRevenueForRange(b, rangeStart, rangeEnd), 0);
 
     return {
       todayDateStr: getSriLankaDateStr(clockTick),
@@ -2683,6 +3148,224 @@ export default function MasterAdminDashboard() {
     revenueSearch,
     matchesOnlineSearchQuery,
     matchesIndividualSearchQuery,
+  ]);
+
+  // Helper to determine if a booking has pending payment
+  const isBookingPaymentPending = useCallback((b: StoredBooking): boolean => {
+    if (b.status === "cancelled") return false;
+    if (typeof b.pendingAmount === "number" && b.pendingAmount > 0) return true;
+    if ((b.paymentSlipStatus as string) === "cash_pending") return true;
+    if (b.paymentMethod === "cash_manual" && (!b.paymentApprovedAt || b.paymentApprovedAt <= 0)) return true;
+    if (
+      b.paymentSlipStatus === "pending_review" ||
+      b.status === "payment_submitted" ||
+      b.status === "awaiting_payment" ||
+      b.status === "pending"
+    ) return true;
+    if (!b.paymentApprovedAt && b.paymentSlipStatus !== "approved" && (b.paymentSlipStatus as string) !== "manual_approved") return true;
+    return false;
+  }, []);
+
+  // Unpaid Bookings list for Dashboard Overview Card & Filter
+  const unpaidBookings = useMemo(() => {
+    return bookings.filter((b) => {
+      const isTargetType = b.bookingType === "individual_vehicle" || b.paymentMethod === "cash_manual" || !b.bookingType;
+      if (!isTargetType) return false;
+      return isBookingPaymentPending(b);
+    });
+  }, [bookings, isBookingPaymentPending]);
+
+  // All Ongoing Rides (actively on the road within departure window and trip not finished)
+  const ongoingBookings = useMemo(() => {
+    return bookings
+      .filter((b) => {
+        if (b.status === "cancelled" || b.status === "delivered") return false;
+        const lifecycle = getBookingLifecycle(b, clockTick);
+        return lifecycle.isOngoing && !lifecycle.isCompleted;
+      })
+      .sort((a, b) => {
+        const timeA = a.startTime || "00:00";
+        const timeB = b.startTime || "00:00";
+        return timeA.localeCompare(timeB);
+      });
+  }, [bookings, clockTick]);
+
+  // All Pending Payment Bookings (physical journey concluded/delivered, but payment pending; time slot is freed!)
+  const pendingPaymentBookings = useMemo(() => {
+    return bookings
+      .filter((b) => {
+        if (b.status === "cancelled") return false;
+        const lifecycle = getBookingLifecycle(b, clockTick);
+        const isRideFinished = lifecycle.isCompleted || b.status === "delivered";
+        return isRideFinished && isBookingPaymentPending(b);
+      })
+      .sort((a, b) => {
+        const dateA = a.date || (Array.isArray(a.dates) && a.dates[0]) || "0000-00-00";
+        const dateB = b.date || (Array.isArray(b.dates) && b.dates[0]) || "0000-00-00";
+        if (dateA !== dateB) return dateB.localeCompare(dateA);
+        const timeA = a.endTime || a.startTime || "00:00";
+        const timeB = b.endTime || b.startTime || "00:00";
+        return timeB.localeCompare(timeA);
+      });
+  }, [bookings, clockTick, isBookingPaymentPending]);
+
+  // All Completed Bookings (concluded/delivered AND 100% fully paid; locked read-only historical record)
+  const completedBookings = useMemo(() => {
+    return bookings
+      .filter((b) => {
+        if (b.status === "cancelled") return false;
+        const lifecycle = getBookingLifecycle(b, clockTick);
+        const isRideFinished = lifecycle.isCompleted || b.status === "delivered";
+        return isRideFinished && !isBookingPaymentPending(b);
+      })
+      .sort((a, b) => {
+        const dateA = a.date || (Array.isArray(a.dates) && a.dates[0]) || "0000-00-00";
+        const dateB = b.date || (Array.isArray(b.dates) && b.dates[0]) || "0000-00-00";
+        if (dateA !== dateB) return dateB.localeCompare(dateA);
+        const timeA = a.endTime || a.startTime || "00:00";
+        const timeB = b.endTime || b.startTime || "00:00";
+        return timeB.localeCompare(timeA);
+      });
+  }, [bookings, clockTick, isBookingPaymentPending]);
+
+  // All Upcoming Scheduled Bookings (prior to departure + 15 min cutoff)
+  const upcomingBookings = useMemo(() => {
+    return bookings
+      .filter((b) => {
+        if (b.status === "cancelled") return false;
+        const lifecycle = getBookingLifecycle(b, clockTick);
+        if (!lifecycle.isUpcoming) return false;
+        if (lifecycle.startPlus15 !== null && clockTick >= lifecycle.startPlus15) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const dateA = a.date || (Array.isArray(a.dates) && a.dates[0]) || "9999-99-99";
+        const dateB = b.date || (Array.isArray(b.dates) && b.dates[0]) || "9999-99-99";
+        if (dateA !== dateB) return dateA.localeCompare(dateB);
+        const timeA = a.startTime || "99:99";
+        const timeB = b.startTime || "99:99";
+        return timeA.localeCompare(timeB);
+      });
+  }, [bookings, clockTick]);
+
+  // Filtered lists for dedicated Ongoing and Completed sections
+  const filteredOngoingBookings = useMemo(() => {
+    return ongoingBookings.filter((b) => {
+      if (!ongoingSearch.trim()) return true;
+      const q = ongoingSearch.toLowerCase();
+      return (
+        b.id.toLowerCase().includes(q) ||
+        (b.customerName && b.customerName.toLowerCase().includes(q)) ||
+        (b.customerPhone && b.customerPhone.includes(q)) ||
+        (b.pickupCity && b.pickupCity.toLowerCase().includes(q)) ||
+        (b.deliveryCity && b.deliveryCity.toLowerCase().includes(q)) ||
+        (b.assignedPlate && b.assignedPlate.toLowerCase().includes(q)) ||
+        (b.assignedDriverName && b.assignedDriverName.toLowerCase().includes(q))
+      );
+    });
+  }, [ongoingBookings, ongoingSearch]);
+
+  const filteredPendingPaymentBookings = useMemo(() => {
+    return pendingPaymentBookings.filter((b) => {
+      if (!pendingPaymentSearch.trim()) return true;
+      const q = pendingPaymentSearch.toLowerCase();
+      return (
+        b.id.toLowerCase().includes(q) ||
+        (b.customerName && b.customerName.toLowerCase().includes(q)) ||
+        (b.customerPhone && b.customerPhone.includes(q)) ||
+        (b.pickupCity && b.pickupCity.toLowerCase().includes(q)) ||
+        (b.deliveryCity && b.deliveryCity.toLowerCase().includes(q)) ||
+        (b.assignedPlate && b.assignedPlate.toLowerCase().includes(q)) ||
+        (b.assignedDriverName && b.assignedDriverName.toLowerCase().includes(q))
+      );
+    });
+  }, [pendingPaymentBookings, pendingPaymentSearch]);
+
+  const filteredCompletedBookings = useMemo(() => {
+    return completedBookings.filter((b) => {
+      const bDate = b.date || (Array.isArray(b.dates) && b.dates[0]) || "";
+      if (completedDateFrom && bDate < completedDateFrom) return false;
+      if (completedDateTo && bDate > completedDateTo) return false;
+      if (!completedSearch.trim()) return true;
+      const q = completedSearch.toLowerCase();
+      return (
+        b.id.toLowerCase().includes(q) ||
+        (b.customerName && b.customerName.toLowerCase().includes(q)) ||
+        (b.customerPhone && b.customerPhone.includes(q)) ||
+        (b.pickupCity && b.pickupCity.toLowerCase().includes(q)) ||
+        (b.deliveryCity && b.deliveryCity.toLowerCase().includes(q)) ||
+        (b.assignedPlate && b.assignedPlate.toLowerCase().includes(q)) ||
+        (b.assignedDriverName && b.assignedDriverName.toLowerCase().includes(q))
+      );
+    });
+  }, [completedBookings, completedSearch, completedDateFrom, completedDateTo]);
+
+  // Chronologically sorted Dispatch Schedule List for Dashboard Overview (earliest departure first)
+  const dashboardDispatchList = useMemo(() => {
+    return bookings
+      .filter((b) => {
+        if (b.status === "cancelled") return false;
+        const lifecycle = getBookingLifecycle(b, clockTick);
+
+        // Filter based on dashboardFilterMode:
+        if (dashboardFilterMode === "upcoming") {
+          // Upcoming dispatches: must be upcoming and have NOT passed departure start time + 15 mins
+          if (!lifecycle.isUpcoming) return false;
+          if (lifecycle.startPlus15 !== null && clockTick >= lifecycle.startPlus15) return false;
+        } else if (dashboardFilterMode === "ongoing") {
+          if (!lifecycle.isOngoing) return false;
+        } else if (dashboardFilterMode === "completed") {
+          if (!lifecycle.isCompleted) return false;
+        } else if (dashboardFilterMode === "unpaid") {
+          const isTargetType = b.bookingType === "individual_vehicle" || b.paymentMethod === "cash_manual" || !b.bookingType;
+          if (!isTargetType || !isBookingPaymentPending(b)) return false;
+        } else if (dashboardFilterMode === "today") {
+          const bDate = b.date || (Array.isArray(b.dates) && b.dates[0]) || "";
+          const allBDates = Array.isArray(b.dates) && b.dates.length > 0 ? b.dates : bDate ? [bDate] : [];
+          if (!allBDates.includes(revenueData.todayDateStr)) return false;
+        } else {
+          // "all": default general schedule view
+          const isManual = b.paymentMethod === "cash_manual";
+          const isScheduledOrApproved =
+            ["accepted", "booked", "assigned", "goods_collected", "in_transit", "delivered"].includes(b.status) ||
+            Boolean(b.startTime || b.assignedPlate || b.assignedDriverId || (b.quotedAmount && b.quotedAmount > 0));
+          if (!isManual && !isScheduledOrApproved) return false;
+        }
+
+        // Filter by Date
+        const bDate = b.date || (Array.isArray(b.dates) && b.dates[0]) || "";
+        const allBDates = Array.isArray(b.dates) && b.dates.length > 0 ? b.dates : bDate ? [bDate] : [];
+
+        if (dashboardDateFrom) {
+          const hasDateOnOrAfter = allBDates.some((d) => d >= dashboardDateFrom);
+          if (!hasDateOnOrAfter && bDate < dashboardDateFrom) return false;
+        }
+
+        if (dashboardDateTo) {
+          const hasDateOnOrBefore = allBDates.some((d) => d <= dashboardDateTo);
+          if (!hasDateOnOrBefore && bDate > dashboardDateTo) return false;
+        }
+
+        return true;
+      })
+      .sort((a, b) => {
+        const dateA = a.date || (Array.isArray(a.dates) && a.dates[0]) || "9999-99-99";
+        const dateB = b.date || (Array.isArray(b.dates) && b.dates[0]) || "9999-99-99";
+        if (dateA !== dateB) {
+          return dateA.localeCompare(dateB);
+        }
+        const timeA = a.startTime || "99:99";
+        const timeB = b.startTime || "99:99";
+        return timeA.localeCompare(timeB);
+      });
+  }, [
+    bookings,
+    dashboardFilterMode,
+    dashboardDateFrom,
+    dashboardDateTo,
+    revenueData.todayDateStr,
+    isBookingPaymentPending,
+    clockTick,
   ]);
 
   const filteredFleet = fleetVehicles.filter((v) => {
@@ -3146,6 +3829,1208 @@ export default function MasterAdminDashboard() {
     );
   }
 
+  // ---- Reusable Booking Dispatch Card for Dashboard Overview, Ongoing, and Completed Sections ----
+  const renderBookingDispatchCard = (
+    b: StoredBooking,
+    cardContext: "dashboard" | "ongoing" | "pending_payment" | "completed" = "dashboard"
+  ) => {
+                    const isExpanded = Boolean(expandedDashboardBookings[b.id]);
+    const lifecycle = getBookingLifecycle(b, clockTick);
+                    const isPendingPayment = isBookingPaymentPending(b);
+                    const isCashManual = b.paymentMethod === "cash_manual";
+                    const isCashPending = (b.paymentSlipStatus as string) === "cash_pending";
+                    const isCashPaid = b.paymentSlipStatus === "approved" || (b.paymentSlipStatus as string) === "manual_approved";
+                    const isPaymentLocked =
+                      b.paymentSlipStatus === "approved" ||
+                      (b.paymentSlipStatus as string) === "manual_approved" ||
+                      (b.paymentSlipStatus as string) === "cash_pending" ||
+                      b.status === "accepted" ||
+                      b.status === "booked" ||
+                      Boolean(b.paymentApprovedAt && b.paymentApprovedAt > 0);
+                    const hasStoredSlip = Boolean(b.paymentSlipId && b.paymentSlipStatus !== "deleted");
+                    const isPdfSlip = Boolean(
+                      b.paymentSlipType?.includes("pdf") ||
+                      b.paymentSlipName?.toLowerCase().endsWith(".pdf")
+                    );
+                    const quoteDraft = quoteInputs[b.id] || {
+                      amount: b.quotedAmount ? String(b.quotedAmount) : "",
+                      note: b.quoteNote || "",
+                    };
+                    const resolvedBookedDates =
+                      Array.isArray(b.dates) && b.dates.length > 0
+                        ? b.dates
+                        : b.date
+                        ? [b.date]
+                        : [];
+                    const bookedDatesDisplay =
+                      resolvedBookedDates.length > 0
+                        ? resolvedBookedDates.join(", ")
+                        : "Date Not Set";
+                    const requestTiming = formatBookingDateTime(b.createdAt);
+                    const quotedTiming = formatBookingDateTime(b.quotedAt);
+                    const slipTiming = formatBookingDateTime(b.paymentSlipUploadedAt);
+                    const approvedTiming = formatBookingDateTime(b.paymentApprovedAt);
+                    const distanceDisplay = getRouteDistanceKm(b.pickupCity, b.deliveryCity, b.distanceKm);
+
+                    return (
+                      <div
+                        key={b.id}
+                        className="rounded-lg bg-white border border-gray-300 overflow-hidden shadow-xs"
+                      >
+                        {/* Header Bar */}
+                        <div
+                          onClick={() => toggleDashboardBookingCard(b.id, isExpanded)}
+                          className="w-full text-left bg-gray-900 text-white px-3.5 py-2.5 sm:px-4 hover:bg-gray-800 transition-colors cursor-pointer flex flex-wrap items-center justify-between gap-2.5"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-white/10 text-white">
+                              {b.id}
+                            </span>
+                            <span className="text-sm font-bold text-white">
+                              {b.customerName}
+                            </span>
+                            {b.customerPhone && (
+                              <span className="text-xs font-mono text-gray-400">
+                                ({b.customerPhone})
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            {b.quotedAmount !== undefined && (
+                              <span className="text-xs sm:text-sm font-mono font-bold text-amber-400">
+                                Rs. {b.quotedAmount.toLocaleString()}
+                              </span>
+                            )}
+                            {cardContext === "completed" ? (
+                              <>
+                                <span className="text-xs font-bold text-emerald-950 bg-emerald-400 px-2 py-0.5 rounded">
+                                  ✓ Paid
+                                </span>
+                                <span className="text-xs font-bold text-white bg-blue-600 px-2 py-0.5 rounded shadow-xs">
+                                  7. Delivered / Completed
+                                </span>
+                              </>
+                            ) : cardContext === "pending_payment" ? (
+                              <>
+                                <span className="text-xs font-bold text-amber-900 bg-amber-400 px-2 py-0.5 rounded">
+                                  ⌛ Pending Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()}
+                                </span>
+                                <span className="text-xs font-bold text-white bg-amber-600 px-2 py-0.5 rounded shadow-xs">
+                                  Awaiting Payment
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                {typeof b.pendingAmount === "number" && b.pendingAmount > 0 && typeof b.advanceAmount === "number" && b.advanceAmount > 0 ? (
+                                  <>
+                                    <span className="text-xs font-bold text-emerald-950 bg-emerald-400 px-2 py-0.5 rounded">
+                                      Paid Rs. {b.advanceAmount.toLocaleString()}
+                                    </span>
+                                    <span className="text-xs font-bold text-amber-900 bg-amber-400 px-2 py-0.5 rounded">
+                                      ⌛ Pending Rs. {b.pendingAmount.toLocaleString()}
+                                    </span>
+                                  </>
+                                ) : typeof b.pendingAmount === "number" && b.pendingAmount > 0 ? (
+                                  <span className="text-xs font-bold text-amber-900 bg-amber-400 px-2 py-0.5 rounded">
+                                    ⌛ Pending Rs. {b.pendingAmount.toLocaleString()}
+                                  </span>
+                                ) : isPendingPayment ? (
+                                  <span className="text-xs font-bold text-amber-900 bg-amber-400 px-2 py-0.5 rounded">
+                                    ⌛ Pending
+                                  </span>
+                                ) : (
+                                  <span className="text-xs font-bold text-emerald-950 bg-emerald-400 px-2 py-0.5 rounded">
+                                    ✓ Paid
+                                  </span>
+                                )}
+                                <StatusBadge status={b.status} />
+                                {lifecycle.isOngoing ? (
+                                  <span className="text-xs font-bold text-white bg-emerald-600 px-2 py-0.5 rounded flex items-center gap-1 shadow-xs">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                                    Ongoing
+                                  </span>
+                                ) : lifecycle.isCompleted ? (
+                                  <span className="text-xs font-bold text-white bg-blue-600 px-2 py-0.5 rounded">
+                                    ✓ Completed
+                                  </span>
+                                ) : lifecycle.isUpcoming && lifecycle.startPlus15 !== null ? (
+                                  <span className="text-xs font-bold text-gray-300 bg-gray-800 px-2 py-0.5 rounded border border-gray-700">
+                                    Upcoming
+                                  </span>
+                                ) : null}
+                              </>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleDashboardBookingCard(b.id, isExpanded);
+                              }}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/20 bg-white/10 text-xs font-semibold text-white hover:bg-white/20 cursor-pointer"
+                            >
+                              {isExpanded ? "Hide ▴" : "Details ▾"}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Real-time Trip Lifecycle Banner */}
+                        {lifecycle.isOngoing && cardContext !== "completed" && cardContext !== "pending_payment" && (
+                          <div className="bg-emerald-50 px-3.5 py-2 sm:px-4 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-xs text-emerald-950 font-medium">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                              <span className="font-bold">Active On Road:</span>
+                              <span className="font-mono">{formatTimeDurationLabel(b.startTime, b.endTime)}</span>
+                              {lifecycle.endTimestamp !== null && clockTick >= lifecycle.endTimestamp ? (
+                                <span className="text-[10px] font-bold text-amber-900 bg-amber-200 border border-amber-300 px-1.5 py-0.5 rounded">
+                                  Past Scheduled End ({b.endTime ? formatTime12h(b.endTime) : ""}) · Ride in progress
+                                </span>
+                              ) : (
+                                <span className="text-[11px] text-emerald-800">
+                                  (Scheduled to: {b.endTime ? formatTime12h(b.endTime) : "—"})
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px] text-emerald-800 font-semibold hidden sm:inline">
+                                🔒 Slot locked until Delivered
+                              </span>
+                              <button
+                                type="button"
+                                disabled={actionLoading === b.id}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleStageClickboxSelect(b, "delivered");
+                                }}
+                                className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white font-bold cursor-pointer shadow-xs text-xs flex items-center gap-1.5 transition-all disabled:opacity-50"
+                                title="Admin manual verification: Mark ride as Delivered / Completed to release schedule slot"
+                              >
+                                <span>✓</span>
+                                <span>Mark as Delivered</span>
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        {cardContext === "pending_payment" && (
+                          <div className="bg-amber-50 px-3.5 py-2 sm:px-4 border-b border-amber-300 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-950 font-medium">
+                            <div className="flex items-center gap-2">
+                              <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                              <span className="font-bold text-amber-900">Trip Concluded · Payment Pending:</span>
+                              <span className="font-mono font-bold text-amber-900 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded">
+                                Due Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-amber-800 font-bold flex items-center gap-2">
+                              <span className="text-emerald-800">✓ Lorry &amp; Rider Slot Released</span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (typeof b.pendingAmount === "number" && b.pendingAmount > 0) {
+                                    openSettleBalanceModal(b);
+                                  } else {
+                                    openPaymentApprovalModal(b);
+                                  }
+                                }}
+                                className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer shadow-xs text-[11px]"
+                              >
+                                💳 Settle Payment Now →
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        {cardContext === "completed" && (
+                          <div className="bg-blue-50 px-3.5 py-1.5 sm:px-4 border-b border-blue-200 flex flex-wrap items-center justify-between gap-2 text-xs text-blue-950 font-medium">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-blue-900">✓ Delivered &amp; Completed:</span>
+                              <span>{bookedDatesDisplay} · {formatTimeDurationLabel(b.startTime, b.endTime)}</span>
+                            </div>
+                            <div className="text-[11px] text-blue-700 font-bold flex items-center gap-1.5">
+                              <span>🔒 Locked Completed Record</span>
+                              <span className="text-blue-400">·</span>
+                              <span>Lorry &amp; Rider Slot Available</span>
+                            </div>
+                          </div>
+                        )}
+                        {cardContext === "dashboard" && lifecycle.isCompleted && (
+                          <div className="bg-blue-50 px-3.5 py-1.5 sm:px-4 border-b border-blue-200 flex flex-wrap items-center justify-between gap-2 text-xs text-blue-950 font-medium">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-blue-900">✓ Concluded Dispatch:</span>
+                              <span>{bookedDatesDisplay} · {formatTimeDurationLabel(b.startTime, b.endTime)}</span>
+                            </div>
+                            <div className="text-[11px] text-blue-700 font-bold">
+                              Lorry &amp; Rider time slot released &amp; available for new bookings
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Scannable Row: 3 clean columns, no payment status repetition */}
+                        <div
+                          onClick={() => toggleDashboardBookingCard(b.id, isExpanded)}
+                          className="bg-gray-50/70 px-3.5 py-2.5 sm:px-4 border-b border-gray-200 grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs sm:text-sm cursor-pointer hover:bg-gray-100/60 transition-colors"
+                        >
+                          <div>
+                            <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Route</div>
+                            <div className="font-semibold text-gray-900 mt-0.5 flex items-center gap-2">
+                              <span>{b.pickupCity} → {b.deliveryCity}</span>
+                              <span className="font-mono font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 text-[10px]">
+                                {distanceDisplay}
+                              </span>
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Date &amp; Time</div>
+                            <div className="text-gray-900 mt-0.5">
+                              <span className="font-medium">{bookedDatesDisplay}</span>
+                              {" · "}
+                              {b.startTime && b.endTime ? (
+                                <span className="font-bold text-gray-900">
+                                  {formatTimeDurationLabel(b.startTime, b.endTime)}
+                                </span>
+                              ) : (
+                                <span className="text-amber-800 font-medium">Time not set</span>
+                              )}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Lorry &amp; Rider</div>
+                            <div className="text-gray-900 mt-0.5">
+                              <span className="font-medium">
+                                {b.assignedPlate || "No Lorry"}
+                              </span>
+                              {b.assignedDriverName ? ` · ${b.assignedDriverName}` : " · No rider"}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Collapsible Full View & Edit Controls */}
+                        {isExpanded && (
+                          <div className="divide-y divide-gray-200">
+                            {/* Customer & Cargo Details */}
+                            <div className="px-4 py-4 sm:px-5 grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
+                              <div>
+                                <h4 className="text-sm font-bold text-gray-900 mb-2.5">
+                                  Customer Details
+                                </h4>
+                                <dl className="grid grid-cols-[120px_1fr] gap-y-2 gap-x-3">
+                                  <dt className="text-gray-500">Name</dt>
+                                  <dd className="font-semibold text-gray-900">{b.customerName}</dd>
+
+                                  <dt className="text-gray-500">Phone</dt>
+                                  <dd>
+                                    {b.customerPhone ? (
+                                      <a
+                                        href={`tel:${String(b.customerPhone || "").replace(/\s+/g, "")}`}
+                                        className="font-mono font-semibold text-gray-900 underline"
+                                      >
+                                        {b.customerPhone}
+                                      </a>
+                                    ) : (
+                                      <span className="text-gray-500">Not provided</span>
+                                    )}
+                                  </dd>
+
+                                  <dt className="text-gray-500">Requested</dt>
+                                  <dd className="text-gray-900">
+                                    {requestTiming ? `${requestTiming.date} at ${requestTiming.time}` : "Not recorded"}
+                                  </dd>
+
+                                  {b.packageDetails && (
+                                    <>
+                                      <dt className="text-gray-500">Notes</dt>
+                                      <dd className="text-gray-900">{b.packageDetails}</dd>
+                                    </>
+                                  )}
+                                </dl>
+                              </div>
+
+                              <div>
+                                <h4 className="text-sm font-bold text-gray-900 mb-2.5">
+                                  Trip &amp; Cargo Details
+                                </h4>
+                                <dl className="grid grid-cols-[120px_1fr] gap-y-2 gap-x-3">
+                                  <dt className="text-gray-500">Route</dt>
+                                  <dd className="font-semibold text-gray-900">
+                                    {b.pickupCity} → {b.deliveryCity}
+                                    <span className="ml-2 font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 text-xs inline-block">
+                                      🛣️ {distanceDisplay}
+                                    </span>
+                                  </dd>
+
+                                  <dt className="text-gray-500">Trip Date(s)</dt>
+                                  <dd className="font-medium text-gray-900">{bookedDatesDisplay}</dd>
+
+                                  <dt className="text-gray-500">Lorry</dt>
+                                  <dd className="text-gray-900">
+                                    {b.assignedPlate || "Not assigned"} ({b.vehicleType || "Lorry"})
+                                  </dd>
+
+                                  {b.cargoNature && (
+                                    <>
+                                      <dt className="text-gray-500">Goods</dt>
+                                      <dd className="text-gray-900">{b.cargoNature}</dd>
+                                    </>
+                                  )}
+
+                                  {(b.cargoWeight || b.helpersCount !== undefined) && (
+                                    <>
+                                      <dt className="text-gray-500">Weight / Helpers</dt>
+                                      <dd className="text-gray-900">
+                                        {b.cargoWeight || "—"}
+                                        {b.helpersCount !== undefined ? ` · Helpers: ${b.helpersCount}` : ""}
+                                      </dd>
+                                    </>
+                                  )}
+
+                                  {b.assignedDriverName && (
+                                    <>
+                                      <dt className="text-gray-500">Assigned Rider</dt>
+                                      <dd className="font-semibold text-green-800">
+                                        {b.assignedDriverName}
+                                        {b.assignedDriverPhone && (
+                                          <a
+                                            href={`tel:${String(b.assignedDriverPhone).replace(/\s+/g, "")}`}
+                                            className="ml-2 font-mono underline"
+                                          >
+                                            {b.assignedDriverPhone}
+                                          </a>
+                                        )}
+                                      </dd>
+                                    </>
+                                  )}
+                                </dl>
+                              </div>
+                            </div>
+
+                            {/* Step 1: Assign Time Duration & Mandatory Rider */}
+                            {cardContext === "completed" ? (
+                              <div className="px-4 py-3 sm:px-5 bg-gray-50 border-b border-gray-200 text-xs">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <span className="font-bold text-gray-700 uppercase tracking-wider">Scheduled Journey:</span>
+                                  <span className="font-mono font-bold text-blue-900 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded">
+                                    {bookedDatesDisplay} · {formatTimeDurationLabel(b.startTime, b.endTime) || "Completed"}
+                                  </span>
+                                </div>
+                                <div className="mt-1.5 flex flex-wrap items-center gap-4 text-gray-700">
+                                  <span>Lorry: <strong className="text-gray-900 font-semibold">{b.assignedPlate || "Assigned"}</strong></span>
+                                  <span>Rider: <strong className="text-gray-900 font-semibold">{b.assignedDriverName || "Assigned"}</strong></span>
+                                </div>
+                              </div>
+                            ) : (() => {
+                              const draft = getScheduleDraft(b);
+                              const draftDates =
+                                draft.isMultiDate && draft.endDate
+                                  ? getDatesBetween(draft.date, draft.endDate)
+                                  : [draft.date];
+                              const draftTimeCheck = validateScheduleTimeAndDates(
+                                draft.date,
+                                draft.startTime,
+                                draft.isMultiDate && draft.endDate ? draft.endDate : draft.date,
+                                draft.endTime,
+                                draftDates
+                              );
+                              const draftConflict =
+                                draftTimeCheck.valid && draft.date
+                                  ? findBookingScheduleConflict(
+                                      {
+                                        excludeBookingId: b.id,
+                                        date: draftTimeCheck.startDate,
+                                        dates: draftTimeCheck.dates,
+                                        startTime: draftTimeCheck.startTime,
+                                        endTime: draftTimeCheck.endTime,
+                                        assignedPlate: draft.plate,
+                                        assignedLorryId: draft.lorryId,
+                                        assignedDriverId: draft.driverId,
+                                        assignedDriverName: draft.driverName,
+                                        assignedDriverPhone: draft.driverPhone,
+                                        bookingType: b.bookingType || "individual_vehicle",
+                                      },
+                                      bookings
+                                    )
+                                  : null;
+                              const riderSelected = hasAssignedRider({
+                                assignedDriverId: draft.driverId,
+                                assignedDriverName: draft.driverName,
+                                assignedDriverPhone: draft.driverPhone,
+                              });
+
+                              return (
+                                <div className="px-4 py-4 sm:px-5 flex flex-col gap-3">
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div>
+                                      <h4 className="text-sm font-bold text-gray-900">
+                                        Step 1: Assign Time Duration &amp; Rider
+                                      </h4>
+                                    </div>
+                                    {b.startTime && b.endTime && (
+                                      <span className="text-xs font-mono font-semibold text-green-800 bg-green-50 border border-green-300 px-2.5 py-1 rounded-md">
+                                        Allocated: {formatJourneyScheduleSummary(b.date, b.startTime, (b.dates && b.dates.length > 1 ? b.dates[b.dates.length - 1] : b.date), b.endTime, b.dates)}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {/* Multi-Day Booking Toggle */}
+                                  <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-md bg-blue-50/70 border border-blue-200">
+                                    <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                                      <input
+                                        type="checkbox"
+                                        aria-label={`Toggle multi-day booking for ${b.id}`}
+                                        checked={Boolean(draft.isMultiDate)}
+                                        onChange={(e) => {
+                                          const checked = e.target.checked;
+                                          const sDate = draft.date || new Date().toISOString().split("T")[0];
+                                          const defaultEndDate = checked
+                                            ? (draft.endDate && draft.endDate > sDate ? draft.endDate : addDaysToYYYYMMDD(sDate, 1))
+                                            : sDate;
+                                          updateScheduleDraft(b, {
+                                            isMultiDate: checked,
+                                            endDate: defaultEndDate,
+                                            dates: checked ? getDatesBetween(sDate, defaultEndDate) : [sDate],
+                                          });
+                                        }}
+                                        className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                                      />
+                                      <span className="text-xs font-bold text-gray-900">
+                                        Multi-Day Journey (දින කිහිපයක ගමනක්)
+                                      </span>
+                                    </label>
+                                    {draft.isMultiDate && (
+                                      <span className="text-[11px] font-mono font-bold text-blue-900 bg-white border border-blue-300 px-2.5 py-0.5 rounded-full shadow-2xs">
+                                        {getDatesBetween(draft.date, draft.endDate || draft.date).length} Days Journey
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end">
+                                    <div>
+                                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                                        {draft.isMultiDate ? "Departure Date *" : "Trip Date *"}
+                                      </label>
+                                      <input
+                                        type="date"
+                                        aria-label={`Dashboard schedule date for ${b.id}`}
+                                        value={draft.date}
+                                        onChange={(e) => {
+                                          const newStartDate = e.target.value;
+                                          const newEndDate = draft.isMultiDate
+                                            ? (draft.endDate && draft.endDate >= newStartDate ? draft.endDate : addDaysToYYYYMMDD(newStartDate, 1))
+                                            : newStartDate;
+                                          updateScheduleDraft(b, {
+                                            date: newStartDate,
+                                            endDate: newEndDate,
+                                            dates: draft.isMultiDate ? getDatesBetween(newStartDate, newEndDate) : [newStartDate],
+                                          });
+                                        }}
+                                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-xs font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                                        {draft.isMultiDate ? "Departure Time *" : "Start Time *"}
+                                      </label>
+                                      <input
+                                        type="time"
+                                        aria-label={`Dashboard start time for ${b.id}`}
+                                        value={draft.startTime}
+                                        onChange={(e) => updateScheduleDraft(b, { startTime: e.target.value })}
+                                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-xs font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                                      />
+                                    </div>
+                                    {draft.isMultiDate && (
+                                      <div>
+                                        <label className="block text-xs font-medium text-gray-700 mb-1">
+                                          Delivery Date *
+                                        </label>
+                                        <input
+                                          type="date"
+                                          min={draft.date}
+                                          aria-label={`Dashboard delivery end date for ${b.id}`}
+                                          value={draft.endDate || draft.date}
+                                          onChange={(e) => {
+                                            const newEndDate = e.target.value;
+                                            updateScheduleDraft(b, {
+                                              endDate: newEndDate,
+                                              dates: getDatesBetween(draft.date, newEndDate),
+                                            });
+                                          }}
+                                          className="w-full px-3 py-2 rounded-md border border-blue-400 bg-blue-50/30 text-xs font-mono font-bold text-gray-900 focus:border-blue-700 focus:outline-none"
+                                        />
+                                      </div>
+                                    )}
+                                    <div>
+                                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                                        {draft.isMultiDate ? "Delivery Time *" : "End Time *"}
+                                      </label>
+                                      <input
+                                        type="time"
+                                        aria-label={`Dashboard end time for ${b.id}`}
+                                        value={draft.endTime}
+                                        onChange={(e) => updateScheduleDraft(b, { endTime: e.target.value })}
+                                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-xs font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                                        Lorry (Vehicle) *
+                                      </label>
+                                      <select
+                                        aria-label={`Dashboard schedule vehicle for ${b.id}`}
+                                        value={draft.plate}
+                                        onChange={(e) => {
+                                          const selPlate = e.target.value;
+                                          const matchedV = fleetVehicles.find((v) => v.plate === selPlate);
+                                          updateScheduleDraft(b, {
+                                            plate: selPlate,
+                                            lorryId:
+                                              matchedV?.id ||
+                                              `lorry-${normalizePlate(selPlate).toLowerCase()}`,
+                                          });
+                                        }}
+                                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-xs text-gray-900 focus:border-gray-900 focus:outline-none"
+                                      >
+                                        <option value="">Select Lorry</option>
+                                        {fleetVehicles.map((v) => (
+                                          <option key={v.id || v.plate} value={v.plate}>
+                                            {v.plate} ({v.vehicleType})
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                    <div>
+                                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                                        Assign Rider *
+                                      </label>
+                                      <select
+                                        aria-label={`Dashboard schedule rider for ${b.id}`}
+                                        value={draft.driverName}
+                                        onChange={(e) => {
+                                          const drv = drivers.find((d) => d.name === e.target.value);
+                                          updateScheduleDraft(b, {
+                                            driverId: drv?.driverId || "",
+                                            driverName: drv?.name || e.target.value,
+                                            driverPhone: drv?.phone || "",
+                                          });
+                                        }}
+                                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-xs text-gray-900 focus:border-gray-900 focus:outline-none"
+                                      >
+                                        <option value="">Select Rider</option>
+                                        {drivers.map((d) => (
+                                          <option key={d.driverId} value={d.name}>
+                                            {d.name} ({d.driverId}) - {d.phone}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  </div>
+
+                                  {draftConflict?.hasConflict ? (
+                                    <div className="px-3.5 py-2 rounded-md bg-red-50 border border-red-300 text-xs font-semibold text-red-800">
+                                      {draftConflict.message}
+                                    </div>
+                                  ) : draft.startTime || draft.endTime ? (
+                                    !draftTimeCheck.valid ? (
+                                      <div className="px-3.5 py-2 rounded-md bg-amber-50 border border-amber-300 text-xs font-medium text-amber-900">
+                                        {draftTimeCheck.error}
+                                      </div>
+                                    ) : !riderSelected ? (
+                                      <div className="px-3.5 py-2 rounded-md bg-amber-50 border border-amber-300 text-xs font-medium text-amber-900">
+                                        Select a Rider to complete schedule allocation.
+                                      </div>
+                                    ) : (
+                                      <div className="px-3.5 py-2 rounded-md bg-green-50 border border-green-300 text-xs font-medium text-green-800">
+                                        Slot Available: {draftTimeCheck.isMultiDate
+                                          ? `${draftTimeCheck.startDate} ${formatTime12h(draftTimeCheck.startTime)} → ${draftTimeCheck.endDate} ${formatTime12h(draftTimeCheck.endTime)} (${draftTimeCheck.daysCount} Days)`
+                                          : `${draftTimeCheck.startDate} · ${formatTimeDurationLabel(draftTimeCheck.startTime, draftTimeCheck.endTime)}`} · {draft.plate} · Rider: {draft.driverName}
+                                      </div>
+                                    )
+                                  ) : null}
+
+                                  <div className="flex flex-wrap items-center justify-end gap-2">
+                                    <button
+                                      type="button"
+                                      disabled={actionLoading === b.id || Boolean(draftConflict?.hasConflict)}
+                                      onClick={() => handleSaveBookingSchedule(b)}
+                                      className="px-4 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-xs font-semibold cursor-pointer disabled:opacity-50"
+                                    >
+                                      {actionLoading === b.id ? "Saving..." : "Save Time & Rider"}
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* Step 2: Payment Breakdown & Settlement Audit */}
+                            {cardContext === "completed" ? (() => {
+                              // Extract advance info from advanceAmount, or quoteNote regex fallback
+                              let parsedAdvance: number | undefined = undefined;
+                              if (typeof b.advanceAmount === "number" && b.advanceAmount > 0 && b.quotedAmount && b.advanceAmount < b.quotedAmount) {
+                                parsedAdvance = b.advanceAmount;
+                              } else if (b.quoteNote) {
+                                const m = b.quoteNote.match(/Advance\s*(?:Rs\.?|LKR)?\s*([\d,]+)/i);
+                                if (m && m[1]) {
+                                  const n = Number(m[1].replace(/,/g, ""));
+                                  if (Number.isFinite(n) && n > 0 && (!b.quotedAmount || n < b.quotedAmount)) {
+                                    parsedAdvance = n;
+                                  }
+                                }
+                              }
+                              const hasAdvance = parsedAdvance !== undefined && parsedAdvance > 0;
+                              const advanceAmount = parsedAdvance || 0;
+                              const balanceAmount = hasAdvance && b.quotedAmount ? Math.max(0, b.quotedAmount - advanceAmount) : 0;
+
+                              const resolveBankDetailsString = (bankField?: string, noteText?: string) => {
+                                if (bankField && bankField.trim()) return bankField.trim();
+                                if (noteText) {
+                                  const m = noteText.match(/(?:Bank|Account|via)\s*:\s*([^·,()\n]+)/i);
+                                  if (m && m[1] && m[1].trim()) return m[1].trim();
+                                }
+                                const activeBank = bankAccounts.find((a) => a.active) || bankAccounts[0];
+                                if (activeBank) {
+                                  const acc = activeBank.accountNumber ? ` - ${activeBank.accountNumber}` : "";
+                                  return `${activeBank.bankName}${acc}`;
+                                }
+                                return "Commercial Bank - 100029384920";
+                              };
+
+                              const resolvePaymentMethodMeta = (method?: string, bankField?: string, noteText?: string) => {
+                                const isBank =
+                                  method === "bank_transfer" ||
+                                  method === "bank_slip" ||
+                                  Boolean(bankField && bankField.trim());
+                                if (isBank) {
+                                  const bankStr = resolveBankDetailsString(bankField, noteText);
+                                  return {
+                                    isBank: true,
+                                    displayLabel: "Bank Transfer (බැංකු තැන්පතු)",
+                                    bankName: bankStr,
+                                  };
+                                }
+                                return {
+                                  isBank: false,
+                                  displayLabel: "Cash (අතපිට මුදල්)",
+                                  bankName: "",
+                                };
+                              };
+
+                              const advMeta = resolvePaymentMethodMeta(b.paymentMethod, b.paymentBankUsed, b.quoteNote);
+                              const balMeta = resolvePaymentMethodMeta(
+                                b.finalPaymentMethod || (b.paymentMethod === "bank_transfer" ? "bank_transfer" : "cash_manual"),
+                                b.finalPaymentBankUsed || b.paymentBankUsed,
+                                b.quoteNote
+                              );
+                              const fullMeta = resolvePaymentMethodMeta(
+                                b.finalPaymentMethod || b.paymentMethod,
+                                b.finalPaymentBankUsed || b.paymentBankUsed,
+                                b.quoteNote
+                              );
+
+                              const advanceTiming = formatBookingDateTime(b.paymentApprovedAt || b.quotedAt || b.createdAt);
+                              const balanceTiming = formatBookingDateTime(b.finalPaymentAt || b.paymentApprovedAt || b.createdAt);
+                              const fullTiming = formatBookingDateTime(b.paymentApprovedAt || b.finalPaymentAt || b.createdAt);
+
+                              return (
+                                <div className="px-4 py-4 sm:px-5 bg-emerald-50/40 border-b border-emerald-200 flex flex-col gap-3 text-xs text-gray-900">
+                                  {/* Title & Total Status */}
+                                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-emerald-200">
+                                    <div className="flex items-center gap-2">
+                                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 inline-block shadow-xs"></span>
+                                      <h4 className="font-bold text-sm text-emerald-950 uppercase tracking-wide">
+                                        Payment Breakdown &amp; Audit (ගෙවීම් තොරතුරු)
+                                      </h4>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-mono font-extrabold text-sm text-emerald-950 bg-emerald-100 border border-emerald-300 px-2.5 py-1 rounded-md">
+                                        Total Paid: Rs. {(b.quotedAmount || 0).toLocaleString()}
+                                      </span>
+                                      <span className="text-xs font-bold text-emerald-900 bg-emerald-200/80 px-2 py-1 rounded-md">
+                                        ✓ Fully Settled
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  {/* Payment Audit Cards */}
+                                  {hasAdvance ? (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                                      {/* Card 1: Advance Details */}
+                                      <div className="bg-white p-3.5 rounded-lg border border-emerald-200 shadow-2xs flex flex-col gap-2">
+                                        <div className="flex items-center justify-between pb-2 border-b border-gray-100">
+                                          <span className="font-bold text-emerald-900 flex items-center gap-1.5 text-xs">
+                                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                            1. Advance Payment (අත්තිකාරම්)
+                                          </span>
+                                          <span className="font-mono font-bold text-sm text-emerald-800">
+                                            Rs. {advanceAmount.toLocaleString()}
+                                          </span>
+                                        </div>
+                                        <dl className="grid grid-cols-[110px_1fr] gap-y-1.5 text-xs">
+                                          <dt className="text-gray-500">Method (ක්‍රමය):</dt>
+                                          <dd className="font-semibold text-gray-900 flex flex-wrap items-center gap-1.5">
+                                            <span>{advMeta.displayLabel}</span>
+                                            {advMeta.isBank && (
+                                              <span className="font-bold text-[11px] text-blue-900 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded flex items-center gap-1">
+                                                <span>🏛</span>
+                                                <span>{advMeta.bankName}</span>
+                                              </span>
+                                            )}
+                                          </dd>
+
+                                          <dt className="text-gray-500">Date &amp; Time:</dt>
+                                          <dd className="font-mono text-gray-900">
+                                            {advanceTiming ? `${advanceTiming.date} at ${advanceTiming.time}` : "Recorded on booking"}
+                                          </dd>
+
+                                          <dt className="text-gray-500">Status:</dt>
+                                          <dd className="text-emerald-800 font-bold">✓ Approved &amp; Verified</dd>
+                                        </dl>
+                                      </div>
+
+                                      {/* Card 2: Balance Details */}
+                                      <div className="bg-white p-3.5 rounded-lg border border-emerald-200 shadow-2xs flex flex-col gap-2">
+                                        <div className="flex items-center justify-between pb-2 border-b border-gray-100">
+                                          <span className="font-bold text-emerald-900 flex items-center gap-1.5 text-xs">
+                                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                            2. Balance Settled (ඉතිරි මුදල)
+                                          </span>
+                                          <span className="font-mono font-bold text-sm text-emerald-800">
+                                            Rs. {balanceAmount.toLocaleString()}
+                                          </span>
+                                        </div>
+                                        <dl className="grid grid-cols-[110px_1fr] gap-y-1.5 text-xs">
+                                          <dt className="text-gray-500">Method (ක්‍රමය):</dt>
+                                          <dd className="font-semibold text-gray-900 flex flex-wrap items-center gap-1.5">
+                                            <span>{balMeta.displayLabel}</span>
+                                            {balMeta.isBank && (
+                                              <span className="font-bold text-[11px] text-blue-900 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded flex items-center gap-1">
+                                                <span>🏛</span>
+                                                <span>{balMeta.bankName}</span>
+                                              </span>
+                                            )}
+                                          </dd>
+
+                                          <dt className="text-gray-500">Date &amp; Time:</dt>
+                                          <dd className="font-mono text-gray-900">
+                                            {balanceTiming ? `${balanceTiming.date} at ${balanceTiming.time}` : advanceTiming ? `${advanceTiming.date} at ${advanceTiming.time}` : "Settled on completion"}
+                                          </dd>
+
+                                          <dt className="text-gray-500">Status:</dt>
+                                          <dd className="text-emerald-800 font-bold">✓ Settled &amp; Counted</dd>
+                                        </dl>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    /* Single Full Payment */
+                                    <div className="bg-white p-3.5 rounded-lg border border-emerald-200 shadow-2xs flex flex-col gap-2">
+                                      <div className="flex items-center justify-between pb-2 border-b border-gray-100">
+                                        <span className="font-bold text-emerald-900 flex items-center gap-1.5 text-xs">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                          Full Payment (සම්පූර්ණ ගෙවීම — අත්තිකාරම් රහිතව)
+                                        </span>
+                                        <span className="font-mono font-bold text-sm text-emerald-800">
+                                          Rs. {(b.quotedAmount || 0).toLocaleString()}
+                                        </span>
+                                      </div>
+                                      <dl className="grid grid-cols-[130px_1fr] sm:grid-cols-[130px_1fr_130px_1fr] gap-y-1.5 text-xs">
+                                        <dt className="text-gray-500">Method (ක්‍රමය):</dt>
+                                        <dd className="font-semibold text-gray-900 flex flex-wrap items-center gap-1.5">
+                                          <span>{fullMeta.displayLabel}</span>
+                                          {fullMeta.isBank && (
+                                            <span className="font-bold text-[11px] text-blue-900 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded flex items-center gap-1">
+                                              <span>🏛</span>
+                                              <span>{fullMeta.bankName}</span>
+                                            </span>
+                                          )}
+                                        </dd>
+
+                                        <dt className="text-gray-500">Approved Date &amp; Time:</dt>
+                                        <dd className="font-mono text-gray-900">
+                                          {fullTiming ? `${fullTiming.date} at ${fullTiming.time}` : "Recorded"}
+                                        </dd>
+
+                                        <dt className="text-gray-500">Advance Status:</dt>
+                                        <dd className="text-gray-700 font-medium">None (Full amount paid at once)</dd>
+
+                                        <dt className="text-gray-500">Settlement Status:</dt>
+                                        <dd className="text-emerald-800 font-bold">✓ 100% Settled</dd>
+                                      </dl>
+                                    </div>
+                                  )}
+
+                                  {/* Note if any */}
+                                  {b.quoteNote && (
+                                    <div className="text-[11px] text-emerald-900/80 bg-white/70 px-3 py-1.5 rounded border border-emerald-200/60 font-medium flex items-center gap-1.5">
+                                      <span className="font-bold">Payment Note:</span>
+                                      <span>{b.quoteNote}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })() : (
+                            <div className="px-4 py-4 sm:px-5 flex flex-col gap-3">
+                              <h4 className="text-sm font-bold text-gray-900">
+                                Step 2: Amount &amp; Payment
+                              </h4>
+
+                              {(b.status === "pending" || editingQuoteId === b.id) && (
+                                <div className="flex flex-col gap-3">
+                                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                                    <div className="sm:col-span-4">
+                                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                                        Amount (LKR) *
+                                      </label>
+                                      <input
+                                        type="number"
+                                        min="1"
+                                        value={quoteDraft.amount}
+                                        onChange={(e) =>
+                                          setQuoteInputs((prev) => ({
+                                            ...prev,
+                                            [b.id]: { ...quoteDraft, amount: e.target.value },
+                                          }))
+                                        }
+                                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-xs font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
+                                      />
+                                    </div>
+                                    <div className="sm:col-span-8">
+                                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                                        Payment Note (Optional)
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={quoteDraft.note}
+                                        onChange={(e) =>
+                                          setQuoteInputs((prev) => ({
+                                            ...prev,
+                                            [b.id]: { ...quoteDraft, note: e.target.value },
+                                          }))
+                                        }
+                                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-xs text-gray-900 focus:border-gray-900 focus:outline-none"
+                                      />
+                                    </div>
+                                  </div>
+
+                                  <div className="flex flex-wrap items-center justify-end gap-2">
+                                    <button
+                                      type="button"
+                                      disabled={actionLoading === b.id}
+                                      onClick={() => handleSendQuote(b)}
+                                      className="px-4 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-xs font-semibold cursor-pointer disabled:opacity-50"
+                                    >
+                                      {actionLoading === b.id ? "Sending..." : "Send Amount & Request Pay"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={actionLoading === b.id}
+                                      onClick={() => openPaymentApprovalModal(b)}
+                                      className="px-4 py-2 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 text-xs font-semibold cursor-pointer disabled:opacity-50"
+                                    >
+                                      Approve Payment
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {(isCashPending || (typeof b.pendingAmount === "number" && b.pendingAmount > 0)) && (
+                                <div className="px-4 py-3 rounded-lg bg-amber-50 border border-amber-300 text-xs text-amber-900 flex flex-wrap items-center justify-between gap-3">
+                                  <div>
+                                    <span className="font-bold flex items-center gap-1.5 text-amber-900">
+                                      <span className="w-2 h-2 rounded-full bg-amber-500 inline-block"></span>
+                                      Payment Pending: Balance Due Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()}
+                                    </span>
+                                    <p className="text-xs text-amber-800 mt-0.5">
+                                      Total: <strong className="font-bold">Rs. {(b.quotedAmount || 0).toLocaleString()}</strong>
+                                      {typeof b.advanceAmount === "number" && b.advanceAmount > 0 ? (
+                                        <>
+                                          {" · "}Advance Paid: <strong className="font-bold text-green-800">Rs. {b.advanceAmount.toLocaleString()}</strong> ({b.paymentMethod === "bank_transfer" ? `Bank: ${b.paymentBankUsed || "Bank"}` : "Cash"})
+                                        </>
+                                      ) : (
+                                        " · Full balance pending"
+                                      )}
+                                      {b.quoteNote && ` · ${b.quoteNote}`}
+                                    </p>
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <button
+                                      type="button"
+                                      disabled={actionLoading === b.id}
+                                      onClick={() => openSettleBalanceModal(b)}
+                                      className="px-3.5 py-2 rounded-md bg-green-700 hover:bg-green-800 text-white text-xs font-semibold cursor-pointer shadow-xs"
+                                    >
+                                      💳 Settle Balance (Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()})
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={actionLoading === b.id}
+                                      onClick={() => openPaymentApprovalModal(b)}
+                                      className="px-3 py-2 rounded-md border border-amber-300 bg-white hover:bg-amber-100 text-amber-950 text-xs font-medium cursor-pointer"
+                                    >
+                                      Update Payment
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {isCashPaid && (!b.pendingAmount || b.pendingAmount === 0) && (
+                                <div className="px-4 py-2.5 rounded-md bg-green-50 border border-green-300 text-xs text-green-900 flex items-center justify-between">
+                                  <span>
+                                    ✓ Fully Paid &amp; Counted into Revenue: <strong>Rs. {(b.quotedAmount || 0).toLocaleString()}</strong>
+                                    {typeof b.advanceAmount === "number" && b.advanceAmount > 0 && b.finalPaymentMethod ? (
+                                      <span className="text-gray-600 ml-1">
+                                        (Advance: Rs. {b.advanceAmount.toLocaleString()} via {b.paymentMethod === "bank_transfer" ? b.paymentBankUsed || "Bank" : "Cash"} + Balance via {b.finalPaymentMethod === "bank_transfer" ? b.finalPaymentBankUsed || "Bank" : "Cash"})
+                                      </span>
+                                    ) : b.paymentBankUsed ? (
+                                      <span className="text-gray-600 ml-1">({b.paymentBankUsed})</span>
+                                    ) : b.paymentMethod === "cash_manual" ? (
+                                      <span className="text-gray-600 ml-1">(Cash)</span>
+                                    ) : null}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    disabled={actionLoading === b.id}
+                                    onClick={() => openPaymentApprovalModal(b)}
+                                    className="text-xs text-green-950 underline font-medium cursor-pointer"
+                                  >
+                                    Edit Payment
+                                  </button>
+                                </div>
+                              )}
+
+                              {b.status === "awaiting_payment" && editingQuoteId !== b.id && (
+                                <div className="flex flex-wrap items-center justify-between gap-3 text-xs bg-gray-50 border border-gray-200 rounded-md px-4 py-3">
+                                  <span>
+                                    Waiting for customer payment slip — Quoted Rs. {(b.quotedAmount || 0).toLocaleString()}
+                                  </span>
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setQuoteInputs((prev) => ({
+                                          ...prev,
+                                          [b.id]: {
+                                            amount: b.quotedAmount ? String(b.quotedAmount) : "",
+                                            note: b.quoteNote || "",
+                                          },
+                                        }));
+                                        setEditingQuoteId(b.id);
+                                      }}
+                                      className="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-gray-900 text-xs font-medium hover:bg-gray-50 cursor-pointer"
+                                    >
+                                      Edit Amount
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={actionLoading === b.id}
+                                      onClick={() => openPaymentApprovalModal(b)}
+                                      className="px-3 py-1.5 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-xs font-semibold cursor-pointer disabled:opacity-50"
+                                    >
+                                      Approve Payment
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {hasStoredSlip && (
+                                <div className="px-4 py-2.5 rounded-md bg-gray-50 border border-gray-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+                                  <span className="font-semibold text-gray-900">
+                                    Payment Slip: {b.paymentSlipName || "Uploaded"} {b.paymentBankUsed ? `(Paid to: ${b.paymentBankUsed})` : ""}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => openSlipReviewModal(b)}
+                                    className="px-3 py-1.5 rounded-md bg-gray-900 text-white text-xs font-semibold hover:bg-gray-800 cursor-pointer"
+                                  >
+                                    Review Slip
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                            )}
+
+                            {/* Stage Selection (8-Stage Clickbox Progress Stepper) */}
+                            {cardContext === "completed" ? (
+                              <div className="px-4 py-3 sm:px-5 bg-gray-50 flex flex-wrap items-center justify-between gap-2 text-xs border-b border-gray-200">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-bold text-gray-700 uppercase tracking-wider">Progress Stage:</span>
+                                  <span className="px-2.5 py-1 rounded-md bg-blue-600 text-white font-bold text-xs flex items-center gap-1.5 shadow-xs">
+                                    <span>✓</span>
+                                    <span>7. Delivered / Completed</span>
+                                  </span>
+                                </div>
+                                <span className="text-[11px] text-gray-500 font-medium">
+                                  🔒 Ride delivered and balance 100% settled. Stage locked.
+                                </span>
+                              </div>
+                            ) : (
+                            <div className="px-4 py-4 sm:px-5 bg-gray-50 flex flex-col gap-3 text-sm">
+                              {(() => {
+                                const currentStatus = (b.status === "booked" ? "accepted" : b.status) as BookingStatus;
+                                const currentProgressIdx = PROGRESS_KEYS.indexOf(currentStatus);
+                                const isBookingCancelled = currentStatus === "cancelled";
+                                const isPaymentApproved =
+                                  !isCashPending &&
+                                  (b.paymentSlipStatus === "manual_approved" ||
+                                   b.paymentSlipStatus === "approved" ||
+                                   Boolean(b.paymentApprovedAt && b.paymentApprovedAt > 0));
+                                const isPaymentPending = isCashPending || !isPaymentApproved;
+                                const isPaymentPendingWarning = isPaymentPending && (currentProgressIdx >= 3 || isCashPending);
+
+                                return (
+                                  <div className="w-full">
+                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                                      <span className="text-xs font-bold text-gray-700 uppercase tracking-wider">
+                                        Progress Stage:
+                                      </span>
+                                      <div className="flex items-center gap-2">
+                                        {isPaymentPendingWarning && (
+                                          <span className="text-[11px] font-semibold text-orange-800 bg-orange-100 border border-orange-300 px-2 py-0.5 rounded-md">
+                                            Payment Pending
+                                          </span>
+                                        )}
+                                        <span className="text-xs text-gray-500 font-medium">
+                                          Current: <strong className="text-gray-900">{BOOKING_STAGES.find((s) => s.key === currentStatus)?.label || b.status}</strong>
+                                        </span>
+                                      </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+                                      {BOOKING_STAGES.map((st) => {
+                                        const isCancelledStage = st.key === "cancelled";
+                                        const stageProgressIdx = PROGRESS_KEYS.indexOf(st.key);
+                                        const isCurrent = currentStatus === st.key;
+                                        const isReached =
+                                          !isBookingCancelled &&
+                                          stageProgressIdx !== -1 &&
+                                          currentProgressIdx !== -1 &&
+                                          stageProgressIdx <= currentProgressIdx;
+
+                                        const isPaymentStage = st.key === "accepted";
+                                        const isOrangePending =
+                                          isPaymentStage &&
+                                          isPaymentPending &&
+                                          (isReached || isCashPending);
+
+                                        let btnClass = "bg-white text-gray-700 border-gray-300 hover:border-gray-900 hover:bg-gray-50";
+                                        let checkClass = "border-gray-400 bg-white text-transparent";
+                                        let checkContent = "✓";
+
+                                        if (isCancelledStage) {
+                                          if (isBookingCancelled) {
+                                            btnClass = "bg-red-600 text-white border-red-600 shadow-sm ring-1 ring-red-600";
+                                            checkClass = "bg-white text-red-600 border-white";
+                                            checkContent = "✓";
+                                          } else {
+                                            btnClass = "bg-white text-gray-700 border-gray-300 hover:border-red-600 hover:bg-red-50/50";
+                                            checkClass = "border-gray-400 bg-white text-transparent";
+                                            checkContent = "✓";
+                                          }
+                                        } else if (isOrangePending) {
+                                          btnClass = `bg-orange-500 text-white border-orange-600 shadow-sm ring-1 ring-orange-500 hover:bg-orange-600 ${
+                                            isCurrent ? "ring-2 ring-offset-1 ring-orange-600 font-bold" : ""
+                                          }`;
+                                          checkClass = "bg-white text-orange-600 border-white";
+                                          checkContent = "!";
+                                        } else if (isReached) {
+                                          btnClass = `bg-gray-900 text-white border-gray-900 shadow-sm ring-1 ring-gray-900 hover:bg-gray-800 ${
+                                            isCurrent ? "ring-2 ring-offset-1 ring-[#FFC20E] font-bold" : ""
+                                          }`;
+                                          checkClass = "bg-white text-gray-900 border-white";
+                                          checkContent = "✓";
+                                        }
+
+                                        return (
+                                          <button
+                                            key={st.key}
+                                            type="button"
+                                            disabled={actionLoading === b.id}
+                                            onClick={() => handleStageClickboxSelect(b, st.key)}
+                                            className={`flex items-start gap-1.5 p-2 rounded-lg border text-xs font-medium text-left transition-all cursor-pointer ${btnClass}`}
+                                            title={
+                                              isOrangePending
+                                                ? "Payment is pending! Click to review or approve payment."
+                                                : isReached
+                                                ? `Completed stage: ${st.label}`
+                                                : `Click to set stage to ${st.label}`
+                                            }
+                                          >
+                                            <span
+                                              className={`w-4 h-4 mt-0.5 rounded flex items-center justify-center flex-shrink-0 text-[10px] font-bold border ${checkClass}`}
+                                            >
+                                              {checkContent}
+                                            </span>
+                                            <span className="leading-tight">
+                                              {st.label}
+                                              {isOrangePending && (
+                                                <span className="block text-[10px] font-bold text-amber-100 uppercase tracking-wider mt-0.5">
+                                                  Pending
+                                                </span>
+                                              )}
+                                            </span>
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+
+                              {/* Footer Action Buttons */}
+                              <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-gray-200">
+                                {b.status !== "cancelled" && b.status !== "delivered" && (
+                                  <button
+                                    type="button"
+                                    disabled={actionLoading === b.id}
+                                    onClick={() => {
+                                      if (confirm("Are you sure you want to cancel this booking and free its scheduled time slot?")) {
+                                        updateBooking(b.id, "cancelled");
+                                      }
+                                    }}
+                                    className="px-3.5 py-2 rounded-md border border-gray-300 bg-white text-gray-900 hover:bg-gray-100 text-xs font-medium cursor-pointer"
+                                  >
+                                    Reject / Cancel
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  disabled={actionLoading === b.id}
+                                  onClick={() => handleDeleteBooking(b.id)}
+                                  className="px-3.5 py-2 rounded-md border border-red-300 bg-white hover:bg-red-50 text-red-700 text-xs font-medium cursor-pointer"
+                                  title="Permanently Delete Booking from Database"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+                            )}
+
+                            {cardContext === "completed" && (
+                              <div className="px-4 py-3 sm:px-5 bg-gray-50/90 border-t border-gray-200 flex flex-wrap items-center justify-between gap-3 text-xs">
+                                <div className="flex items-center gap-2 text-gray-600 text-xs">
+                                  <span className="font-mono text-[11px] text-gray-400">ID: {b.id}</span>
+                                  <span className="text-gray-300">·</span>
+                                  <span className="text-[11px] text-blue-900 font-semibold bg-blue-50 border border-blue-200 px-2 py-0.5 rounded">
+                                    ✓ Delivered &amp; Completed
+                                  </span>
+                                  <span className="text-gray-300">·</span>
+                                  <span className="text-[11px] text-gray-500 italic">Stage locked</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={actionLoading === b.id}
+                                    onClick={() => handleDeleteBooking(b.id)}
+                                    className="px-3.5 py-1.5 rounded-lg border border-red-300 bg-white hover:bg-red-50 text-red-700 text-xs font-semibold cursor-pointer shadow-2xs transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                                    title="Permanently Delete Booking from Database"
+                                  >
+                                    <span>🗑</span>
+                                    <span>Delete Booking</span>
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+  };
+
   // ---- DEDICATED ADMIN DASHBOARD WITH SIDE NAVIGATION ----
   return (
     <div className="min-h-screen bg-[#F7F5EE] flex text-[#26231B] font-sans select-none">
@@ -3230,6 +5115,64 @@ export default function MasterAdminDashboard() {
                   {totalPendingCount}
                 </span>
               )}
+            </button>
+
+            {/* All Bookings (Ongoing Rides & Completed Bookings) */}
+            <button
+              onClick={() => {
+                setActiveNav("all_bookings");
+                setSidebarOpen(false);
+              }}
+              className={`w-full px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all text-left flex items-center justify-between cursor-pointer ${
+                activeNav === "all_bookings"
+                  ? "bg-[#FFC20E] text-[#26231B]"
+                  : "text-white/75 hover:bg-white/10 hover:text-white"
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                  <polyline points="14 2 14 8 20 8"></polyline>
+                  <line x1="16" y1="13" x2="8" y2="13"></line>
+                  <line x1="16" y1="17" x2="8" y2="17"></line>
+                  <polyline points="10 9 9 9 8 9"></polyline>
+                </svg>
+                <span>All Bookings</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {ongoingBookings.length > 0 && (
+                  <span
+                    className={`px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold flex items-center gap-1 ${
+                      activeNav === "all_bookings"
+                        ? "bg-[#26231B] text-emerald-400"
+                        : "bg-emerald-500 text-white"
+                    }`}
+                    title={`${ongoingBookings.length} Ongoing Rides`}
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    {ongoingBookings.length}
+                  </span>
+                )}
+                {pendingPaymentBookings.length > 0 && (
+                  <span
+                    className={`px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold ${
+                      activeNav === "all_bookings"
+                        ? "bg-[#26231B] text-amber-400"
+                        : "bg-amber-500 text-white"
+                    }`}
+                    title={`${pendingPaymentBookings.length} Pending Payments`}
+                  >
+                    ⌛ {pendingPaymentBookings.length}
+                  </span>
+                )}
+                {!loadingBookings && (
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold ${
+                    activeNav === "all_bookings" ? "bg-[#26231B] text-[#FFC20E]" : "bg-white/15 text-white/70"
+                  }`}>
+                    {ongoingBookings.length + pendingPaymentBookings.length + completedBookings.length}
+                  </span>
+                )}
+              </div>
             </button>
 
             {/* Individual Bookings */}
@@ -3565,6 +5508,13 @@ export default function MasterAdminDashboard() {
             <div>
               <h1 className="text-base font-black text-[#26231B] tracking-tight">
                 {activeNav === "overview" && "Dashboard Overview"}
+                {activeNav === "all_bookings" && (
+                  allBookingsTab === "ongoing"
+                    ? "All Bookings · Ongoing Rides (ක්‍රියාත්මක ගමන්වාර)"
+                    : allBookingsTab === "pending_payment"
+                    ? "All Bookings · Pending Payment (ගමන්වාරය අවසන් වූ · මුදල් අයවිය යුතු)"
+                    : "All Bookings · Completed Bookings (සම්පූර්ණ වූ ගමන්වාර)"
+                )}
                 {activeNav === "individual_bookings" && "Individual Vehicle Bookings"}
                 {activeNav === "online_bookings" && "Online / Live Lorry Bookings"}
                 {activeNav === "customers" && "Customers"}
@@ -3577,7 +5527,13 @@ export default function MasterAdminDashboard() {
                 {activeNav === "settings" && "System & Payment Settings"}
               </h1>
               <p className="text-[11px] text-[#6F6A5A]">
-                {activeNav === "customers"
+                {activeNav === "all_bookings"
+                  ? allBookingsTab === "ongoing"
+                    ? "Live active dispatches in transit · Active during scheduled departure window"
+                    : allBookingsTab === "pending_payment"
+                    ? "Concluded dispatches with payment pending · Lorry & rider slot is already released"
+                    : "Concluded & fully settled dispatches · Locked historical records"
+                  : activeNav === "customers"
                   ? "Simple list of all registered and booked customers"
                   : activeNav === "complaints"
                   ? "Audit log of cancelled and deleted bookings with mandatory reasons"
@@ -3594,6 +5550,29 @@ export default function MasterAdminDashboard() {
 
           {/* Quick Header Actions */}
           <div className="flex items-center gap-2">
+            {activeNav === "all_bookings" && allBookingsTab === "ongoing" && (
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-mono font-bold text-emerald-800 whitespace-nowrap shrink-0 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                  {ongoingBookings.length} Active On Road
+                </span>
+              </div>
+            )}
+            {activeNav === "all_bookings" && allBookingsTab === "pending_payment" && (
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1.5 rounded-xl bg-amber-50 border border-amber-300 text-xs font-mono font-bold text-amber-900 whitespace-nowrap shrink-0 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                  {pendingPaymentBookings.length} Payment Pending
+                </span>
+              </div>
+            )}
+            {activeNav === "all_bookings" && allBookingsTab === "completed" && (
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1.5 rounded-xl bg-blue-50 border border-blue-200 text-xs font-mono font-bold text-blue-900 whitespace-nowrap shrink-0">
+                  {completedBookings.length} Concluded Trips
+                </span>
+              </div>
+            )}
             {activeNav === "customers" && (
               <div className="flex items-center gap-2">
                 <span className="px-3 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-xs font-mono font-bold text-[#26231B] whitespace-nowrap shrink-0">
@@ -3726,96 +5705,528 @@ export default function MasterAdminDashboard() {
           {/* ========================================================= */}
           {activeNav === "overview" && (
             <div className="flex flex-col gap-5">
-              {/* Today's Revenue Summary Card */}
-              <div className="bg-white border border-gray-300 rounded-lg p-5 sm:p-6">
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-4 border-b border-gray-200">
-                  <div>
-                    <h2 className="text-base font-bold text-gray-900">Today&apos;s Revenue</h2>
-                    <p className="text-sm text-gray-600 mt-0.5">
-                      Paid bookings today • Resets daily at 12:00 AM
-                    </p>
+              {/* Top 3 Cards: Today's Revenue, Ongoing Rides, & Unpaid Bookings */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+                {/* Card 1: Today's Revenue */}
+                <div
+                  onClick={() => {
+                    setDashboardFilterMode((prev) => (prev === "today" ? "upcoming" : "today"));
+                  }}
+                  className={`bg-white border rounded-lg p-4 sm:p-5 transition-all cursor-pointer ${
+                    dashboardFilterMode === "today"
+                      ? "border-gray-900 ring-2 ring-gray-900 shadow-xs"
+                      : "border-gray-300 hover:border-gray-400"
+                  }`}
+                  title="Filter today's bookings"
+                >
+                  <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-gray-100">
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-sm font-bold text-gray-900">Today&apos;s Revenue</h2>
+                      {dashboardFilterMode === "today" && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gray-900 text-white">
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs font-mono font-medium text-gray-500">
+                      {revenueData.todayDateStr}
+                    </span>
                   </div>
-                  <span className="px-3 py-1 rounded-md bg-gray-100 border border-gray-300 text-sm font-mono font-semibold text-gray-900">
-                    {revenueData.todayDateStr}
+
+                  <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2">
+                    <div className="text-2xl sm:text-3xl font-extrabold text-gray-900 font-mono tracking-tight">
+                      Rs. {loadingBookings ? "..." : revenueData.todayRevenue.toLocaleString()}
+                    </div>
+                    <div className="text-xs text-gray-500 font-medium space-x-2">
+                      <span>{loadingBookings ? "..." : revenueData.todayBookingsCount} {revenueData.todayBookingsCount === 1 ? "trip" : "trips"}</span>
+                      <span>·</span>
+                      <span>Month: <strong className="text-gray-900 font-mono font-semibold">Rs. {loadingBookings ? "..." : revenueData.thisMonthRevenue.toLocaleString()}</strong></span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Card 2: Ongoing Rides */}
+                <div
+                  onClick={() => {
+                    setActiveNav("all_bookings");
+                    setAllBookingsTab("ongoing");
+                  }}
+                  className={`bg-white border rounded-lg p-4 sm:p-5 transition-all cursor-pointer ${
+                    dashboardFilterMode === "ongoing"
+                      ? "border-emerald-600 ring-2 ring-emerald-600 shadow-xs bg-emerald-50/20"
+                      : "border-gray-300 hover:border-gray-400"
+                  }`}
+                  title="View active ongoing rides in transit"
+                >
+                  <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-gray-100">
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-sm font-bold text-gray-900">Ongoing Rides</h2>
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-600 text-white flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>
+                        Live
+                      </span>
+                    </div>
+                    <span className="text-xs font-bold text-emerald-700">
+                      In Transit
+                    </span>
+                  </div>
+
+                  <div className="mt-3 flex items-baseline justify-between gap-2">
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-2xl sm:text-3xl font-extrabold text-emerald-600 font-mono tracking-tight">
+                        {loadingBookings ? "..." : ongoingBookings.length}
+                      </span>
+                      <span className="text-xs text-gray-500 font-medium">on the road</span>
+                    </div>
+                    <span className="text-xs font-bold text-emerald-700 hover:underline">
+                      View Ongoing →
+                    </span>
+                  </div>
+                </div>
+
+                {/* Card 3: Unpaid Bookings */}
+                <div
+                  onClick={() => {
+                    setDashboardFilterMode((prev) => (prev === "unpaid" ? "upcoming" : "unpaid"));
+                  }}
+                  className={`bg-white border rounded-lg p-4 sm:p-5 transition-all cursor-pointer ${
+                    dashboardFilterMode === "unpaid"
+                      ? "border-orange-500 ring-2 ring-orange-500 shadow-xs bg-orange-50/20"
+                      : "border-gray-300 hover:border-gray-400"
+                  }`}
+                  title="Filter unpaid bookings"
+                >
+                  <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-gray-100">
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-sm font-bold text-gray-900">Unpaid Bookings</h2>
+                      {dashboardFilterMode === "unpaid" && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-orange-600 text-white">
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs font-bold text-orange-600">
+                      Payment Pending
+                    </span>
+                  </div>
+
+                  <div className="mt-3 flex items-baseline justify-between gap-2">
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-2xl sm:text-3xl font-extrabold text-orange-600 font-mono tracking-tight">
+                        {loadingBookings ? "..." : unpaidBookings.length}
+                      </span>
+                      <span className="text-xs text-gray-500 font-medium">pending</span>
+                    </div>
+                    <span className="text-xs font-bold text-orange-700 hover:underline">
+                      {dashboardFilterMode === "unpaid" ? "✕ Show Upcoming" : "Filter Unpaid →"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Schedule Header & Filter Bar */}
+              <div className="bg-white border border-gray-300 rounded-lg p-3 sm:p-3.5 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm sm:text-base font-bold text-gray-900">
+                    Dispatch Schedule
+                  </h2>
+                  <span className="px-2 py-0.5 rounded bg-gray-100 text-gray-800 text-xs font-mono font-bold">
+                    {dashboardDispatchList.length}
                   </span>
                 </div>
 
-                <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <div>
-                    <div className="text-sm font-medium text-gray-600">Today&apos;s Total</div>
-                    <div className="text-3xl font-bold text-gray-900 font-mono mt-1">
-                      Rs. {loadingBookings ? "..." : revenueData.todayRevenue.toLocaleString()}
-                    </div>
+                <div className="flex flex-wrap items-center gap-2.5 text-xs">
+                  {/* Filter buttons */}
+                  <div className="flex items-center rounded-md border border-gray-300 overflow-hidden bg-gray-50 p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setDashboardFilterMode("upcoming")}
+                      className={`px-2.5 py-1 rounded font-semibold cursor-pointer transition-colors ${
+                        dashboardFilterMode === "upcoming"
+                          ? "bg-gray-900 text-white"
+                          : "text-gray-700 hover:text-gray-900"
+                      }`}
+                    >
+                      Upcoming ({upcomingBookings.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDashboardFilterMode("ongoing")}
+                      className={`px-2.5 py-1 rounded font-semibold cursor-pointer transition-colors ${
+                        dashboardFilterMode === "ongoing"
+                          ? "bg-emerald-600 text-white"
+                          : "text-emerald-800 hover:text-emerald-900"
+                      }`}
+                    >
+                      Ongoing ({ongoingBookings.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDashboardFilterMode("completed")}
+                      className={`px-2.5 py-1 rounded font-semibold cursor-pointer transition-colors ${
+                        dashboardFilterMode === "completed"
+                          ? "bg-blue-600 text-white"
+                          : "text-blue-800 hover:text-blue-900"
+                      }`}
+                    >
+                      Completed ({completedBookings.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDashboardFilterMode("unpaid")}
+                      className={`px-2.5 py-1 rounded font-semibold cursor-pointer transition-colors ${
+                        dashboardFilterMode === "unpaid"
+                          ? "bg-orange-600 text-white"
+                          : "text-orange-800 hover:text-orange-900"
+                      }`}
+                    >
+                      Unpaid ({unpaidBookings.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDashboardFilterMode("today")}
+                      className={`px-2.5 py-1 rounded font-semibold cursor-pointer transition-colors ${
+                        dashboardFilterMode === "today"
+                          ? "bg-gray-900 text-white"
+                          : "text-gray-700 hover:text-gray-900"
+                      }`}
+                    >
+                      Today
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDashboardFilterMode("all")}
+                      className={`px-2.5 py-1 rounded font-semibold cursor-pointer transition-colors ${
+                        dashboardFilterMode === "all"
+                          ? "bg-gray-900 text-white"
+                          : "text-gray-700 hover:text-gray-900"
+                      }`}
+                    >
+                      All
+                    </button>
                   </div>
-                  <div>
-                    <div className="text-sm font-medium text-gray-600">Paid Trips Today</div>
-                    <div className="text-2xl font-bold text-gray-900 font-mono mt-1">
-                      {loadingBookings ? "..." : revenueData.todayBookingsCount}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium text-gray-600">This Month</div>
-                    <div className="text-2xl font-bold text-gray-900 font-mono mt-1">
-                      Rs. {loadingBookings ? "..." : revenueData.thisMonthRevenue.toLocaleString()}
-                    </div>
+
+                  {/* Date range picker */}
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="date"
+                      aria-label="Filter from date"
+                      value={dashboardDateFrom}
+                      onChange={(e) => setDashboardDateFrom(e.target.value)}
+                      className="px-2 py-1 rounded border border-gray-300 bg-white font-mono text-gray-900 text-xs focus:border-gray-900 focus:outline-none"
+                    />
+                    <span className="text-gray-400 font-bold">–</span>
+                    <input
+                      type="date"
+                      aria-label="Filter to date"
+                      value={dashboardDateTo}
+                      onChange={(e) => setDashboardDateTo(e.target.value)}
+                      className="px-2 py-1 rounded border border-gray-300 bg-white font-mono text-gray-900 text-xs focus:border-gray-900 focus:outline-none"
+                    />
+                    {(dashboardDateFrom || dashboardDateTo) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDashboardDateFrom("");
+                          setDashboardDateTo("");
+                        }}
+                        className="px-2 py-1 rounded border border-gray-300 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-semibold cursor-pointer"
+                        title="Clear date filter"
+                      >
+                        ✕
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
 
-              {/* Simple Overview Counts (Non-navigation summary list) */}
-              <div className="bg-white border border-gray-300 rounded-lg overflow-hidden">
-                <div className="px-5 py-4 border-b border-gray-200">
-                  <h2 className="text-base font-bold text-gray-900">Overview Summary</h2>
+              {/* Chronological Dispatch Schedule List */}
+              <div className="flex flex-col gap-3">
+                {loadingBookings ? (
+                  <div className="p-8 text-center bg-white border border-gray-300 rounded-lg text-sm text-gray-500 font-medium">
+                    Loading dispatch schedule...
+                  </div>
+                ) : dashboardDispatchList.length === 0 ? (
+                  <div className="p-8 text-center bg-white border border-gray-300 rounded-lg text-sm text-gray-500">
+                    {dashboardFilterMode === "unpaid"
+                      ? "No unpaid bookings pending payment."
+                      : dashboardFilterMode === "today"
+                      ? `No bookings scheduled for today (${revenueData.todayDateStr}).`
+                      : "No scheduled dispatch bookings found."}
+                  </div>
+                ) : (
+                  dashboardDispatchList.map((b) => renderBookingDispatchCard(b, "dashboard"))
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB: ALL BOOKINGS (ONGOING, PENDING PAYMENT & COMPLETED)  */}
+          {/* ========================================================= */}
+          {activeNav === "all_bookings" && (
+            <div className="flex flex-col gap-4">
+              {/* 3 Navigation Tabs: Ongoing Rides, Pending Payment, Completed Bookings */}
+              <div className="bg-white border border-gray-300 rounded-xl p-1.5 flex flex-wrap items-center gap-2 shadow-xs">
+                {/* Tab 1: Ongoing Rides */}
+                <button
+                  type="button"
+                  onClick={() => setAllBookingsTab("ongoing")}
+                  className={`flex-1 sm:flex-initial px-4 py-2.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                    allBookingsTab === "ongoing"
+                      ? "bg-emerald-600 text-white shadow-xs"
+                      : "text-emerald-900 hover:text-emerald-950 hover:bg-emerald-50"
+                  }`}
+                >
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>Ongoing Rides (ක්‍රියාත්මක)</span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                    allBookingsTab === "ongoing" ? "bg-white/20 text-white" : "bg-emerald-100 text-emerald-800"
+                  }`}>
+                    {ongoingBookings.length}
+                  </span>
+                </button>
+
+                {/* Tab 2: Pending Payment */}
+                <button
+                  type="button"
+                  onClick={() => setAllBookingsTab("pending_payment")}
+                  className={`flex-1 sm:flex-initial px-4 py-2.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                    allBookingsTab === "pending_payment"
+                      ? "bg-amber-500 text-white shadow-xs"
+                      : "text-amber-900 hover:text-amber-950 hover:bg-amber-50"
+                  }`}
+                >
+                  <span>⌛</span>
+                  <span>Pending Payment (මුදල් අයවිය යුතු)</span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                    allBookingsTab === "pending_payment" ? "bg-white/20 text-white" : "bg-amber-100 text-amber-900"
+                  }`}>
+                    {pendingPaymentBookings.length}
+                  </span>
+                </button>
+
+                {/* Tab 3: Completed Bookings */}
+                <button
+                  type="button"
+                  onClick={() => setAllBookingsTab("completed")}
+                  className={`flex-1 sm:flex-initial px-4 py-2.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                    allBookingsTab === "completed"
+                      ? "bg-blue-600 text-white shadow-xs"
+                      : "text-blue-900 hover:text-blue-950 hover:bg-blue-50"
+                  }`}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                    <polyline points="22 4 12 14.01 9 11.01"/>
+                  </svg>
+                  <span>Completed Bookings (සම්පූර්ණ වූ)</span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                    allBookingsTab === "completed" ? "bg-white/20 text-white" : "bg-blue-100 text-blue-900"
+                  }`}>
+                    {completedBookings.length}
+                  </span>
+                </button>
+              </div>
+
+              {/* TAB 1: ONGOING RIDES */}
+              {allBookingsTab === "ongoing" && (
+                <div className="flex flex-col gap-4">
+              {/* Header & Filter Bar */}
+              <div className="bg-white border border-gray-300 rounded-lg p-3.5 sm:p-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse" />
+                  <div>
+                    <h2 className="text-base font-bold text-gray-900 flex items-center gap-2">
+                      <span>Ongoing Rides (ක්‍රියාත්මක ගමන්වාර)</span>
+                      <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-xs font-mono font-bold">
+                        {ongoingBookings.length}
+                      </span>
+                    </h2>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Actively in transit within departure time up to end time (+5m buffer)
+                    </p>
+                  </div>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-200">
-                  <dl className="divide-y divide-gray-200">
-                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
-                      <dt className="text-sm font-medium text-gray-700">Total Bookings</dt>
-                      <dd className="text-base font-bold text-gray-900 font-mono">
-                        {loadingBookings ? "..." : bookings.length}
-                      </dd>
-                    </div>
-                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
-                      <dt className="text-sm font-medium text-gray-700">Pending Bookings</dt>
-                      <dd className="text-base font-bold text-gray-900 font-mono">
-                        {loadingBookings ? "..." : totalPendingCount}
-                      </dd>
-                    </div>
-                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
-                      <dt className="text-sm font-medium text-gray-700">Customers</dt>
-                      <dd className="text-base font-bold text-gray-900 font-mono">
-                        {loadingUsers ? "..." : customersWithMetrics.length}
-                      </dd>
-                    </div>
-                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
-                      <dt className="text-sm font-medium text-gray-700">Fleet Vehicles</dt>
-                      <dd className="text-base font-bold text-gray-900 font-mono">
-                        {loadingFleet ? "..." : fleetVehicles.length}
-                      </dd>
-                    </div>
-                  </dl>
-                  <dl className="divide-y divide-gray-200">
-                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
-                      <dt className="text-sm font-medium text-gray-700">Active Riders</dt>
-                      <dd className="text-base font-bold text-gray-900 font-mono">
-                        {loadingDrivers ? "..." : drivers.filter((d) => d.active).length}
-                      </dd>
-                    </div>
-                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
-                      <dt className="text-sm font-medium text-gray-700">Pending Vehicle Registrations</dt>
-                      <dd className="text-base font-bold text-gray-900 font-mono">
-                        {loadingRegistrations ? "..." : pendingRegistrationsCount}
-                      </dd>
-                    </div>
-                    <div className="px-5 py-3.5 flex items-center justify-between gap-4">
-                      <dt className="text-sm font-medium text-gray-700">Unread Inquiries</dt>
-                      <dd className="text-base font-bold text-gray-900 font-mono">
-                        {loadingInquiries ? "..." : unreadInquiriesCount}
-                      </dd>
-                    </div>
-                  </dl>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder="Search by ID, customer, lorry, rider, route..."
+                    value={ongoingSearch}
+                    onChange={(e) => setOngoingSearch(e.target.value)}
+                    className="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-xs text-gray-900 focus:outline-none focus:border-gray-900 w-64 max-w-full"
+                  />
+                  {ongoingSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setOngoingSearch("")}
+                      className="px-2 py-1.5 text-xs text-gray-500 hover:text-gray-900 font-bold cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  )}
                 </div>
               </div>
+
+              {/* List */}
+              <div className="flex flex-col gap-3">
+                {loadingBookings ? (
+                  <div className="p-8 text-center bg-white border border-gray-300 rounded-lg text-sm text-gray-500 font-medium">
+                    Loading ongoing dispatches...
+                  </div>
+                ) : filteredOngoingBookings.length === 0 ? (
+                  <div className="p-8 text-center bg-white border border-gray-300 rounded-lg text-sm text-gray-500">
+                    {ongoingSearch
+                      ? "No ongoing rides match your search."
+                      : "No active ongoing rides at this moment. Scheduled trips appear here between departure start time and end time (+5m buffer)."}
+                  </div>
+                ) : (
+                  filteredOngoingBookings.map((b) => renderBookingDispatchCard(b, "ongoing"))
+                )}
+              </div>
+                </div>
+              )}
+
+              {/* TAB 2: PENDING PAYMENT */}
+              {allBookingsTab === "pending_payment" && (
+                <div className="flex flex-col gap-4">
+                  {/* Header & Filter Bar */}
+                  <div className="bg-white border border-gray-300 rounded-lg p-3.5 sm:p-4 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-3 h-3 rounded-full bg-amber-500" />
+                      <div>
+                        <h2 className="text-base font-bold text-gray-900 flex items-center gap-2">
+                          <span>Pending Payment (ගමන්වාරය අවසන් වූ · මුදල් අයවිය යුතු)</span>
+                          <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 text-xs font-mono font-bold">
+                            {pendingPaymentBookings.length}
+                          </span>
+                        </h2>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          Physical journey concluded · Lorry &amp; rider time slots released · Settle balance to complete
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        placeholder="Search by ID, customer, lorry, rider, route..."
+                        value={pendingPaymentSearch}
+                        onChange={(e) => setPendingPaymentSearch(e.target.value)}
+                        className="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-xs text-gray-900 focus:outline-none focus:border-gray-900 w-64 max-w-full"
+                      />
+                      {pendingPaymentSearch && (
+                        <button
+                          type="button"
+                          onClick={() => setPendingPaymentSearch("")}
+                          className="px-2 py-1.5 text-xs text-gray-500 hover:text-gray-900 font-bold cursor-pointer"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* List */}
+                  <div className="flex flex-col gap-3">
+                    {loadingBookings ? (
+                      <div className="p-8 text-center bg-white border border-gray-300 rounded-lg text-sm text-gray-500 font-medium">
+                        Loading pending payment dispatches...
+                      </div>
+                    ) : filteredPendingPaymentBookings.length === 0 ? (
+                      <div className="p-8 text-center bg-white border border-gray-300 rounded-lg text-sm text-gray-500">
+                        {pendingPaymentSearch
+                          ? "No bookings match your search."
+                          : "No concluded rides with pending payment. All concluded trips are fully settled!"}
+                      </div>
+                    ) : (
+                      filteredPendingPaymentBookings.map((b) => renderBookingDispatchCard(b, "pending_payment"))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 3: COMPLETED BOOKINGS */}
+              {allBookingsTab === "completed" && (
+                <div className="flex flex-col gap-4">
+              {/* Header & Filter Bar */}
+              <div className="bg-white border border-gray-300 rounded-lg p-3.5 sm:p-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-bold text-gray-900 flex items-center gap-2">
+                    <span>Completed Bookings (සම්පූර්ණ වූ ගමන්වාර)</span>
+                    <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-900 text-xs font-mono font-bold">
+                      {completedBookings.length}
+                    </span>
+                  </h2>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Concluded dispatches · Lorry &amp; rider time slots released and available for new bookings
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Search */}
+                  <input
+                    type="text"
+                    placeholder="Search by ID, customer, lorry, rider, route..."
+                    value={completedSearch}
+                    onChange={(e) => setCompletedSearch(e.target.value)}
+                    className="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-xs text-gray-900 focus:outline-none focus:border-gray-900 w-56 max-w-full"
+                  />
+
+                  {/* Date range picker */}
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="date"
+                      aria-label="Completed from date"
+                      value={completedDateFrom}
+                      onChange={(e) => setCompletedDateFrom(e.target.value)}
+                      className="px-2 py-1 rounded border border-gray-300 bg-white font-mono text-gray-900 text-xs focus:border-gray-900 focus:outline-none"
+                    />
+                    <span className="text-gray-400 font-bold">–</span>
+                    <input
+                      type="date"
+                      aria-label="Completed to date"
+                      value={completedDateTo}
+                      onChange={(e) => setCompletedDateTo(e.target.value)}
+                      className="px-2 py-1 rounded border border-gray-300 bg-white font-mono text-gray-900 text-xs focus:border-gray-900 focus:outline-none"
+                    />
+                    {(completedDateFrom || completedDateTo || completedSearch) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCompletedDateFrom("");
+                          setCompletedDateTo("");
+                          setCompletedSearch("");
+                        }}
+                        className="px-2 py-1 rounded border border-gray-300 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-semibold cursor-pointer"
+                        title="Clear filters"
+                      >
+                        ✕ Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* List */}
+              <div className="flex flex-col gap-3">
+                {loadingBookings ? (
+                  <div className="p-8 text-center bg-white border border-gray-300 rounded-lg text-sm text-gray-500 font-medium">
+                    Loading completed bookings...
+                  </div>
+                ) : filteredCompletedBookings.length === 0 ? (
+                  <div className="p-8 text-center bg-white border border-gray-300 rounded-lg text-sm text-gray-500">
+                    {completedSearch || completedDateFrom || completedDateTo
+                      ? "No completed bookings match your filter criteria."
+                      : "No completed bookings recorded yet."}
+                  </div>
+                ) : (
+                  filteredCompletedBookings.map((b) => renderBookingDispatchCard(b, "completed"))
+                )}
+              </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -4088,17 +6499,30 @@ export default function MasterAdminDashboard() {
                                   Rs. {b.quotedAmount.toLocaleString()}
                                 </span>
                               )}
-                              {isCashManual && (
+                              {typeof b.pendingAmount === "number" && b.pendingAmount > 0 && typeof b.advanceAmount === "number" && b.advanceAmount > 0 ? (
+                                <>
+                                  <span className="text-xs font-semibold text-emerald-200 bg-emerald-950/80 border border-emerald-600/70 px-2.5 py-1 rounded-md">
+                                    Paid Rs. {b.advanceAmount.toLocaleString()}
+                                  </span>
+                                  <span className="text-xs font-semibold text-amber-200 bg-amber-950/80 border border-amber-600/70 px-2.5 py-1 rounded-md">
+                                    ⌛ Pending Rs. {b.pendingAmount.toLocaleString()}
+                                  </span>
+                                </>
+                              ) : typeof b.pendingAmount === "number" && b.pendingAmount > 0 ? (
+                                <span className="text-xs font-semibold text-amber-200 bg-amber-950/80 border border-amber-600/70 px-2.5 py-1 rounded-md">
+                                  ⌛ Pending Rs. {b.pendingAmount.toLocaleString()}
+                                </span>
+                              ) : isCashManual ? (
                                 isCashPending ? (
                                   <span className="text-xs font-semibold text-amber-200 bg-amber-950/80 border border-amber-600/70 px-2.5 py-1 rounded-md">
-                                    Cash Pending
+                                    Pending
                                   </span>
                                 ) : isCashPaid ? (
                                   <span className="text-xs font-semibold text-emerald-200 bg-emerald-950/80 border border-emerald-600/70 px-2.5 py-1 rounded-md">
-                                    Cash Paid
+                                    ✓ Paid
                                   </span>
                                 ) : null
-                              )}
+                              ) : null}
                               <StatusBadge status={b.status} />
                               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-white/20 bg-white/10 text-xs font-semibold text-white hover:bg-white/20 transition-colors">
                                 {isExpanded ? "Hide" : "Show Details"}
@@ -4291,14 +6715,24 @@ export default function MasterAdminDashboard() {
                               {/* Schedule Time Duration & Mandatory Rider Allocation Panel */}
                               {(() => {
                                 const draft = getScheduleDraft(b);
-                                const draftTimeCheck = validateTimeRange(draft.startTime, draft.endTime);
+                                const draftDates =
+                                  draft.isMultiDate && draft.endDate
+                                    ? getDatesBetween(draft.date, draft.endDate)
+                                    : [draft.date];
+                                const draftTimeCheck = validateScheduleTimeAndDates(
+                                  draft.date,
+                                  draft.startTime,
+                                  draft.isMultiDate && draft.endDate ? draft.endDate : draft.date,
+                                  draft.endTime,
+                                  draftDates
+                                );
                                 const draftConflict =
                                   draftTimeCheck.valid && draft.date
                                     ? findBookingScheduleConflict(
                                         {
                                           excludeBookingId: b.id,
-                                          date: draft.date,
-                                          dates: [draft.date],
+                                          date: draftTimeCheck.startDate,
+                                          dates: draftTimeCheck.dates,
                                           startTime: draftTimeCheck.startTime,
                                           endTime: draftTimeCheck.endTime,
                                           assignedPlate: draft.plate,
@@ -4330,27 +6764,69 @@ export default function MasterAdminDashboard() {
                                       </div>
                                       {b.startTime && b.endTime && (
                                         <span className="text-sm font-mono font-semibold text-green-800 bg-green-50 border border-green-300 px-3 py-1 rounded-md">
-                                          Allocated: {formatTimeDurationLabel(b.startTime, b.endTime)}
+                                          Allocated: {formatJourneyScheduleSummary(b.date, b.startTime, (b.dates && b.dates.length > 1 ? b.dates[b.dates.length - 1] : b.date), b.endTime, b.dates)}
                                         </span>
                                       )}
                                     </div>
 
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+                                    {/* Multi-Day Booking Toggle */}
+                                    <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-md bg-blue-50/70 border border-blue-200">
+                                      <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                                        <input
+                                          type="checkbox"
+                                          aria-label={`Toggle individual multi-day booking for ${b.id}`}
+                                          checked={Boolean(draft.isMultiDate)}
+                                          onChange={(e) => {
+                                            const checked = e.target.checked;
+                                            const sDate = draft.date || new Date().toISOString().split("T")[0];
+                                            const defaultEndDate = checked
+                                              ? (draft.endDate && draft.endDate > sDate ? draft.endDate : addDaysToYYYYMMDD(sDate, 1))
+                                              : sDate;
+                                            updateScheduleDraft(b, {
+                                              isMultiDate: checked,
+                                              endDate: defaultEndDate,
+                                              dates: checked ? getDatesBetween(sDate, defaultEndDate) : [sDate],
+                                            });
+                                          }}
+                                          className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                                        />
+                                        <span className="text-xs font-bold text-gray-900">
+                                          Multi-Day Booking (දින කිහිපයක ගමනක්)
+                                        </span>
+                                      </label>
+                                      {draft.isMultiDate && (
+                                        <span className="text-[11px] font-mono font-bold text-blue-900 bg-white border border-blue-300 px-2.5 py-0.5 rounded-full shadow-2xs">
+                                          {getDatesBetween(draft.date, draft.endDate || draft.date).length} Days Journey
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end">
                                       <div>
                                         <label className="block text-sm font-medium text-gray-700 mb-1">
-                                          Trip Date *
+                                          {draft.isMultiDate ? "Departure Date *" : "Trip Date *"}
                                         </label>
                                         <input
                                           type="date"
                                           aria-label={`Schedule date for ${b.id}`}
                                           value={draft.date}
-                                          onChange={(e) => updateScheduleDraft(b, { date: e.target.value })}
+                                          onChange={(e) => {
+                                            const newStartDate = e.target.value;
+                                            const newEndDate = draft.isMultiDate
+                                              ? (draft.endDate && draft.endDate >= newStartDate ? draft.endDate : addDaysToYYYYMMDD(newStartDate, 1))
+                                              : newStartDate;
+                                            updateScheduleDraft(b, {
+                                              date: newStartDate,
+                                              endDate: newEndDate,
+                                              dates: draft.isMultiDate ? getDatesBetween(newStartDate, newEndDate) : [newStartDate],
+                                            });
+                                          }}
                                           className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
                                         />
                                       </div>
                                       <div>
                                         <label className="block text-sm font-medium text-gray-700 mb-1">
-                                          Start Time *
+                                          {draft.isMultiDate ? "Departure Time *" : "Start Time *"}
                                         </label>
                                         <input
                                           type="time"
@@ -4360,9 +6836,30 @@ export default function MasterAdminDashboard() {
                                           className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
                                         />
                                       </div>
+                                      {draft.isMultiDate && (
+                                        <div>
+                                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                                            Delivery Date *
+                                          </label>
+                                          <input
+                                            type="date"
+                                            min={draft.date}
+                                            aria-label={`Schedule delivery end date for ${b.id}`}
+                                            value={draft.endDate || draft.date}
+                                            onChange={(e) => {
+                                              const newEndDate = e.target.value;
+                                              updateScheduleDraft(b, {
+                                                endDate: newEndDate,
+                                                dates: getDatesBetween(draft.date, newEndDate),
+                                              });
+                                            }}
+                                            className="w-full px-3 py-2.5 rounded-md border border-blue-400 bg-blue-50/30 text-sm font-mono font-bold text-gray-900 focus:border-blue-700 focus:outline-none"
+                                          />
+                                        </div>
+                                      )}
                                       <div>
                                         <label className="block text-sm font-medium text-gray-700 mb-1">
-                                          End Time *
+                                          {draft.isMultiDate ? "Delivery Time *" : "End Time *"}
                                         </label>
                                         <input
                                           type="time"
@@ -4457,7 +6954,9 @@ export default function MasterAdminDashboard() {
                                         </div>
                                       ) : (
                                         <div className="px-3.5 py-2.5 rounded-md bg-green-50 border border-green-300 text-sm font-medium text-green-800">
-                                          Slot Available: {draft.date} · {formatTimeDurationLabel(draftTimeCheck.startTime, draftTimeCheck.endTime)} · {draft.plate} · Rider: {draft.driverName}
+                                          Slot Available: {draftTimeCheck.isMultiDate
+                                            ? `${draftTimeCheck.startDate} ${formatTime12h(draftTimeCheck.startTime)} → ${draftTimeCheck.endDate} ${formatTime12h(draftTimeCheck.endTime)} (${draftTimeCheck.daysCount} Days)`
+                                            : `${draftTimeCheck.startDate} · ${formatTimeDurationLabel(draftTimeCheck.startTime, draftTimeCheck.endTime)}`} · {draft.plate} · Rider: {draft.driverName}
                                         </div>
                                       )
                                     ) : null}
@@ -4557,10 +7056,10 @@ export default function MasterAdminDashboard() {
                                         <button
                                           type="button"
                                           disabled={actionLoading === b.id}
-                                          onClick={() => openCashApprovalModal(b)}
+                                          onClick={() => openPaymentApprovalModal(b)}
                                           className="px-4 py-2.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 text-sm font-semibold cursor-pointer disabled:opacity-50"
                                         >
-                                          Manual Approve (Cash)
+                                          Approve Payment
                                         </button>
                                       </div>
                                     </div>
@@ -4601,87 +7100,90 @@ export default function MasterAdminDashboard() {
                                         <button
                                           type="button"
                                           disabled={actionLoading === b.id}
-                                          onClick={() => openCashApprovalModal(b)}
+                                          onClick={() => openPaymentApprovalModal(b)}
                                           className="px-4 py-2 rounded-md bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold cursor-pointer disabled:opacity-50"
                                         >
-                                          Manual Approve (Cash)
+                                          Approve Payment
                                         </button>
                                       </div>
                                     </div>
                                   )}
 
-                                  {isPaymentLocked && isCashManual && !hasStoredSlip && !b.paymentSlipDeletedAt && (
-                                    isCashPending ? (
-                                      <div className="px-4 py-3.5 rounded-lg bg-amber-50 border border-amber-300 text-sm text-amber-900">
-                                        <div className="flex flex-wrap items-center justify-between gap-3">
-                                          <div>
-                                            <span className="font-bold flex items-center gap-1.5 text-amber-900">
-                                              <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></span>
-                                              Cash Payment Pending (පසුගෙවීම් · Pay Later)
-                                            </span>
-                                            <p className="text-xs text-amber-800 mt-0.5">
-                                              Quoted: <span className="font-bold">Rs. {(b.quotedAmount || 0).toLocaleString()}</span>
-                                              {b.quoteNote && ` · Note: ${b.quoteNote}`}
-                                              {" · "}
-                                              <span className="font-medium text-amber-950">
-                                                Trip slot is active, but revenue is NOT counted until payment is marked as Success.
-                                              </span>
-                                            </p>
-                                          </div>
-                                          <div className="flex flex-wrap items-center gap-2">
-                                            <button
-                                              type="button"
-                                              disabled={actionLoading === b.id}
-                                              onClick={() => handleMarkCashAsPaid(b)}
-                                              className="px-3.5 py-2 rounded-md bg-green-700 hover:bg-green-800 text-white text-xs font-semibold cursor-pointer shadow-sm transition-all"
-                                              title="Mark cash as paid in full to count into revenue"
-                                            >
-                                              ✓ Mark Cash as Paid (Success)
-                                            </button>
-                                            <button
-                                              type="button"
-                                              onClick={() => {
-                                                setQuoteInputs((prev) => ({
-                                                  ...prev,
-                                                  [b.id]: {
-                                                    amount: b.quotedAmount ? String(b.quotedAmount) : "",
-                                                    note: b.quoteNote || "",
-                                                  },
-                                                }));
-                                                setEditingQuoteId(b.id);
-                                              }}
-                                              className="px-3 py-2 rounded-md border border-amber-300 bg-white hover:bg-amber-100 text-amber-950 text-xs font-medium cursor-pointer"
-                                            >
-                                              Edit Amount / Note
-                                            </button>
-                                          </div>
+                                  {(isCashPending || (typeof b.pendingAmount === "number" && b.pendingAmount > 0)) && !hasStoredSlip && !b.paymentSlipDeletedAt && (
+                                    <div className="px-4 py-3.5 rounded-lg bg-amber-50 border border-amber-300 text-sm text-amber-900">
+                                      <div className="flex flex-wrap items-center justify-between gap-3">
+                                        <div>
+                                          <span className="font-bold flex items-center gap-1.5 text-amber-900">
+                                            <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></span>
+                                            Payment Pending: Balance Due Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()}
+                                          </span>
+                                          <p className="text-xs text-amber-800 mt-0.5">
+                                            Total: <span className="font-bold">Rs. {(b.quotedAmount || 0).toLocaleString()}</span>
+                                            {typeof b.advanceAmount === "number" && b.advanceAmount > 0 ? (
+                                              <>
+                                                {" · "}Advance Paid: <span className="font-bold text-green-800">Rs. {b.advanceAmount.toLocaleString()}</span> ({b.paymentMethod === "bank_transfer" ? `Bank: ${b.paymentBankUsed || "Bank"}` : "Cash"})
+                                              </>
+                                            ) : (
+                                              " · Full payment pending"
+                                            )}
+                                            {b.quoteNote && ` · Note: ${b.quoteNote}`}
+                                          </p>
                                         </div>
-                                      </div>
-                                    ) : (
-                                      <div className="px-4 py-3 rounded-md bg-green-50 border border-green-300 text-sm text-green-900">
-                                        <div className="flex flex-wrap items-center justify-between gap-3">
-                                          <div>
-                                            <span className="font-semibold block">
-                                              Cash / Direct payment approved manually · Schedule active
-                                            </span>
-                                            <span className="text-xs text-green-800 mt-0.5 block">
-                                              Amount: <span className="font-bold">Rs. {(b.quotedAmount || 0).toLocaleString()}</span>
-                                              {b.quoteNote && ` · Note: ${b.quoteNote}`}
-                                              {" · Added to Today's Revenue."}
-                                            </span>
-                                          </div>
+                                        <div className="flex flex-wrap items-center gap-2">
                                           <button
                                             type="button"
                                             disabled={actionLoading === b.id}
-                                            onClick={() => handleMarkCashAsPending(b)}
-                                            className="px-3 py-1.5 rounded-md border border-green-300 bg-white hover:bg-green-100 text-green-900 text-xs font-medium cursor-pointer"
-                                            title="Change back to pending if cash not received"
+                                            onClick={() => openSettleBalanceModal(b)}
+                                            className="px-3.5 py-2 rounded-md bg-green-700 hover:bg-green-800 text-white text-xs font-semibold cursor-pointer shadow-sm transition-all"
+                                            title="Settle remaining balance"
                                           >
-                                            Change to Pending
+                                            💳 Settle Balance (Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()})
+                                          </button>
+                                          <button
+                                            type="button"
+                                            disabled={actionLoading === b.id}
+                                            onClick={() => openPaymentApprovalModal(b)}
+                                            className="px-3 py-2 rounded-md border border-amber-300 bg-white hover:bg-amber-100 text-amber-950 text-xs font-medium cursor-pointer"
+                                          >
+                                            Update Payment
                                           </button>
                                         </div>
                                       </div>
-                                    )
+                                    </div>
+                                  )}
+
+                                  {isCashPaid && (!b.pendingAmount || b.pendingAmount === 0) && !hasStoredSlip && !b.paymentSlipDeletedAt && (
+                                    <div className="px-4 py-3 rounded-md bg-green-50 border border-green-300 text-sm text-green-900">
+                                      <div className="flex flex-wrap items-center justify-between gap-3">
+                                        <div>
+                                          <span className="font-semibold block">
+                                            ✓ Fully Paid &amp; Counted into Revenue: <strong>Rs. {(b.quotedAmount || 0).toLocaleString()}</strong>
+                                          </span>
+                                          <span className="text-xs text-green-800 mt-0.5 block">
+                                            {typeof b.advanceAmount === "number" && b.advanceAmount > 0 && b.finalPaymentMethod ? (
+                                              <span>
+                                                Advance: Rs. {b.advanceAmount.toLocaleString()} via {b.paymentMethod === "bank_transfer" ? b.paymentBankUsed || "Bank" : "Cash"} + Balance via {b.finalPaymentMethod === "bank_transfer" ? b.finalPaymentBankUsed || "Bank" : "Cash"}
+                                              </span>
+                                            ) : b.paymentBankUsed ? (
+                                              <span>Paid via {b.paymentBankUsed}</span>
+                                            ) : (
+                                              <span>Paid in Cash</span>
+                                            )}
+                                            {b.quoteNote && ` · Note: ${b.quoteNote}`}
+                                          </span>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                          <button
+                                            type="button"
+                                            disabled={actionLoading === b.id}
+                                            onClick={() => openPaymentApprovalModal(b)}
+                                            className="px-3 py-1.5 rounded-md border border-green-300 bg-white hover:bg-green-100 text-green-900 text-xs font-medium cursor-pointer"
+                                          >
+                                            Edit Payment
+                                          </button>
+                                        </div>
+                                      </div>
+                                    </div>
                                   )}
 
                                   {(hasStoredSlip || (b.paymentSlipDeletedAt && b.paymentSlipStatus === "deleted")) && (
@@ -5397,69 +7899,88 @@ export default function MasterAdminDashboard() {
                                 <button
                                   type="button"
                                   disabled={actionLoading === b.id}
-                                  onClick={() => openCashApprovalModal(b)}
+                                  onClick={() => openPaymentApprovalModal(b)}
                                   className="px-4 py-2.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 text-sm font-semibold cursor-pointer disabled:opacity-50"
                                 >
-                                  Manual Approve (Cash)
+                                  Approve Payment
                                 </button>
                               )}
                             </div>
 
-                            {/* Manual Cash Status Summary */}
-                            {!hasStoredSlip && isCashManual && (
-                              isCashPending ? (
+                            {/* Payment Status Summary */}
+                            {!hasStoredSlip && (
+                              (isCashPending || (typeof b.pendingAmount === "number" && b.pendingAmount > 0)) ? (
                                 <div className="px-4 py-3.5 rounded-lg bg-amber-50 border border-amber-300 text-sm text-amber-900">
                                   <div className="flex flex-wrap items-center justify-between gap-3">
                                     <div>
                                       <span className="font-bold flex items-center gap-1.5 text-amber-900">
                                         <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></span>
-                                        Cash Payment Pending (පසුගෙවීම් · Pay Later)
+                                        Payment Pending: Balance Due Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()}
                                       </span>
                                       <p className="text-xs text-amber-800 mt-0.5">
-                                        Quoted: <span className="font-bold">Rs. {(b.quotedAmount || 0).toLocaleString()}</span>
+                                        Total: <span className="font-bold">Rs. {(b.quotedAmount || 0).toLocaleString()}</span>
+                                        {typeof b.advanceAmount === "number" && b.advanceAmount > 0 ? (
+                                          <>
+                                            {" · "}Advance Paid: <span className="font-bold text-green-800">Rs. {b.advanceAmount.toLocaleString()}</span> ({b.paymentMethod === "bank_transfer" ? `Bank: ${b.paymentBankUsed || "Bank"}` : "Cash"})
+                                          </>
+                                        ) : (
+                                          " · Full payment pending"
+                                        )}
                                         {b.quoteNote && ` · Note: ${b.quoteNote}`}
-                                        {" · "}
-                                        <span className="font-medium text-amber-950">
-                                          Trip slot is active, but revenue is NOT counted until payment is marked as Success.
-                                        </span>
                                       </p>
                                     </div>
-                                    <button
-                                      type="button"
-                                      disabled={actionLoading === b.id}
-                                      onClick={() => handleMarkCashAsPaid(b)}
-                                      className="px-3.5 py-2 rounded-md bg-green-700 hover:bg-green-800 text-white text-xs font-semibold cursor-pointer shadow-sm transition-all"
-                                      title="Mark cash as paid in full to count into revenue"
-                                    >
-                                      ✓ Mark Cash as Paid (Success)
-                                    </button>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <button
+                                        type="button"
+                                        disabled={actionLoading === b.id}
+                                        onClick={() => openSettleBalanceModal(b)}
+                                        className="px-3.5 py-2 rounded-md bg-green-700 hover:bg-green-800 text-white text-xs font-semibold cursor-pointer shadow-sm transition-all"
+                                        title="Settle remaining balance"
+                                      >
+                                        💳 Settle Balance (Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()})
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={actionLoading === b.id}
+                                        onClick={() => openPaymentApprovalModal(b)}
+                                        className="px-3 py-2 rounded-md border border-amber-300 bg-white hover:bg-amber-100 text-amber-950 text-xs font-medium cursor-pointer"
+                                      >
+                                        Update Payment
+                                      </button>
+                                    </div>
                                   </div>
                                 </div>
-                              ) : (
+                              ) : isCashPaid && (!b.pendingAmount || b.pendingAmount === 0) ? (
                                 <div className="px-4 py-3 rounded-md bg-green-50 border border-green-300 text-sm text-green-900">
                                   <div className="flex flex-wrap items-center justify-between gap-3">
                                     <div>
                                       <span className="font-semibold block">
-                                        Cash / Direct payment approved manually · Driver contact unlocked for customer
+                                        ✓ Fully Paid &amp; Counted into Revenue: <strong>Rs. {(b.quotedAmount || 0).toLocaleString()}</strong>
                                       </span>
                                       <span className="text-xs text-green-800 mt-0.5 block">
-                                        Amount: <span className="font-bold">Rs. {(b.quotedAmount || 0).toLocaleString()}</span>
+                                        {typeof b.advanceAmount === "number" && b.advanceAmount > 0 && b.finalPaymentMethod ? (
+                                          <span>
+                                            Advance: Rs. {b.advanceAmount.toLocaleString()} via {b.paymentMethod === "bank_transfer" ? b.paymentBankUsed || "Bank" : "Cash"} + Balance via {b.finalPaymentMethod === "bank_transfer" ? b.finalPaymentBankUsed || "Bank" : "Cash"}
+                                          </span>
+                                        ) : b.paymentBankUsed ? (
+                                          <span>Paid via {b.paymentBankUsed}</span>
+                                        ) : (
+                                          <span>Paid in Cash</span>
+                                        )}
                                         {b.quoteNote && ` · Note: ${b.quoteNote}`}
-                                        {" · Added to Today's Revenue."}
                                       </span>
                                     </div>
                                     <button
                                       type="button"
                                       disabled={actionLoading === b.id}
-                                      onClick={() => handleMarkCashAsPending(b)}
-                                      className="px-3.5 py-1.5 rounded-md border border-green-300 bg-white hover:bg-green-100 text-green-900 text-xs font-medium cursor-pointer"
-                                      title="Change back to pending if cash not received"
+                                      onClick={() => openPaymentApprovalModal(b)}
+                                      className="px-3 py-1.5 rounded-md border border-green-300 bg-white hover:bg-green-100 text-green-900 text-xs font-medium cursor-pointer"
                                     >
-                                      Change to Pending
+                                      Edit Payment
                                     </button>
                                   </div>
                                 </div>
-                              )
+                              ) : null
                             )}
                             {/* Bank Payment Slip Review Section */}
                             {hasStoredSlip && (
@@ -7215,7 +9736,7 @@ export default function MasterAdminDashboard() {
                               {reg.status === "approved" && (
                                 <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 text-[11px] font-black flex items-center gap-1.5">
                                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
-                                  Approved & Active
+                                  Approved &amp; Active
                                 </span>
                               )}
                               {reg.status === "rejected" && (
@@ -7292,7 +9813,7 @@ export default function MasterAdminDashboard() {
                                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                                         <polyline points="20 6 9 17 4 12" />
                                       </svg>
-                                      <span>Approve & Add to Live Fleet</span>
+                                      <span>Approve &amp; Add to Live Fleet</span>
                                     </>
                                   )}
                                 </button>
@@ -7354,16 +9875,16 @@ export default function MasterAdminDashboard() {
 
 
           {/* ========================================================= */}
-          {/* TAB 8: CONTACT INQUIRIES & SUPPORT                        */}
+          {/* TAB 8: CONTACT INQUIRIES &amp; SUPPORT                        */}
           {/* ========================================================= */}
           {activeNav === "contact_submissions" && (
             <div className="flex flex-col gap-5">
-              {/* Top Summary Bar & Filters */}
+              {/* Top Summary Bar &amp; Filters */}
               <div className="p-4 sm:p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col gap-4">
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
                   <div>
                     <h2 className="text-base font-black text-[#26231B] flex items-center gap-2">
-                      <span>Contact Inquiries & Freight Quotes</span>
+                      <span>Contact Inquiries &amp; Freight Quotes</span>
                       <span className="px-2 py-0.5 rounded-full bg-[#F7F5EE] border border-[#E7E2D0] text-[11px] font-mono text-[#6F6A5A]">
                         {inquiries.length} Total
                       </span>
@@ -7427,7 +9948,7 @@ export default function MasterAdminDashboard() {
                     </span>
                     <input
                       type="text"
-                      placeholder="Search by customer name, phone, email, subject, message content..."
+                      placeholder="Search by name, phone, subject, or message..."
                       value={inquirySearch}
                       onChange={(e) => setInquirySearch(e.target.value)}
                       className="w-full pl-9 pr-9 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B] placeholder:text-[#8A836E] transition-colors"
@@ -7449,7 +9970,6 @@ export default function MasterAdminDashboard() {
                 </div>
               </div>
 
-              {/* Inquiries List */}
               {loadingInquiries ? (
                 <div className="p-12 rounded-3xl bg-white border border-[#E7E2D0] text-center">
                   <div className="inline-block w-8 h-8 border-3 border-[#FFC20E] border-t-transparent rounded-full animate-spin mb-3" />
@@ -7908,15 +10428,25 @@ export default function MasterAdminDashboard() {
       {/* MODAL 3: MANUAL BOOKING CREATION                          */}
       {/* ========================================================= */}
       {showManualModal && (() => {
-        const manualTimeCheck = validateTimeRange(manualForm.startTime, manualForm.endTime);
+        const manualDates =
+          manualForm.isMultiDate && manualForm.endDate
+            ? getDatesBetween(manualForm.date, manualForm.endDate)
+            : [manualForm.date];
+        const manualTimeCheck = validateScheduleTimeAndDates(
+          manualForm.date,
+          manualForm.startTime,
+          manualForm.isMultiDate && manualForm.endDate ? manualForm.endDate : manualForm.date,
+          manualForm.endTime,
+          manualDates
+        );
         const manualResolvedPlate = manualForm.plate || fleetVehicles[0]?.plate || "";
         const manualMatchedVehicle = fleetVehicles.find((v) => v.plate === manualResolvedPlate);
         const manualConflict =
           manualTimeCheck.valid && manualForm.date
             ? findBookingScheduleConflict(
                 {
-                  date: manualForm.date,
-                  dates: [manualForm.date],
+                  date: manualTimeCheck.startDate,
+                  dates: manualTimeCheck.dates,
                   startTime: manualTimeCheck.startTime,
                   endTime: manualTimeCheck.endTime,
                   assignedPlate: manualResolvedPlate,
@@ -8164,20 +10694,63 @@ export default function MasterAdminDashboard() {
                     </p>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {/* Multi-Day Booking Toggle */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-md bg-blue-50/70 border border-blue-200">
+                    <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        aria-label="Toggle manual multi-day booking"
+                        checked={Boolean(manualForm.isMultiDate)}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          const sDate = manualForm.date || new Date().toISOString().split("T")[0];
+                          const defaultEndDate = checked
+                            ? (manualForm.endDate && manualForm.endDate > sDate ? manualForm.endDate : addDaysToYYYYMMDD(sDate, 1))
+                            : sDate;
+                          setManualForm((p) => ({
+                            ...p,
+                            isMultiDate: checked,
+                            endDate: defaultEndDate,
+                          }));
+                        }}
+                        className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                      />
+                      <span className="text-xs font-bold text-gray-900">
+                        Multi-Day Booking (දින කිහිපයක ගමනක්)
+                      </span>
+                    </label>
+                    {manualForm.isMultiDate && (
+                      <span className="text-[11px] font-mono font-bold text-blue-900 bg-white border border-blue-300 px-2.5 py-0.5 rounded-full shadow-2xs">
+                        {getDatesBetween(manualForm.date, manualForm.endDate || manualForm.date).length} Days Journey
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
                     <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Trip Date *</label>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                        {manualForm.isMultiDate ? "Departure Date *" : "Trip Date *"}
+                      </label>
                       <input
                         type="date"
                         required
                         aria-label="Manual booking trip date"
                         value={manualForm.date}
-                        onChange={(e) => setManualForm((p) => ({ ...p, date: e.target.value }))}
+                        onChange={(e) => {
+                          const newStartDate = e.target.value;
+                          setManualForm((p) => ({
+                            ...p,
+                            date: newStartDate,
+                            endDate: p.isMultiDate && p.endDate && p.endDate >= newStartDate ? p.endDate : (p.isMultiDate ? addDaysToYYYYMMDD(newStartDate, 1) : newStartDate),
+                          }));
+                        }}
                         className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Start Time *</label>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                        {manualForm.isMultiDate ? "Departure Time *" : "Start Time *"}
+                      </label>
                       <input
                         type="time"
                         required
@@ -8187,8 +10760,24 @@ export default function MasterAdminDashboard() {
                         className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-mono text-gray-900 focus:border-gray-900 focus:outline-none"
                       />
                     </div>
+                    {manualForm.isMultiDate && (
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Delivery Date *</label>
+                        <input
+                          type="date"
+                          required
+                          min={manualForm.date}
+                          aria-label="Manual booking delivery end date"
+                          value={manualForm.endDate || manualForm.date}
+                          onChange={(e) => setManualForm((p) => ({ ...p, endDate: e.target.value }))}
+                          className="w-full px-3 py-2 rounded-md border border-blue-400 bg-blue-50/30 text-sm font-mono font-bold text-gray-900 focus:border-blue-700 focus:outline-none"
+                        />
+                      </div>
+                    )}
                     <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">End Time *</label>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                        {manualForm.isMultiDate ? "Delivery Time *" : "End Time *"}
+                      </label>
                       <input
                         type="time"
                         required
@@ -8214,7 +10803,9 @@ export default function MasterAdminDashboard() {
                     </div>
                   ) : manualForm.date ? (
                     <div className="px-3 py-2 rounded-md bg-green-50 border border-green-300 text-sm font-medium text-green-800">
-                      Available Slot: {manualForm.date} · {formatTimeDurationLabel(manualTimeCheck.startTime, manualTimeCheck.endTime)}
+                      Available Slot: {manualTimeCheck.isMultiDate
+                        ? `${manualTimeCheck.startDate} ${formatTime12h(manualTimeCheck.startTime)} → ${manualTimeCheck.endDate} ${formatTime12h(manualTimeCheck.endTime)} (${manualTimeCheck.daysCount} Days)`
+                        : `${manualTimeCheck.startDate} · ${formatTimeDurationLabel(manualTimeCheck.startTime, manualTimeCheck.endTime)}`}
                     </div>
                   ) : null}
                 </div>
@@ -8259,7 +10850,7 @@ export default function MasterAdminDashboard() {
                     <span className="block text-xs font-medium text-gray-700 mb-1.5">
                       Select Payment Status *
                     </span>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                       <button
                         type="button"
                         onClick={() => setManualForm((p) => ({ ...p, paymentStatusMode: "pending" }))}
@@ -8269,13 +10860,32 @@ export default function MasterAdminDashboard() {
                             : "border-gray-300 bg-white text-gray-900 hover:bg-gray-100"
                         }`}
                       >
-                        <div className="text-sm font-semibold">Payment Pending</div>
+                        <div className="text-xs font-bold">Payment Pending</div>
                         <div
-                          className={`text-xs mt-0.5 ${
+                          className={`text-[11px] mt-0.5 ${
                             manualForm.paymentStatusMode === "pending" ? "text-gray-200" : "text-gray-600"
                           }`}
                         >
-                          Save in Awaiting Payment state
+                          පසුගෙවීම් (Full Pending)
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setManualForm((p) => ({ ...p, paymentStatusMode: "partial" }))}
+                        className={`text-left px-3.5 py-2.5 rounded-md border cursor-pointer ${
+                          manualForm.paymentStatusMode === "partial"
+                            ? "border-amber-600 bg-amber-600 text-white"
+                            : "border-gray-300 bg-white text-gray-900 hover:bg-gray-100"
+                        }`}
+                      >
+                        <div className="text-xs font-bold">Partial Advance</div>
+                        <div
+                          className={`text-[11px] mt-0.5 ${
+                            manualForm.paymentStatusMode === "partial" ? "text-amber-100" : "text-gray-600"
+                          }`}
+                        >
+                          අත්තිකාරම් (Part Paid)
                         </div>
                       </button>
 
@@ -8284,20 +10894,97 @@ export default function MasterAdminDashboard() {
                         onClick={() => setManualForm((p) => ({ ...p, paymentStatusMode: "success" }))}
                         className={`text-left px-3.5 py-2.5 rounded-md border cursor-pointer ${
                           manualForm.paymentStatusMode === "success"
-                            ? "border-gray-900 bg-gray-900 text-white"
+                            ? "border-green-700 bg-green-700 text-white"
                             : "border-gray-300 bg-white text-gray-900 hover:bg-gray-100"
                         }`}
                       >
-                        <div className="text-sm font-semibold">Payment Success (Paid)</div>
+                        <div className="text-xs font-bold">Payment Success</div>
                         <div
-                          className={`text-xs mt-0.5 ${
-                            manualForm.paymentStatusMode === "success" ? "text-gray-200" : "text-gray-600"
+                          className={`text-[11px] mt-0.5 ${
+                            manualForm.paymentStatusMode === "success" ? "text-green-100" : "text-gray-600"
                           }`}
                         >
-                          Paid directly / Cash approved now
+                          ගෙවා ඇත (Full Paid)
                         </div>
                       </button>
                     </div>
+
+                    {manualForm.paymentStatusMode === "partial" && (
+                      <div className="mt-3 p-3 bg-amber-50/70 border border-amber-200 rounded-lg flex flex-col gap-2">
+                        <div>
+                          <label className="block text-xs font-semibold text-amber-950 mb-1">
+                            Advance Amount Paid Now (LKR) *
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            required
+                            placeholder="e.g. 10000"
+                            value={manualForm.advanceAmount}
+                            onChange={(e) => setManualForm((p) => ({ ...p, advanceAmount: e.target.value }))}
+                            className="w-full px-3 py-1.5 rounded-md border border-amber-300 bg-white text-sm font-semibold text-gray-900 focus:border-amber-600 focus:outline-none"
+                          />
+                        </div>
+                        <div className="flex items-center justify-between text-xs text-amber-900 bg-white p-2 rounded border border-amber-200">
+                          <span>Pending Balance:</span>
+                          <strong className="font-mono font-bold text-amber-950">
+                            Rs. {Math.max(0, Number(manualForm.quotedAmount || 0) - Number(manualForm.advanceAmount || 0)).toLocaleString()}
+                          </strong>
+                        </div>
+                      </div>
+                    )}
+
+                    {manualForm.paymentStatusMode !== "pending" && (
+                      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Payment Method *
+                          </label>
+                          <select
+                            value={manualForm.paymentMethod}
+                            onChange={(e) => {
+                              const val = e.target.value as "cash_manual" | "bank_transfer";
+                              const activeBank = bankAccounts.find((a) => a.active) || bankAccounts[0];
+                              const defaultBank = activeBank ? `${activeBank.bankName} - ${activeBank.accountNumber} (${activeBank.accountName})` : "";
+                              setManualForm((p) => ({
+                                ...p,
+                                paymentMethod: val,
+                                paymentBankUsed: val === "bank_transfer" && !p.paymentBankUsed ? defaultBank : p.paymentBankUsed,
+                              }));
+                            }}
+                            className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                          >
+                            <option value="cash_manual">Cash (අත්පිට මුදල්)</option>
+                            <option value="bank_transfer">Bank Transfer (බැංකු තැන්පතු)</option>
+                          </select>
+                        </div>
+                        {manualForm.paymentMethod === "bank_transfer" && (
+                          <div>
+                            <label className="block text-xs font-medium text-gray-700 mb-1">
+                              Company Bank Account *
+                            </label>
+                            <select
+                              value={manualForm.paymentBankUsed}
+                              onChange={(e) => setManualForm((p) => ({ ...p, paymentBankUsed: e.target.value }))}
+                              className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-xs text-gray-900 focus:border-gray-900 focus:outline-none"
+                            >
+                              <option value="">Select Bank</option>
+                              {bankAccounts
+                                .filter((a) => a.active)
+                                .map((acc) => (
+                                  <option
+                                    key={acc.id}
+                                    value={`${acc.bankName} - ${acc.accountNumber} (${acc.accountName})`}
+                                  >
+                                    {acc.bankName} - {acc.accountNumber} ({acc.accountName})
+                                  </option>
+                                ))}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -8345,6 +11032,8 @@ export default function MasterAdminDashboard() {
                       ? "Creating..."
                       : manualForm.paymentStatusMode === "success"
                       ? "Create Paid Booking"
+                      : manualForm.paymentStatusMode === "partial"
+                      ? "Create Booking with Advance"
                       : "Create Pending Booking"}
                   </button>
                 </div>
@@ -8359,14 +11048,26 @@ export default function MasterAdminDashboard() {
       {/* ========================================================= */}
       {assignModal && (() => {
         const isIndivModal = assignModal.booking.bookingType !== "live_lorry";
-        const modalTimeCheck = isIndivModal ? validateTimeRange(assignModal.startTime, assignModal.endTime) : null;
+        const modalDates =
+          assignModal.isMultiDate && assignModal.endDate
+            ? getDatesBetween(assignModal.date, assignModal.endDate)
+            : [assignModal.date];
+        const modalTimeCheck = isIndivModal
+          ? validateScheduleTimeAndDates(
+              assignModal.date,
+              assignModal.startTime,
+              assignModal.isMultiDate && assignModal.endDate ? assignModal.endDate : assignModal.date,
+              assignModal.endTime,
+              modalDates
+            )
+          : null;
         const modalConflict =
           isIndivModal && modalTimeCheck?.valid && assignModal.date
             ? findBookingScheduleConflict(
                 {
                   excludeBookingId: assignModal.booking.id,
-                  date: assignModal.date,
-                  dates: [assignModal.date],
+                  date: modalTimeCheck.startDate,
+                  dates: modalTimeCheck.dates,
                   startTime: modalTimeCheck.startTime,
                   endTime: modalTimeCheck.endTime,
                   assignedPlate: assignModal.plate,
@@ -8386,7 +11087,7 @@ export default function MasterAdminDashboard() {
             onClick={() => setAssignModal(null)}
           >
             <div
-              className="w-full max-w-md bg-white rounded-3xl p-6 shadow-2xl border border-[#E7E2D0] my-auto"
+              className="w-full max-w-lg bg-white rounded-3xl p-6 shadow-2xl border border-[#E7E2D0] my-auto"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between border-b border-[#E7E2D0] pb-3 mb-4">
@@ -8410,48 +11111,106 @@ export default function MasterAdminDashboard() {
 
               <div className="flex flex-col gap-3">
                 {isIndivModal && (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    <div>
-                      <label className="block text-[11px] font-bold text-[#26231B] mb-1">Trip Date *</label>
-                      <input
-                        type="date"
-                        value={assignModal.date}
-                        onChange={(e) => setAssignModal((p) => (p ? { ...p, date: e.target.value } : null))}
-                        className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-bold text-[#26231B] mb-1">Start Time *</label>
-                      <input
-                        type="time"
-                        value={assignModal.startTime}
-                        onChange={(e) => setAssignModal((p) => (p ? { ...p, startTime: e.target.value } : null))}
-                        className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-bold text-[#26231B] mb-1">End Time *</label>
-                      <input
-                        type="time"
-                        value={assignModal.endTime}
-                        onChange={(e) => setAssignModal((p) => (p ? { ...p, endTime: e.target.value } : null))}
-                        className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-bold text-[#26231B] mb-1 flex items-center justify-between">
-                        <span>Distance</span>
-                        <span className="font-mono text-blue-600">KM</span>
+                  <div className="flex flex-col gap-2.5 p-3 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0]">
+                    <div className="flex items-center justify-between">
+                      <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          aria-label="Toggle modal multi-day booking"
+                          checked={Boolean(assignModal.isMultiDate)}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            const sDate = assignModal.date || new Date().toISOString().split("T")[0];
+                            const defaultEndDate = checked
+                              ? (assignModal.endDate && assignModal.endDate > sDate ? assignModal.endDate : addDaysToYYYYMMDD(sDate, 1))
+                              : sDate;
+                            setAssignModal((p) => (p ? {
+                              ...p,
+                              isMultiDate: checked,
+                              endDate: defaultEndDate,
+                            } : null));
+                          }}
+                          className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                        />
+                        <span className="text-xs font-bold text-[#26231B]">
+                          Multi-Day Booking (දින කිහිපයක ගමනක්)
+                        </span>
                       </label>
-                      <input
-                        type="number"
-                        min="1"
-                        step="0.1"
-                        placeholder="e.g. 120"
-                        value={assignModal.distanceKm || ""}
-                        onChange={(e) => setAssignModal((p) => (p ? { ...p, distanceKm: e.target.value } : null))}
-                        className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-white text-xs font-mono font-bold text-[#26231B]"
-                      />
+                      {assignModal.isMultiDate && (
+                        <span className="text-[11px] font-mono font-bold text-blue-900 bg-white border border-blue-300 px-2 py-0.5 rounded-full shadow-2xs">
+                          {getDatesBetween(assignModal.date, assignModal.endDate || assignModal.date).length} Days
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <div>
+                        <label className="block text-[11px] font-bold text-[#26231B] mb-1">
+                          {assignModal.isMultiDate ? "Departure Date *" : "Trip Date *"}
+                        </label>
+                        <input
+                          type="date"
+                          value={assignModal.date}
+                          onChange={(e) => {
+                            const newStartDate = e.target.value;
+                            setAssignModal((p) => (p ? {
+                              ...p,
+                              date: newStartDate,
+                              endDate: p.isMultiDate && p.endDate && p.endDate >= newStartDate ? p.endDate : (p.isMultiDate ? addDaysToYYYYMMDD(newStartDate, 1) : newStartDate),
+                            } : null));
+                          }}
+                          className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-white text-xs font-mono font-bold text-[#26231B]"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-[#26231B] mb-1">
+                          {assignModal.isMultiDate ? "Departure Time *" : "Start Time *"}
+                        </label>
+                        <input
+                          type="time"
+                          value={assignModal.startTime}
+                          onChange={(e) => setAssignModal((p) => (p ? { ...p, startTime: e.target.value } : null))}
+                          className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-white text-xs font-mono font-bold text-[#26231B]"
+                        />
+                      </div>
+                      {assignModal.isMultiDate && (
+                        <div>
+                          <label className="block text-[11px] font-bold text-[#26231B] mb-1">Delivery Date *</label>
+                          <input
+                            type="date"
+                            min={assignModal.date}
+                            value={assignModal.endDate || assignModal.date}
+                            onChange={(e) => setAssignModal((p) => (p ? { ...p, endDate: e.target.value } : null))}
+                            className="w-full px-2.5 py-2 rounded-xl border border-blue-400 bg-blue-50/40 text-xs font-mono font-bold text-[#26231B]"
+                          />
+                        </div>
+                      )}
+                      <div>
+                        <label className="block text-[11px] font-bold text-[#26231B] mb-1">
+                          {assignModal.isMultiDate ? "Delivery Time *" : "End Time *"}
+                        </label>
+                        <input
+                          type="time"
+                          value={assignModal.endTime}
+                          onChange={(e) => setAssignModal((p) => (p ? { ...p, endTime: e.target.value } : null))}
+                          className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-white text-xs font-mono font-bold text-[#26231B]"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-[#26231B] mb-1 flex items-center justify-between">
+                          <span>Distance</span>
+                          <span className="font-mono text-blue-600">KM</span>
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          step="0.1"
+                          placeholder="e.g. 120"
+                          value={assignModal.distanceKm || ""}
+                          onChange={(e) => setAssignModal((p) => (p ? { ...p, distanceKm: e.target.value } : null))}
+                          className="w-full px-2.5 py-2 rounded-xl border border-[#E7E2D0] bg-white text-xs font-mono font-bold text-[#26231B]"
+                        />
+                      </div>
                     </div>
                   </div>
                 )}
@@ -8539,6 +11298,14 @@ export default function MasterAdminDashboard() {
                 {isIndivModal && modalTimeCheck && !modalTimeCheck.valid && (
                   <div className="px-3 py-2 rounded-xl bg-amber-50 border border-amber-300 text-[11px] font-bold text-amber-800">
                     {modalTimeCheck.error}
+                  </div>
+                )}
+
+                {isIndivModal && modalTimeCheck && modalTimeCheck.valid && (
+                  <div className="px-3 py-2 rounded-xl bg-green-50 border border-green-300 text-[11px] font-bold text-green-800">
+                    Slot Available: {modalTimeCheck.isMultiDate
+                      ? `${modalTimeCheck.startDate} ${formatTime12h(modalTimeCheck.startTime)} → ${modalTimeCheck.endDate} ${formatTime12h(modalTimeCheck.endTime)} (${modalTimeCheck.daysCount} Days)`
+                      : `${modalTimeCheck.startDate} · ${formatTimeDurationLabel(modalTimeCheck.startTime, modalTimeCheck.endTime)}`}
                   </div>
                 )}
 
@@ -8865,19 +11632,19 @@ export default function MasterAdminDashboard() {
           </div>
         </div>
       )}
-      {/* Cash Approval / Confirmation Modal */}
-      {cashApprovalModal && (
+      {/* Payment Approval & Setup Modal */}
+      {paymentApprovalModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
           <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden flex flex-col">
             {/* Header */}
             <div className="px-6 py-4 bg-gray-900 text-white flex items-center justify-between">
               <div className="flex items-center gap-2.5">
                 <span className="w-3 h-3 rounded-full bg-amber-400"></span>
-                <h3 className="text-base font-bold">Manual Cash Approval / Confirmation</h3>
+                <h3 className="text-base font-bold">Payment Approval &amp; Setup</h3>
               </div>
               <button
                 type="button"
-                onClick={() => setCashApprovalModal(null)}
+                onClick={() => setPaymentApprovalModal(null)}
                 className="text-gray-400 hover:text-white text-lg font-bold px-2 py-0.5 rounded cursor-pointer"
               >
                 ✕
@@ -8885,77 +11652,61 @@ export default function MasterAdminDashboard() {
             </div>
 
             {/* Body */}
-            <div className="p-6 flex flex-col gap-4">
+            <div className="p-6 flex flex-col gap-4 max-h-[80vh] overflow-y-auto">
               {/* Booking Summary Box */}
               <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 text-xs text-gray-700 flex flex-col gap-1.5">
                 <div className="flex items-center justify-between">
                   <span className="font-mono font-bold text-gray-900">
-                    {cashApprovalModal.booking.id}
+                    {paymentApprovalModal.booking.id}
                   </span>
                   <span className="font-semibold text-gray-800">
-                    {cashApprovalModal.booking.pickupCity} → {cashApprovalModal.booking.deliveryCity}
+                    {paymentApprovalModal.booking.pickupCity} → {paymentApprovalModal.booking.deliveryCity}
                   </span>
                 </div>
                 <div className="text-gray-600">
-                  Customer: <strong className="text-gray-900">{cashApprovalModal.booking.customerName}</strong>
-                  {cashApprovalModal.booking.customerPhone && (
-                    <span className="font-mono ml-1">({cashApprovalModal.booking.customerPhone})</span>
+                  Customer: <strong className="text-gray-900">{paymentApprovalModal.booking.customerName}</strong>
+                  {paymentApprovalModal.booking.customerPhone && (
+                    <span className="font-mono ml-1">({paymentApprovalModal.booking.customerPhone})</span>
                   )}
                 </div>
               </div>
 
-              {/* Payment Status Selection (Pending vs Success) */}
+              {/* Total Booking Amount (LKR) */}
+              <div>
+                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">
+                  Total Booking Amount (LKR) *
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={paymentApprovalModal.totalAmount}
+                  onChange={(e) =>
+                    setPaymentApprovalModal((prev) =>
+                      prev ? { ...prev, totalAmount: e.target.value } : null
+                    )
+                  }
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 text-gray-900 text-sm font-semibold focus:border-gray-900 focus:outline-none"
+                  aria-label="Total booking amount in LKR"
+                />
+              </div>
+
+              {/* Payment Collection Mode Selection */}
               <div>
                 <label className="block text-xs font-bold text-gray-800 uppercase tracking-wider mb-2">
-                  Payment Status (ගෙවීමේ තත්ත්වය තෝරන්න) *
+                  Payment Collection Mode (ගෙවීමේ ආකාරය) *
                 </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {/* Option 1: Cash Pending */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  {/* Option 1: Full Paid */}
                   <button
                     type="button"
                     onClick={() =>
-                      setCashApprovalModal((prev) =>
-                        prev ? { ...prev, statusMode: "pending" } : null
+                      setPaymentApprovalModal((prev) =>
+                        prev ? { ...prev, collectionMode: "full_paid" } : null
                       )
                     }
-                    className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 ${
-                      cashApprovalModal.statusMode === "pending"
-                        ? "bg-amber-50 border-amber-500 ring-2 ring-amber-400/40"
-                        : "bg-white border-gray-300 hover:border-gray-400"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-amber-900 flex items-center gap-1.5">
-                        <span
-                          className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center text-[9px] font-bold ${
-                            cashApprovalModal.statusMode === "pending"
-                              ? "bg-amber-500 text-white border-amber-600"
-                              : "border-gray-400 text-transparent"
-                          }`}
-                        >
-                          ✓
-                        </span>
-                        Cash Pending (පසුගෙවීම්)
-                      </span>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-900">
-                        Pay Later
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-amber-800 leading-snug">
-                      Customer will pay cash later or on delivery. Slot is confirmed, but NOT added to revenue yet.
-                    </p>
-                  </button>
-
-                  {/* Option 2: Cash Success / Paid */}
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setCashApprovalModal((prev) =>
-                        prev ? { ...prev, statusMode: "success" } : null
-                      )
-                    }
-                    className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 ${
-                      cashApprovalModal.statusMode === "success"
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1 ${
+                      paymentApprovalModal.collectionMode === "full_paid"
                         ? "bg-green-50 border-green-600 ring-2 ring-green-500/40"
                         : "bg-white border-gray-300 hover:border-gray-400"
                     }`}
@@ -8963,46 +11714,199 @@ export default function MasterAdminDashboard() {
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-bold text-green-900 flex items-center gap-1.5">
                         <span
-                          className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center text-[9px] font-bold ${
-                            cashApprovalModal.statusMode === "success"
+                          className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center text-[8px] font-bold ${
+                            paymentApprovalModal.collectionMode === "full_paid"
                               ? "bg-green-600 text-white border-green-700"
                               : "border-gray-400 text-transparent"
                           }`}
                         >
                           ✓
                         </span>
-                        Payment Success (ගෙවා ඇත)
-                      </span>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-green-100 text-green-900">
-                        Paid Now
+                        Full Paid
                       </span>
                     </div>
-                    <p className="text-[11px] text-green-800 leading-snug">
-                      Cash payment received in full. Slot is confirmed and added to Today's Revenue immediately.
-                    </p>
+                    <span className="text-[11px] text-green-800 leading-snug">
+                      සම්පූර්ණ මුදල ගෙවා අවසන්
+                    </span>
+                  </button>
+
+                  {/* Option 2: Partial Advance */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPaymentApprovalModal((prev) =>
+                        prev ? { ...prev, collectionMode: "partial_advance" } : null
+                      )
+                    }
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1 ${
+                      paymentApprovalModal.collectionMode === "partial_advance"
+                        ? "bg-amber-50 border-amber-600 ring-2 ring-amber-500/40"
+                        : "bg-white border-gray-300 hover:border-gray-400"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-amber-900 flex items-center gap-1.5">
+                        <span
+                          className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center text-[8px] font-bold ${
+                            paymentApprovalModal.collectionMode === "partial_advance"
+                              ? "bg-amber-600 text-white border-amber-700"
+                              : "border-gray-400 text-transparent"
+                          }`}
+                        >
+                          ✓
+                        </span>
+                        Advance Paid
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-amber-800 leading-snug">
+                      කොටසක් ගෙවා ඇත (ඉතිරිය පසුගෙවීම්)
+                    </span>
+                  </button>
+
+                  {/* Option 3: Full Pending */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPaymentApprovalModal((prev) =>
+                        prev ? { ...prev, collectionMode: "full_pending" } : null
+                      )
+                    }
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1 ${
+                      paymentApprovalModal.collectionMode === "full_pending"
+                        ? "bg-gray-100 border-gray-700 ring-2 ring-gray-700/30"
+                        : "bg-white border-gray-300 hover:border-gray-400"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-gray-900 flex items-center gap-1.5">
+                        <span
+                          className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center text-[8px] font-bold ${
+                            paymentApprovalModal.collectionMode === "full_pending"
+                              ? "bg-gray-800 text-white border-gray-900"
+                              : "border-gray-400 text-transparent"
+                          }`}
+                        >
+                          ✓
+                        </span>
+                        Full Pending
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-gray-700 leading-snug">
+                      මුළු මුදලම පසුව ගෙවීම
+                    </span>
                   </button>
                 </div>
               </div>
 
-              {/* Quoted Amount (LKR) */}
-              <div>
-                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">
-                  Booking Amount (LKR) *
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={cashApprovalModal.amount}
-                  onChange={(e) =>
-                    setCashApprovalModal((prev) =>
-                      prev ? { ...prev, amount: e.target.value } : null
-                    )
-                  }
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 text-gray-900 text-sm font-semibold focus:border-gray-900 focus:outline-none"
-                  aria-label="Booking amount in LKR"
-                />
-              </div>
+              {/* When Partial Advance: Input for Advance Amount & Show Balance */}
+              {paymentApprovalModal.collectionMode === "partial_advance" && (
+                <div className="p-3.5 bg-amber-50/70 border border-amber-200 rounded-xl flex flex-col gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-amber-950 uppercase tracking-wider mb-1">
+                      Advance Paid Now (LKR) *
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      placeholder="e.g. 10000"
+                      value={paymentApprovalModal.advanceAmount}
+                      onChange={(e) =>
+                        setPaymentApprovalModal((prev) =>
+                          prev ? { ...prev, advanceAmount: e.target.value } : null
+                        )
+                      }
+                      className="w-full px-3.5 py-2 rounded-lg border border-amber-300 bg-white text-gray-900 text-sm font-semibold focus:border-amber-600 focus:outline-none"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-amber-900 bg-white p-2.5 rounded-lg border border-amber-200">
+                    <span>Remaining Balance (Pending):</span>
+                    <strong className="font-mono text-sm font-bold text-amber-950">
+                      Rs. {Math.max(
+                        0,
+                        Number(paymentApprovalModal.totalAmount || 0) -
+                          Number(paymentApprovalModal.advanceAmount || 0)
+                      ).toLocaleString()}
+                    </strong>
+                  </div>
+                </div>
+              )}
+
+              {/* Payment Method Selector (For Full Paid or Partial Advance) */}
+              {paymentApprovalModal.collectionMode !== "full_pending" && (
+                <div className="flex flex-col gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
+                      Payment Method *
+                    </label>
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPaymentApprovalModal((prev) =>
+                            prev ? { ...prev, paymentMethod: "cash_manual" } : null
+                          )
+                        }
+                        className={`px-3.5 py-2.5 rounded-xl border text-xs font-bold cursor-pointer transition-all ${
+                          paymentApprovalModal.paymentMethod === "cash_manual"
+                            ? "bg-gray-900 text-white border-gray-900"
+                            : "bg-white text-gray-800 border-gray-300 hover:bg-gray-50"
+                        }`}
+                      >
+                        💵 Cash (අත්පිට මුදල්)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPaymentApprovalModal((prev) =>
+                            prev ? { ...prev, paymentMethod: "bank_transfer" } : null
+                          )
+                        }
+                        className={`px-3.5 py-2.5 rounded-xl border text-xs font-bold cursor-pointer transition-all ${
+                          paymentApprovalModal.paymentMethod === "bank_transfer"
+                            ? "bg-gray-900 text-white border-gray-900"
+                            : "bg-white text-gray-800 border-gray-300 hover:bg-gray-50"
+                        }`}
+                      >
+                        🏦 Bank Transfer (බැංකු තැන්පතු)
+                      </button>
+                    </div>
+                  </div>
+
+                  {paymentApprovalModal.paymentMethod === "bank_transfer" && (
+                    <div>
+                      <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">
+                        Select Company Bank Account *
+                      </label>
+                      <select
+                        value={paymentApprovalModal.bankUsed}
+                        onChange={(e) =>
+                          setPaymentApprovalModal((prev) =>
+                            prev ? { ...prev, bankUsed: e.target.value } : null
+                          )
+                        }
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 bg-white text-gray-900 text-xs font-semibold focus:border-gray-900 focus:outline-none"
+                      >
+                        {bankAccounts
+                          .filter((a) => a.active)
+                          .map((acc) => (
+                            <option
+                              key={acc.id}
+                              value={`${acc.bankName} - ${acc.accountNumber} (${acc.accountName})`}
+                            >
+                              {acc.bankName} - {acc.accountNumber} ({acc.accountName} · {acc.branch})
+                            </option>
+                          ))}
+                        {bankAccounts.filter((a) => a.active).length === 0 && (
+                          <option value="Commercial Bank - 100029384920">
+                            Commercial Bank - 100029384920
+                          </option>
+                        )}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Payment Note (Optional) */}
               <div>
@@ -9011,13 +11915,13 @@ export default function MasterAdminDashboard() {
                 </label>
                 <input
                   type="text"
-                  value={cashApprovalModal.note}
+                  value={paymentApprovalModal.note}
                   onChange={(e) =>
-                    setCashApprovalModal((prev) =>
+                    setPaymentApprovalModal((prev) =>
                       prev ? { ...prev, note: e.target.value } : null
                     )
                   }
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 text-gray-900 text-sm focus:border-gray-900 focus:outline-none"
+                  className="w-full px-3.5 py-2 rounded-xl border border-gray-300 text-gray-900 text-xs focus:border-gray-900 focus:outline-none"
                   aria-label="Payment note"
                 />
               </div>
@@ -9027,23 +11931,194 @@ export default function MasterAdminDashboard() {
             <div className="px-6 py-3.5 bg-gray-50 border-t border-gray-200 flex items-center justify-end gap-2.5">
               <button
                 type="button"
-                onClick={() => setCashApprovalModal(null)}
+                onClick={() => setPaymentApprovalModal(null)}
                 className="px-4 py-2 rounded-xl border border-gray-300 text-xs font-bold text-gray-700 hover:bg-gray-100 cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="button"
-                onClick={handleConfirmCashApproval}
+                onClick={handleConfirmPaymentApproval}
                 className={`px-5 py-2 rounded-xl text-xs font-bold text-white transition-all cursor-pointer shadow-sm ${
-                  cashApprovalModal.statusMode === "success"
+                  paymentApprovalModal.collectionMode === "full_paid"
                     ? "bg-green-700 hover:bg-green-800"
-                    : "bg-amber-600 hover:bg-amber-700"
+                    : paymentApprovalModal.collectionMode === "partial_advance"
+                    ? "bg-amber-600 hover:bg-amber-700"
+                    : "bg-gray-900 hover:bg-gray-800"
                 }`}
               >
-                {cashApprovalModal.statusMode === "success"
-                  ? "Confirm & Mark Paid (Success)"
-                  : "Confirm as Cash Pending"}
+                {paymentApprovalModal.collectionMode === "full_paid"
+                  ? "Confirm Full Payment"
+                  : paymentApprovalModal.collectionMode === "partial_advance"
+                  ? "Confirm Advance Payment"
+                  : "Confirm as Full Pending"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settle Remaining Balance Modal */}
+      {settleBalanceModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="px-6 py-4 bg-gray-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <span className="w-3 h-3 rounded-full bg-emerald-400"></span>
+                <h3 className="text-base font-bold">Settle Remaining Balance</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSettleBalanceModal(null)}
+                className="text-gray-400 hover:text-white text-lg font-bold px-2 py-0.5 rounded cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-6 flex flex-col gap-4">
+              {/* Summary Box */}
+              <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 text-xs text-gray-700 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between font-mono font-bold text-gray-900">
+                  <span>{settleBalanceModal.booking.id}</span>
+                  <span className="font-sans font-semibold text-gray-800">
+                    {settleBalanceModal.booking.pickupCity} → {settleBalanceModal.booking.deliveryCity}
+                  </span>
+                </div>
+                <div className="text-gray-600">
+                  Customer: <strong className="text-gray-900">{settleBalanceModal.booking.customerName}</strong>
+                  {settleBalanceModal.booking.customerPhone && (
+                    <span className="font-mono ml-1">({settleBalanceModal.booking.customerPhone})</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Balance Amount Due Card */}
+              <div className="p-4 bg-amber-50 border border-amber-300 rounded-xl flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-semibold text-amber-900 uppercase tracking-wider block">
+                    Remaining Balance Due
+                  </span>
+                  <span className="text-[11px] text-amber-800">
+                    Total: Rs. {(settleBalanceModal.booking.quotedAmount || settleBalanceModal.pendingAmount).toLocaleString()}
+                    {settleBalanceModal.booking.advanceAmount && settleBalanceModal.booking.advanceAmount > 0
+                      ? ` · Paid: Rs. ${settleBalanceModal.booking.advanceAmount.toLocaleString()}`
+                      : ""}
+                  </span>
+                </div>
+                <span className="font-mono text-xl font-black text-amber-950">
+                  Rs. {settleBalanceModal.pendingAmount.toLocaleString()}
+                </span>
+              </div>
+
+              {/* Settlement Method */}
+              <div>
+                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
+                  Settlement Method (මුදල් ගෙවූ ආකාරය) *
+                </label>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSettleBalanceModal((prev) =>
+                        prev ? { ...prev, settleMethod: "cash_manual" } : null
+                      )
+                    }
+                    className={`px-3.5 py-2.5 rounded-xl border text-xs font-bold cursor-pointer transition-all ${
+                      settleBalanceModal.settleMethod === "cash_manual"
+                        ? "bg-gray-900 text-white border-gray-900"
+                        : "bg-white text-gray-800 border-gray-300 hover:bg-gray-50"
+                    }`}
+                  >
+                    💵 Cash (අත්පිට මුදල්)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSettleBalanceModal((prev) =>
+                        prev ? { ...prev, settleMethod: "bank_transfer" } : null
+                      )
+                    }
+                    className={`px-3.5 py-2.5 rounded-xl border text-xs font-bold cursor-pointer transition-all ${
+                      settleBalanceModal.settleMethod === "bank_transfer"
+                        ? "bg-gray-900 text-white border-gray-900"
+                        : "bg-white text-gray-800 border-gray-300 hover:bg-gray-50"
+                    }`}
+                  >
+                    🏦 Bank Transfer (බැංකු තැන්පතු)
+                  </button>
+                </div>
+              </div>
+
+              {settleBalanceModal.settleMethod === "bank_transfer" && (
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">
+                    Select Receiving Company Bank *
+                  </label>
+                  <select
+                    value={settleBalanceModal.bankUsed}
+                    onChange={(e) =>
+                      setSettleBalanceModal((prev) =>
+                        prev ? { ...prev, bankUsed: e.target.value } : null
+                      )
+                    }
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 bg-white text-gray-900 text-xs font-semibold focus:border-gray-900 focus:outline-none"
+                  >
+                    {bankAccounts
+                      .filter((a) => a.active)
+                      .map((acc) => (
+                        <option
+                          key={acc.id}
+                          value={`${acc.bankName} - ${acc.accountNumber} (${acc.accountName})`}
+                        >
+                          {acc.bankName} - {acc.accountNumber} ({acc.accountName} · {acc.branch})
+                        </option>
+                      ))}
+                    {bankAccounts.filter((a) => a.active).length === 0 && (
+                      <option value="Commercial Bank - 100029384920">
+                        Commercial Bank - 100029384920
+                      </option>
+                    )}
+                  </select>
+                </div>
+              )}
+
+              {/* Note (Optional) */}
+              <div>
+                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">
+                  Settlement Note (Optional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Paid on delivery"
+                  value={settleBalanceModal.note}
+                  onChange={(e) =>
+                    setSettleBalanceModal((prev) =>
+                      prev ? { ...prev, note: e.target.value } : null
+                    )
+                  }
+                  className="w-full px-3.5 py-2 rounded-xl border border-gray-300 text-gray-900 text-xs focus:border-gray-900 focus:outline-none"
+                />
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-3.5 bg-gray-50 border-t border-gray-200 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setSettleBalanceModal(null)}
+                className="px-4 py-2 rounded-xl border border-gray-300 text-xs font-bold text-gray-700 hover:bg-gray-100 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmSettleBalance}
+                className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-green-700 hover:bg-green-800 transition-all cursor-pointer shadow-sm"
+              >
+                Confirm Settlement (Rs. {settleBalanceModal.pendingAmount.toLocaleString()})
               </button>
             </div>
           </div>

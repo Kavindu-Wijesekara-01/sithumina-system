@@ -14,6 +14,7 @@ export interface BookingActionInput {
   vehicleType: string;
   date: string;
   dates?: string[];
+  endDate?: string;
   startTime?: string;
   endTime?: string;
   phone: string;
@@ -40,6 +41,12 @@ export interface BookingActionInput {
   quotedAmount?: number;
   quoteNote?: string;
   paymentMethod?: BookingPaymentMethod;
+  paymentBankUsed?: string;
+  advanceAmount?: number;
+  pendingAmount?: number;
+  finalPaymentMethod?: BookingPaymentMethod;
+  finalPaymentBankUsed?: string;
+  finalPaymentAt?: number;
   paymentSlipStatus?: PaymentSlipStatus;
   paymentApprovedAt?: number;
 }

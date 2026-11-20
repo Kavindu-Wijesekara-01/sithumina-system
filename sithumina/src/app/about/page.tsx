@@ -61,7 +61,92 @@ function AnimatedCounter({
 }
 
 // ---------------------------------------------------------------------------
-// NEW: Service icons (stroke icons) used by the stylish service cards
+// SEO: structured data (JSON-LD) – tells Google which cities we serve
+// TODO: replace SITE_URL (and add streetAddress / geo if you have them)
+// ---------------------------------------------------------------------------
+const SITE_URL = "https://www.yourdomain.lk";
+
+const SERVICE_AREAS = [
+  "Kiribathgoda",
+  "Kadawatha",
+  "Colombo",
+  "Kelaniya",
+  "Wattala",
+  "Ragama",
+  "Ja-Ela",
+  "Peliyagoda",
+  "Mabola",
+  "Hendala",
+  "Gampaha",
+  "Maharagama",
+  "Nugegoda",
+  "Dehiwala",
+  "Mount Lavinia",
+  "Moratuwa",
+  "Kottawa",
+  "Malabe",
+  "Battaramulla",
+  "Negombo",
+];
+
+const JSON_LD = {
+  "@context": "https://schema.org",
+  "@type": ["LocalBusiness", "MovingCompany"],
+  "@id": `${SITE_URL}/#business`,
+  name: "Sithumina Transport",
+  alternateName: [
+    "Sithumina Transports",
+    "Kiribathgoda Transport",
+    "Kadawatha Transport",
+    "Colombo Lorry",
+  ],
+  url: `${SITE_URL}/about`,
+  image: `${SITE_URL}/img2.jpeg`,
+  description:
+    "Kiribathgoda transport, Kadawatha transport and Colombo cargo transport service. Lorry hire, house and office moving, refrigerated trucks and A/C passenger buses available 24 hours a day across Sri Lanka.",
+  telephone: ["+94771234567", "+94717654321", "+94765550123"],
+  openingHoursSpecification: {
+    "@type": "OpeningHoursSpecification",
+    dayOfWeek: [
+      "Monday",
+      "Tuesday",
+      "Wednesday",
+      "Thursday",
+      "Friday",
+      "Saturday",
+      "Sunday",
+    ],
+    opens: "00:00",
+    closes: "23:59",
+  },
+  address: {
+    "@type": "PostalAddress",
+    addressLocality: "Kiribathgoda",
+    addressRegion: "Western Province",
+    addressCountry: "LK",
+  },
+  areaServed: SERVICE_AREAS.map((name) => ({
+    "@type": "City",
+    name,
+  })),
+  hasOfferCatalog: {
+    "@type": "OfferCatalog",
+    name: "Transport Services",
+    itemListElement: [
+      "House and office moving",
+      "Cargo and parcel transport",
+      "Lorry hire (Buddy, Dimo Batta, Maximo)",
+      "Freezer / refrigerated transport",
+      "Passenger bus and tour transport",
+    ].map((n) => ({
+      "@type": "Offer",
+      itemOffered: { "@type": "Service", name: n },
+    })),
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Service icons (stroke icons) used by the stylish service cards
 // ---------------------------------------------------------------------------
 const SERVICE_ICONS: Record<string, React.ReactNode> = {
   home: (
@@ -97,12 +182,12 @@ const SERVICES = [
     icon: "home",
     en: {
       title: "Moving Houses & Offices",
-      desc: "Complete moving of houses, workplaces, and commercial business premises with trained packing helpers.",
+      desc: "Complete house, office and business moving in Colombo, Kiribathgoda, Kadawatha and Kelaniya with trained packing helpers.",
       pill: "Packing included",
     },
     si: {
       title: "නිවාස හා කාර්යාල මාරු කිරීම්",
-      desc: "නිවාස, කාර්යාල හා ව්‍යාපාරික ස්ථාන ආරක්ෂිතව සහ ඉක්මනින් වෙනත් ස්ථානයකට ගෙනයාම.",
+      desc: "කොළඹ, කිරිබත්ගොඩ, කඩවත ඇතුළු නිවාස, කාර්යාල හා ව්‍යාපාරික ස්ථාන ආරක්ෂිතව සහ ඉක්මනින් වෙනත් ස්ථානයකට ගෙනයාම.",
       pill: "ඇසුරුම් ඇතුළත්",
     },
   },
@@ -110,12 +195,12 @@ const SERVICES = [
     icon: "cargo",
     en: {
       title: "Packages & Cargo Transit",
-      desc: "Wide range of bundles, packages and commercial product transportation across all 9 provinces.",
+      desc: "Kiribathgoda cargo transport and Colombo cargo transport for bundles, packages and commercial products across all 9 provinces.",
       pill: "All 9 provinces",
     },
     si: {
       title: "භාණ්ඩ හා පාර්සල් ප්‍රවාහනය",
-      desc: "දිවයිනේ ඕනෑම තැනකට තොග හා සිල්ලර නිෂ්පාදන සහ පාර්සල් විශ්වාසවන්තව බෙදාහැරීම.",
+      desc: "කිරිබත්ගොඩ සහ කොළඹ සිට දිවයිනේ ඕනෑම තැනකට තොග හා සිල්ලර නිෂ්පාදන සහ පාර්සල් විශ්වාසවන්තව බෙදාහැරීම.",
       pill: "පළාත් 9ම",
     },
   },
@@ -148,7 +233,7 @@ const SERVICES = [
 ];
 
 // ---------------------------------------------------------------------------
-// NEW: Vehicle illustration + data used by the stylish vehicle cards
+// Vehicle illustration + data used by the stylish vehicle cards
 // ---------------------------------------------------------------------------
 function TruckArt({ w, cold }: { w: number; cold?: boolean }) {
   const cab = 10 + w + 4;
@@ -204,7 +289,7 @@ const VEHICLES = [
     cold: false,
     en: {
       title: "Buddy Truck Transport",
-      desc: "Ideal for small and medium-sized deliveries and moving requirements.",
+      desc: "Ideal for small and medium-sized deliveries and moving requirements. A popular Colombo lorry for city deliveries.",
       badge: "Small loads",
     },
     si: {
@@ -219,7 +304,7 @@ const VEHICLES = [
     cold: false,
     en: {
       title: "Dimo Batta Transport",
-      desc: "Suitable for household goods, business deliveries, furniture, and general cargo.",
+      desc: "Suitable for household goods, business deliveries, furniture, and general cargo from Kiribathgoda, Kadawatha and Colombo.",
       badge: "Medium loads",
     },
     si: {
@@ -262,18 +347,18 @@ const VEHICLES = [
 
 // All 12 authentic fleet images from the public directory (img1 to img11 .jpeg, img12 .png)
 const FLEET_GALLERY = [
-  { id: 1, src: "/img1.jpeg", alt: "Sithumina Transport JAC Box Lorry 1" },
-  { id: 2, src: "/img2.jpeg", alt: "Sithumina Transport Active Fleet Lineup 2" },
-  { id: 3, src: "/img3.jpeg", alt: "Sithumina Transport Highway Freight Convoy 3" },
-  { id: 4, src: "/img4.jpeg", alt: "Sithumina Transport Maxximo City Truck 4" },
-  { id: 5, src: "/img5.jpeg", alt: "Sithumina Transport Covered Delivery Carriers 5" },
-  { id: 6, src: "/img6.jpeg", alt: "Sithumina Transport Express Cargo Units 6" },
-  { id: 7, src: "/img7.jpeg", alt: "Sithumina Transport Inter-Provincial Freight 7" },
-  { id: 8, src: "/img8.jpeg", alt: "Sithumina Transport Luxury Passenger Coach 8" },
-  { id: 9, src: "/img9.jpeg", alt: "Sithumina Transport Toyota Coaster AC Bus 9" },
-  { id: 10, src: "/img10.jpeg", alt: "Sithumina Transport Heavy Eicher Container Lorry 10" },
-  { id: 11, src: "/img11.jpeg", alt: "Sithumina Transport Heavy Cargo Truck Profile 11" },
-  { id: 12, src: "/img12.png", alt: "Sithumina Transport Bus Executive Interior 12" },
+  { id: 1, src: "/img1.jpeg", alt: "Sithumina Transport JAC box lorry - Kiribathgoda lorry and Colombo lorry hire" },
+  { id: 2, src: "/img2.jpeg", alt: "Sithumina Transport fleet lineup - Kadawatha transport and Kiribathgoda transport" },
+  { id: 3, src: "/img3.jpeg", alt: "Sithumina Transport highway freight convoy - Colombo cargo transport" },
+  { id: 4, src: "/img4.jpeg", alt: "Sithumina Transport Maxximo city truck - Kadawatha lorry service" },
+  { id: 5, src: "/img5.jpeg", alt: "Sithumina Transport covered delivery carriers - Kiribathgoda cargo transport" },
+  { id: 6, src: "/img6.jpeg", alt: "Sithumina Transport express cargo units - Colombo transport service" },
+  { id: 7, src: "/img7.jpeg", alt: "Sithumina Transport inter-provincial freight - Colombo, Kelaniya and Wattala" },
+  { id: 8, src: "/img8.jpeg", alt: "Sithumina Transport luxury passenger coach - Kiribathgoda and Colombo bus hire" },
+  { id: 9, src: "/img9.jpeg", alt: "Sithumina Transport Toyota Coaster A/C bus - Kadawatha tours and events" },
+  { id: 10, src: "/img10.jpeg", alt: "Sithumina Transport heavy Eicher container lorry - Colombo cargo transport" },
+  { id: 11, src: "/img11.jpeg", alt: "Sithumina Transport heavy cargo truck - Kiribathgoda lorry hire" },
+  { id: 12, src: "/img12.png", alt: "Sithumina Transport executive bus interior - Colombo passenger transport" },
 ];
 
 export default function AboutPage() {
@@ -306,8 +391,21 @@ export default function AboutPage() {
       className="p-3.5 sm:p-6 lg:p-10 flex flex-col gap-10 lg:gap-14 max-w-7xl mx-auto w-full select-none"
       id="about-content"
     >
+      {/* SEO: JSON-LD structured data (invisible, no UI impact) */}
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(JSON_LD) }}
+      />
+
       {/* 1. HERO & COMPANY OVERVIEW */}
-      <section className="flex flex-col gap-6">
+      <section
+        className="flex flex-col gap-6"
+        aria-label={
+          locale === "en"
+            ? "About Sithumina Transport - Kiribathgoda, Kadawatha and Colombo transport"
+            : "සිතුමිණ ට්‍රාන්ස්පෝර්ට් - කිරිබත්ගොඩ, කඩවත සහ කොළඹ ප්‍රවාහන සේවාව"
+        }
+      >
         <div className="flex flex-col gap-3 max-w-4xl">
           <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-[var(--y3)] text-[#5B4300] text-xs font-bold w-fit border border-[var(--y2)] shadow-xs">
             {/* Standard Shield Badge Icon */}
@@ -319,6 +417,7 @@ export default function AboutPage() {
               strokeWidth="2.5"
               strokeLinecap="round"
               strokeLinejoin="round"
+              aria-hidden="true"
             >
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
               <path d="m9 12 2 2 4-4" />
@@ -359,6 +458,7 @@ export default function AboutPage() {
                     strokeWidth="2"
                     strokeLinecap="round"
                     strokeLinejoin="round"
+                    aria-hidden="true"
                   >
                     <rect x="1" y="3" width="15" height="13" rx="2" />
                     <polygon points="16 8 20 8 23 11 23 16 16 16 16 8" />
@@ -372,9 +472,9 @@ export default function AboutPage() {
               </div>
               <p className="text-[var(--ink)] text-sm sm:text-base lg:text-lg leading-relaxed font-medium m-0">
                 {locale === "en" ? (
-                  "We are a transportation provider and we have a responsible, courteous staff, we provide services 24 hours a day and we have a wide range of vehicles to provide these services quickly and efficiently."
+                  "We are a trusted Kiribathgoda transport and Kadawatha transport provider with a responsible, courteous staff. We provide Colombo transport services 24 hours a day, with a wide range of lorries and vehicles to serve Colombo, Kelaniya, Wattala and every major city quickly and efficiently."
                 ) : (
-                  "අප ප්‍රවාහන සැපයුම් ආයතනයක් වන අතර වගකීමෙන්, ආචාරශීලී, සේවක මඩුල්ලක් අප සතුය, පැය 24 පුරා අප සේවා සපයන අතර, එම සේවා ඉක්මනින් හා කාර්යක්ෂම ලෙස සැපයීම සඳහා වාහන රාශියක් අප සතුව ඇත."
+                  "අප කිරිබත්ගොඩ, කඩවත සහ කොළඹ ප්‍රවාහන සැපයුම් ආයතනයක් වන අතර වගකීමෙන්, ආචාරශීලී, සේවක මඩුල්ලක් අප සතුය, පැය 24 පුරා අප සේවා සපයන අතර, කොළඹ, කැලණිය, වත්තල ඇතුළු සෑම නගරයකටම එම සේවා ඉක්මනින් හා කාර්යක්ෂම ලෙස සැපයීම සඳහා ලොරි සහ වාහන රාශියක් අප සතුව ඇත."
                 )}
               </p>
             </div>
@@ -392,6 +492,7 @@ export default function AboutPage() {
                     strokeWidth="2"
                     strokeLinecap="round"
                     strokeLinejoin="round"
+                    aria-hidden="true"
                   >
                     <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
                     <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
@@ -404,9 +505,9 @@ export default function AboutPage() {
               </div>
               <p className="text-[var(--ink)] text-sm sm:text-base lg:text-lg leading-relaxed font-medium m-0">
                 {locale === "en" ? (
-                  "Sithumina Transport is a private transportation organization and handles a wide range of bundles, packages and products transportation, stacking, emptying, cleaning and upkeep administrations, with drivers and aides, traveler transportation, moving of houses, workplaces and business premises."
+                  "Sithumina Transport is a private transportation organization offering Kiribathgoda cargo transport, Colombo cargo transport and lorry hire in Kiribathgoda, Kadawatha and Colombo. We handle a wide range of bundles, packages and products transportation, stacking, emptying, cleaning and upkeep administrations, with drivers and aides, traveler transportation, moving of houses, workplaces and business premises."
                 ) : (
-                  "සිතුමිණ ට්‍රාන්ස්පෝර්ට් යනු පෞද්ගලික ප්‍රවාහන ආයතනයක් වන අතර භාණ්ඩ, පාර්සල් හා නිෂ්පාදන ප්‍රවාහනය, පැටවීම, බෑම, පිරිසිදු කිරීම සහ නඩත්තු සේවා, රියදුරන් සහ සහායකයින් සමඟ මගී ප්‍රවාහනය, නිවාස, කාර්යාල හා ව්‍යාපාරික ස්ථාන මාරු කිරීම් ඇතුළු පුළුල් පරාසයක සේවාවන් සපයයි."
+                  "සිතුමිණ ට්‍රාන්ස්පෝර්ට් යනු කිරිබත්ගොඩ, කඩවත සහ කොළඹ ප්‍රදේශවල ලොරි සේවා සහ කාගෝ ප්‍රවාහනය සපයන පෞද්ගලික ප්‍රවාහන ආයතනයක් වන අතර භාණ්ඩ, පාර්සල් හා නිෂ්පාදන ප්‍රවාහනය, පැටවීම, බෑම, පිරිසිදු කිරීම සහ නඩත්තු සේවා, රියදුරන් සහ සහායකයින් සමඟ මගී ප්‍රවාහනය, නිවාස, කාර්යාල හා ව්‍යාපාරික ස්ථාන මාරු කිරීම් ඇතුළු පුළුල් පරාසයක සේවාවන් සපයයි."
                 )}
               </p>
             </div>
@@ -466,7 +567,7 @@ export default function AboutPage() {
       </section>
 
       {/* 2. OUR VISION AND MISSION SECTION */}
-      <section className="flex flex-col items-center gap-6 pt-2">
+      <section className="flex flex-col items-center gap-6 pt-2" id="vision-mission">
         <div className="flex flex-col items-center text-center gap-2">
           <h2 className="text-2xl sm:text-3xl lg:text-4xl font-black text-[var(--ink)] tracking-tight m-0">
             {locale === "en" ? "Our Vision And Mission" : "අපගේ දැක්ම සහ මෙහෙවර"}
@@ -489,6 +590,7 @@ export default function AboutPage() {
                   strokeWidth="2"
                   strokeLinecap="round"
                   strokeLinejoin="round"
+                  aria-hidden="true"
                 >
                   <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
                   <circle cx="12" cy="12" r="3" />
@@ -518,6 +620,7 @@ export default function AboutPage() {
                   strokeWidth="2"
                   strokeLinecap="round"
                   strokeLinejoin="round"
+                  aria-hidden="true"
                 >
                   <circle cx="12" cy="12" r="10" />
                   <circle cx="12" cy="12" r="6" />
@@ -538,7 +641,7 @@ export default function AboutPage() {
       </section>
 
       {/* 3. KEY SERVICES (NEW STYLISH LIGHT-THEME CARDS) */}
-      <section className="flex flex-col gap-6 pt-2">
+      <section className="flex flex-col gap-6 pt-2" id="services">
         <div className="flex flex-col gap-2">
           <span className="inline-flex items-center gap-2 text-sm font-semibold text-[#2F5BEA]">
             <span className="w-2 h-2 rounded-full bg-[var(--y)] ring-4 ring-[var(--y3)]" />
@@ -598,7 +701,7 @@ export default function AboutPage() {
       </section>
 
       {/* 4. OUR VEHICLE OPTIONS (NEW STYLISH LIGHT-THEME CARDS) */}
-      <section className="flex flex-col gap-6 pt-2">
+      <section className="flex flex-col gap-6 pt-2" id="vehicles">
         <div className="flex flex-col gap-2">
           <span className="inline-flex items-center gap-2 text-sm font-semibold text-[#2F5BEA]">
             <span className="w-2 h-2 rounded-full bg-[var(--y)] ring-4 ring-[var(--y3)]" />
@@ -657,7 +760,7 @@ export default function AboutPage() {
       </section>
 
       {/* 5. FLEET PHOTO GALLERY (All 12 Images in public folder: img1 to img12) */}
-      <section className="flex flex-col gap-5 pt-2">
+      <section className="flex flex-col gap-5 pt-2" id="fleet-gallery">
         <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
           <div className="flex flex-col gap-1">
             <span className="text-xs font-bold text-[#C51616] tracking-wider uppercase">
@@ -696,7 +799,7 @@ export default function AboutPage() {
 
               {/* Quick Zoom Icon in corner on hover */}
               <div className="absolute bottom-3 right-3 w-9 h-9 rounded-full bg-white/95 text-[#26231B] flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200 shadow-md">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                   <path
                     strokeLinecap="round"
                     strokeLinejoin="round"
@@ -711,12 +814,15 @@ export default function AboutPage() {
       </section>
 
       {/* 6. 24/7 HOTLINE CONTACT ACTION BANNER (With Public Image Background) */}
-      <section className="relative rounded-2xl sm:rounded-3xl overflow-hidden text-[#F6F1DF] p-6 sm:p-8 lg:p-10 border border-[#4A4332] shadow-xl flex flex-col lg:flex-row items-center justify-between gap-6 group">
+      <section
+        className="relative rounded-2xl sm:rounded-3xl overflow-hidden text-[#F6F1DF] p-6 sm:p-8 lg:p-10 border border-[#4A4332] shadow-xl flex flex-col lg:flex-row items-center justify-between gap-6 group"
+        id="contact-banner"
+      >
         {/* Background Fleet Image & Dark Tint Overlay */}
         <div className="absolute inset-0 z-0">
           <Image
             src="/img2.jpeg"
-            alt="Sithumina Transport Fleet Background"
+            alt="Sithumina Transport fleet - Kiribathgoda, Kadawatha and Colombo lorry service"
             fill
             className="object-cover object-center transform scale-102 group-hover:scale-105 transition-transform duration-700"
             sizes="(max-width: 1280px) 100vw, 1200px"
@@ -743,21 +849,21 @@ export default function AboutPage() {
 
           <p className="text-xs sm:text-sm text-[#DDD6C1] leading-relaxed m-0 font-normal">
             {locale === "en"
-              ? "Contact our courteous dispatch staff 24 hours a day for quick and efficient transport solutions."
-              : "ඔබගේ ප්‍රවාහන අවශ්‍යතා ඉක්මනින් හා කාර්යක්ෂමව ඉටුකර ගැනීමට අපගේ සුහදශීලී සේවක මඩුල්ල අමතන්න."}
+              ? "Contact our courteous dispatch staff 24 hours a day for quick and efficient transport solutions in Kiribathgoda, Kadawatha, Colombo and nearby cities."
+              : "කිරිබත්ගොඩ, කඩවත, කොළඹ ඇතුළු ඔබගේ ප්‍රවාහන අවශ්‍යතා ඉක්මනින් හා කාර්යක්ෂමව ඉටුකර ගැනීමට අපගේ සුහදශීලී සේවක මඩුල්ල අමතන්න."}
           </p>
 
           <div className="flex flex-wrap items-center justify-center lg:justify-start gap-4 pt-2 text-xs font-mono font-bold text-[#FFC20E]">
             <a href="tel:0771234567" className="hover:underline flex items-center gap-1.5 transition-colors">
               {/* Phone SVG */}
-              <svg className="w-3.5 h-3.5 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <svg className="w-3.5 h-3.5 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
               </svg>
               <span>077 123 4567</span>
             </a>
             <a href="tel:0717654321" className="hover:underline flex items-center gap-1.5 transition-colors">
               {/* Phone SVG */}
-              <svg className="w-3.5 h-3.5 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <svg className="w-3.5 h-3.5 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
               </svg>
               <span>071 765 4321</span>
@@ -769,7 +875,7 @@ export default function AboutPage() {
               className="hover:underline text-emerald-400 flex items-center gap-1.5 transition-colors"
             >
               {/* WhatsApp brand SVG */}
-              <svg className="w-3.5 h-3.5 fill-current flex-none" viewBox="0 0 24 24">
+              <svg className="w-3.5 h-3.5 fill-current flex-none" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12.04 2c-5.46 0-9.91 4.45-9.91 9.91 0 1.75.46 3.45 1.32 4.95L2.05 22l5.25-1.38c1.45.79 3.08 1.21 4.74 1.21 5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.816 9.816 0 0 0 12.04 2zm5.78 14.16c-.24.68-1.4 1.26-1.94 1.33-.51.07-1.16.1-3.37-.8-2.82-1.15-4.64-4.04-4.78-4.23-.14-.19-1.15-1.53-1.15-2.92 0-1.39.73-2.07.99-2.36.26-.29.58-.36.77-.36.2 0 .39 0 .56.01.18.01.42-.07.65.49.24.58.82 2.01.89 2.16.07.15.12.33.02.53-.1.2-.15.32-.3.49-.15.17-.31.38-.45.51-.15.15-.3.32-.13.62.17.29.76 1.25 1.63 2.03 1.12 1 2.06 1.31 2.36 1.45.29.15.46.13.63-.07.17-.2.74-.86.94-1.16.2-.29.39-.24.66-.14.27.1 1.72.81 2.02.96.29.15.49.22.56.34.07.12.07.71-.17 1.39z" />
               </svg>
               <span>076 555 0123 (WhatsApp)</span>

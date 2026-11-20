@@ -26,6 +26,8 @@ import {
   findBookingScheduleConflict,
   hasAssignedRider,
   validateTimeRange,
+  validateScheduleTimeAndDates,
+  getDatesBetween,
 } from "@/lib/booking-schedule";
 import { ActionResult, BookingActionInput } from "./types";
 import { db } from "@/lib/firebase";
@@ -103,6 +105,17 @@ function mapFirestoreBooking(
     quoteNote: data.quoteNote ? String(data.quoteNote) : undefined,
     paymentMethod: (data.paymentMethod as BookingPaymentMethod) || undefined,
     paymentBankUsed: data.paymentBankUsed ? String(data.paymentBankUsed) : undefined,
+    advanceAmount:
+      typeof data.advanceAmount === "number" && !Number.isNaN(data.advanceAmount)
+        ? data.advanceAmount
+        : undefined,
+    pendingAmount:
+      typeof data.pendingAmount === "number" && !Number.isNaN(data.pendingAmount)
+        ? data.pendingAmount
+        : undefined,
+    finalPaymentMethod: (data.finalPaymentMethod as BookingPaymentMethod) || undefined,
+    finalPaymentBankUsed: data.finalPaymentBankUsed ? String(data.finalPaymentBankUsed) : undefined,
+    finalPaymentAt: Number(data.finalPaymentAt) || undefined,
     paymentSlipId: data.paymentSlipId ? String(data.paymentSlipId) : undefined,
     paymentSlipName: data.paymentSlipName ? String(data.paymentSlipName) : undefined,
     paymentSlipType: data.paymentSlipType ? String(data.paymentSlipType) : undefined,
@@ -443,6 +456,10 @@ export async function createBookingAction(
 
     let cleanStartTime = String(input.startTime || "").trim();
     let cleanEndTime = String(input.endTime || "").trim();
+    const rawDates = input.dates && input.dates.length > 0 ? input.dates : [date];
+    const rawEndDate = input.endDate || (rawDates.length > 1 ? rawDates[rawDates.length - 1] : date);
+    let resolvedDates: string[] = rawDates;
+    let resolvedDaysNeeded: number = Number(input.daysNeeded) || rawDates.length || 1;
 
     // When creating an already-scheduled / manual Individual booking (time provided or approved/assigned status),
     // require a valid time duration, mandatory Rider, and zero schedule overlap for Lorry or Rider.
@@ -452,12 +469,20 @@ export async function createBookingAction(
         ["accepted", "booked", "assigned", "in_transit"].includes(initialStatus));
 
     if (requiresScheduleValidation) {
-      const timeCheck = validateTimeRange(cleanStartTime, cleanEndTime);
-      if (!timeCheck.valid) {
-        return { success: false, error: timeCheck.error };
+      const scheduleCheck = validateScheduleTimeAndDates(
+        date,
+        cleanStartTime,
+        rawEndDate,
+        cleanEndTime,
+        rawDates
+      );
+      if (!scheduleCheck.valid) {
+        return { success: false, error: scheduleCheck.error };
       }
-      cleanStartTime = timeCheck.startTime;
-      cleanEndTime = timeCheck.endTime;
+      cleanStartTime = scheduleCheck.startTime;
+      cleanEndTime = scheduleCheck.endTime;
+      resolvedDates = scheduleCheck.dates;
+      resolvedDaysNeeded = scheduleCheck.daysCount;
 
       if (
         !hasAssignedRider({
@@ -482,10 +507,10 @@ export async function createBookingAction(
 
       const conflict = findBookingScheduleConflict(
         {
-          date,
-          dates: input.dates && input.dates.length > 0 ? input.dates : [date],
-          startTime: cleanStartTime,
-          endTime: cleanEndTime,
+          date: scheduleCheck.startDate,
+          dates: scheduleCheck.dates,
+          startTime: scheduleCheck.startTime,
+          endTime: scheduleCheck.endTime,
           assignedPlate: input.assignedPlate?.trim(),
           assignedLorryId: input.assignedLorryId?.trim(),
           assignedDriverId: resolvedInputDriverId,
@@ -517,7 +542,7 @@ export async function createBookingAction(
       customerIdNumber: input.customerIdNumber?.trim(),
       distanceKm: input.distanceKm !== undefined && !Number.isNaN(Number(input.distanceKm)) ? Number(input.distanceKm) : undefined,
       date,
-      dates: input.dates,
+      dates: resolvedDates,
       startTime: cleanStartTime || undefined,
       endTime: cleanEndTime || undefined,
       vehicleType,
@@ -529,7 +554,7 @@ export async function createBookingAction(
       assignedDriverPhone: resolvedInputDriverPhone || undefined,
       bookingType,
       cargoNature: input.cargoNature?.trim(),
-      daysNeeded: input.daysNeeded,
+      daysNeeded: resolvedDaysNeeded,
       cargoWeight: input.cargoWeight?.trim() || input.weight?.trim(),
       helpersCount: input.helpersCount,
       status: initialStatus,
@@ -537,6 +562,12 @@ export async function createBookingAction(
       quotedAt: input.quotedAmount !== undefined ? Date.now() : undefined,
       quoteNote: input.quoteNote,
       paymentMethod: input.paymentMethod,
+      paymentBankUsed: input.paymentBankUsed,
+      advanceAmount: input.advanceAmount,
+      pendingAmount: input.pendingAmount,
+      finalPaymentMethod: input.finalPaymentMethod,
+      finalPaymentBankUsed: input.finalPaymentBankUsed,
+      finalPaymentAt: input.finalPaymentAt,
       paymentSlipStatus: input.paymentSlipStatus,
       paymentApprovedAt: input.paymentApprovedAt,
     });
@@ -603,6 +634,12 @@ export async function createBookingAction(
       if (booking.quotedAt !== undefined) bookingPayload.quotedAt = booking.quotedAt;
       if (booking.quoteNote) bookingPayload.quoteNote = booking.quoteNote;
       if (booking.paymentMethod) bookingPayload.paymentMethod = booking.paymentMethod;
+      if (booking.paymentBankUsed) bookingPayload.paymentBankUsed = booking.paymentBankUsed;
+      if (booking.advanceAmount !== undefined) bookingPayload.advanceAmount = booking.advanceAmount;
+      if (booking.pendingAmount !== undefined) bookingPayload.pendingAmount = booking.pendingAmount;
+      if (booking.finalPaymentMethod) bookingPayload.finalPaymentMethod = booking.finalPaymentMethod;
+      if (booking.finalPaymentBankUsed) bookingPayload.finalPaymentBankUsed = booking.finalPaymentBankUsed;
+      if (booking.finalPaymentAt) bookingPayload.finalPaymentAt = booking.finalPaymentAt;
       if (booking.paymentApprovedAt) bookingPayload.paymentApprovedAt = booking.paymentApprovedAt;
       if (resolvedDriverMeta.driverName || resolvedDriverMeta.driverPhone) {
         booking.assignedDriverName = resolvedDriverMeta.driverName || booking.assignedDriverName;
@@ -882,6 +919,8 @@ export async function updateBookingStatusAction(
     assignedPlate?: string;
     date?: string;
     dates?: string[];
+    endDate?: string;
+    daysNeeded?: number | string;
     startTime?: string;
     endTime?: string;
     distanceKm?: number;
@@ -893,6 +932,11 @@ export async function updateBookingStatusAction(
     quoteNote?: string;
     paymentMethod?: BookingPaymentMethod;
     paymentBankUsed?: string;
+    advanceAmount?: number;
+    pendingAmount?: number;
+    finalPaymentMethod?: BookingPaymentMethod;
+    finalPaymentBankUsed?: string;
+    finalPaymentAt?: number;
     paymentSlipId?: string;
     paymentSlipName?: string;
     paymentSlipType?: string;
@@ -917,6 +961,8 @@ export async function updateBookingStatusAction(
           assignedDriverPhone: assignment.assignedDriverPhone?.trim() || undefined,
           date: assignment.date?.trim() || undefined,
           dates: Array.isArray(assignment.dates) && assignment.dates.length > 0 ? assignment.dates : undefined,
+          endDate: assignment.endDate?.trim() || undefined,
+          daysNeeded: assignment.daysNeeded !== undefined ? Number(assignment.daysNeeded) || assignment.daysNeeded : undefined,
           startTime: assignment.startTime?.trim() || undefined,
           endTime: assignment.endTime?.trim() || undefined,
           distanceKm: assignment.distanceKm !== undefined && !Number.isNaN(Number(assignment.distanceKm)) ? Number(assignment.distanceKm) : undefined,
@@ -946,6 +992,9 @@ export async function updateBookingStatusAction(
         sanitizedAssignment?.dates ||
         (sanitizedAssignment?.date ? [sanitizedAssignment.date] : existingBooking?.dates) ||
         (mergedDate ? [mergedDate] : []);
+      const mergedEndDate =
+        sanitizedAssignment?.endDate ||
+        (mergedDates.length > 1 ? mergedDates[mergedDates.length - 1] : mergedDate);
       const mergedStartTime = sanitizedAssignment?.startTime || existingBooking?.startTime || "";
       const mergedEndTime = sanitizedAssignment?.endTime || existingBooking?.endTime || "";
       const mergedPlate = sanitizedAssignment?.assignedPlate || existingBooking?.assignedPlate || "";
@@ -962,13 +1011,22 @@ export async function updateBookingStatusAction(
         ["accepted", "booked", "assigned", "in_transit"].includes(status);
 
       if (schedulingActive) {
-        const timeCheck = validateTimeRange(mergedStartTime, mergedEndTime);
-        if (!timeCheck.valid) {
-          return { success: false, error: timeCheck.error };
+        const scheduleCheck = validateScheduleTimeAndDates(
+          mergedDate,
+          mergedStartTime,
+          mergedEndDate,
+          mergedEndTime,
+          mergedDates
+        );
+        if (!scheduleCheck.valid) {
+          return { success: false, error: scheduleCheck.error };
         }
         if (sanitizedAssignment) {
-          sanitizedAssignment.startTime = timeCheck.startTime;
-          sanitizedAssignment.endTime = timeCheck.endTime;
+          sanitizedAssignment.date = scheduleCheck.startDate;
+          sanitizedAssignment.dates = scheduleCheck.dates;
+          sanitizedAssignment.startTime = scheduleCheck.startTime;
+          sanitizedAssignment.endTime = scheduleCheck.endTime;
+          sanitizedAssignment.daysNeeded = scheduleCheck.daysCount;
         }
 
         if (
@@ -987,10 +1045,10 @@ export async function updateBookingStatusAction(
         const conflict = findBookingScheduleConflict(
           {
             excludeBookingId: id,
-            date: mergedDate,
-            dates: mergedDates,
-            startTime: timeCheck.startTime,
-            endTime: timeCheck.endTime,
+            date: scheduleCheck.startDate,
+            dates: scheduleCheck.dates,
+            startTime: scheduleCheck.startTime,
+            endTime: scheduleCheck.endTime,
             assignedPlate: mergedPlate,
             assignedLorryId: mergedLorryId,
             assignedDriverId: mergedDriverId,
@@ -1036,6 +1094,7 @@ export async function updateBookingStatusAction(
             ...(sanitizedAssignment?.assignedPlate ? { assignedPlate: sanitizedAssignment.assignedPlate } : {}),
             ...(sanitizedAssignment?.date ? { date: sanitizedAssignment.date } : {}),
             ...(sanitizedAssignment?.dates ? { dates: sanitizedAssignment.dates } : {}),
+            ...(sanitizedAssignment?.daysNeeded ? { daysNeeded: sanitizedAssignment.daysNeeded } : {}),
             ...(sanitizedAssignment?.startTime ? { startTime: sanitizedAssignment.startTime } : {}),
             ...(sanitizedAssignment?.endTime ? { endTime: sanitizedAssignment.endTime } : {}),
             ...(paymentMeta || {}),
@@ -1127,6 +1186,9 @@ export async function updateBookingStatusAction(
         updateFields.dates = effectiveAssignment.dates;
         updateFields.date = effectiveAssignment.dates[0];
       }
+      if ("daysNeeded" in effectiveAssignment && effectiveAssignment.daysNeeded !== undefined) {
+        updateFields.daysNeeded = effectiveAssignment.daysNeeded;
+      }
       if ("startTime" in effectiveAssignment && effectiveAssignment.startTime) {
         updateFields.startTime = effectiveAssignment.startTime;
       }
@@ -1146,6 +1208,11 @@ export async function updateBookingStatusAction(
         if (paymentMeta.quoteNote !== undefined) updateFields.quoteNote = paymentMeta.quoteNote;
         if (paymentMeta.paymentMethod !== undefined) updateFields.paymentMethod = paymentMeta.paymentMethod;
         if (paymentMeta.paymentBankUsed !== undefined) updateFields.paymentBankUsed = paymentMeta.paymentBankUsed;
+        if (paymentMeta.advanceAmount !== undefined) updateFields.advanceAmount = paymentMeta.advanceAmount;
+        if (paymentMeta.pendingAmount !== undefined) updateFields.pendingAmount = paymentMeta.pendingAmount;
+        if (paymentMeta.finalPaymentMethod !== undefined) updateFields.finalPaymentMethod = paymentMeta.finalPaymentMethod;
+        if (paymentMeta.finalPaymentBankUsed !== undefined) updateFields.finalPaymentBankUsed = paymentMeta.finalPaymentBankUsed;
+        if (paymentMeta.finalPaymentAt !== undefined) updateFields.finalPaymentAt = paymentMeta.finalPaymentAt;
         if (paymentMeta.paymentSlipId !== undefined) updateFields.paymentSlipId = paymentMeta.paymentSlipId;
         if (paymentMeta.paymentSlipName !== undefined) updateFields.paymentSlipName = paymentMeta.paymentSlipName;
         if (paymentMeta.paymentSlipType !== undefined) updateFields.paymentSlipType = paymentMeta.paymentSlipType;

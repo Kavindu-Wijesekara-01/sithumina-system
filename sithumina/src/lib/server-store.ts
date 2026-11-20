@@ -90,7 +90,7 @@ export type PaymentSlipStatus =
   | "rejected"
   | "deleted";
 
-export type BookingPaymentMethod = "bank_slip" | "cash_manual";
+export type BookingPaymentMethod = "bank_slip" | "cash_manual" | "bank_transfer";
 
 export interface StoredBooking {
   id: string;
@@ -128,6 +128,11 @@ export interface StoredBooking {
   quoteNote?: string;
   paymentMethod?: BookingPaymentMethod;
   paymentBankUsed?: string;
+  advanceAmount?: number;
+  pendingAmount?: number;
+  finalPaymentMethod?: BookingPaymentMethod;
+  finalPaymentBankUsed?: string;
+  finalPaymentAt?: number;
   paymentSlipId?: string;
   paymentSlipName?: string;
   paymentSlipType?: string;
@@ -961,6 +966,11 @@ export function createBookingInStore(input: {
   quoteNote?: string;
   paymentMethod?: BookingPaymentMethod;
   paymentBankUsed?: string;
+  advanceAmount?: number;
+  pendingAmount?: number;
+  finalPaymentMethod?: BookingPaymentMethod;
+  finalPaymentBankUsed?: string;
+  finalPaymentAt?: number;
   paymentSlipId?: string;
   paymentSlipName?: string;
   paymentSlipType?: string;
@@ -1021,6 +1031,11 @@ export function createBookingInStore(input: {
     quoteNote: input.quoteNote?.trim(),
     paymentMethod: input.paymentMethod,
     paymentBankUsed: input.paymentBankUsed,
+    advanceAmount: input.advanceAmount,
+    pendingAmount: input.pendingAmount,
+    finalPaymentMethod: input.finalPaymentMethod,
+    finalPaymentBankUsed: input.finalPaymentBankUsed,
+    finalPaymentAt: input.finalPaymentAt,
     paymentSlipId: input.paymentSlipId,
     paymentSlipName: input.paymentSlipName,
     paymentSlipType: input.paymentSlipType,
@@ -1059,6 +1074,7 @@ export function updateBookingStatusInStore(
     assignedPlate?: string;
     date?: string;
     dates?: string[];
+    daysNeeded?: number | string;
     startTime?: string;
     endTime?: string;
     distanceKm?: number;
@@ -1070,6 +1086,11 @@ export function updateBookingStatusInStore(
     quoteNote?: string;
     paymentMethod?: BookingPaymentMethod;
     paymentBankUsed?: string;
+    advanceAmount?: number;
+    pendingAmount?: number;
+    finalPaymentMethod?: BookingPaymentMethod;
+    finalPaymentBankUsed?: string;
+    finalPaymentAt?: number;
     paymentSlipId?: string;
     paymentSlipName?: string;
     paymentSlipType?: string;
@@ -1121,6 +1142,9 @@ export function updateBookingStatusInStore(
       store.bookings[idx].dates = assignment.dates;
       store.bookings[idx].date = assignment.dates[0];
     }
+    if (assignment.daysNeeded !== undefined) {
+      store.bookings[idx].daysNeeded = assignment.daysNeeded;
+    }
     if (assignment.startTime !== undefined && assignment.startTime.trim() !== "") {
       store.bookings[idx].startTime = assignment.startTime.trim();
     }
@@ -1141,6 +1165,11 @@ export function updateBookingStatusInStore(
     if (paymentMeta.quoteNote !== undefined) store.bookings[idx].quoteNote = paymentMeta.quoteNote;
     if (paymentMeta.paymentMethod !== undefined) store.bookings[idx].paymentMethod = paymentMeta.paymentMethod;
     if (paymentMeta.paymentBankUsed !== undefined) store.bookings[idx].paymentBankUsed = paymentMeta.paymentBankUsed;
+    if (paymentMeta.advanceAmount !== undefined) store.bookings[idx].advanceAmount = paymentMeta.advanceAmount;
+    if (paymentMeta.pendingAmount !== undefined) store.bookings[idx].pendingAmount = paymentMeta.pendingAmount;
+    if (paymentMeta.finalPaymentMethod !== undefined) store.bookings[idx].finalPaymentMethod = paymentMeta.finalPaymentMethod;
+    if (paymentMeta.finalPaymentBankUsed !== undefined) store.bookings[idx].finalPaymentBankUsed = paymentMeta.finalPaymentBankUsed;
+    if (paymentMeta.finalPaymentAt !== undefined) store.bookings[idx].finalPaymentAt = paymentMeta.finalPaymentAt;
     if (paymentMeta.paymentSlipId !== undefined) store.bookings[idx].paymentSlipId = paymentMeta.paymentSlipId;
     if (paymentMeta.paymentSlipName !== undefined) store.bookings[idx].paymentSlipName = paymentMeta.paymentSlipName;
     if (paymentMeta.paymentSlipType !== undefined) store.bookings[idx].paymentSlipType = paymentMeta.paymentSlipType;
