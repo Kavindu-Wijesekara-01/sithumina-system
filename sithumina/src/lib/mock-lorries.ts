@@ -37,6 +37,8 @@ export interface Lorry {
   updatedAt?: number;
   isOnline?: boolean;
   isLive?: boolean;
+  isOutsideLorry?: boolean;
+  ownershipType?: "company" | "outside";
 }
 
 // Real dynamic fleet only - all dummy/mock data removed

@@ -8,43 +8,41 @@ export default function ManageRedirectPage() {
   const router = useRouter();
 
   useEffect(() => {
-    // Graceful automatic redirect to Home / Customer Portal
+    // Graceful automatic redirect to Driver & Employee Portal
     const timer = setTimeout(() => {
-      router.replace("/");
-    }, 2500);
+      router.replace("/login?tab=employee");
+    }, 1500);
     return () => clearTimeout(timer);
   }, [router]);
 
   return (
     <main className="min-h-[60vh] flex items-center justify-center p-6 text-center">
       <div className="max-w-md p-8 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-lg flex flex-col items-center gap-4">
-        <div className="w-16 h-16 rounded-2xl bg-[var(--y3)] border border-[var(--y2)] flex items-center justify-center text-[#5B4300]">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
-            <line x1="12" y1="18" x2="12.01" y2="18" />
-          </svg>
+        <div className="w-16 h-16 rounded-2xl bg-[#26231B] text-[#FFC20E] flex items-center justify-center text-2xl shadow-xs">
+          🚚
         </div>
 
         <h1 className="text-xl font-black text-[var(--ink)]">
-          Mobile App Admin & Driver Hub
+          Sithumina Driver App &amp; Hub
         </h1>
 
         <p className="text-xs text-[var(--mut)] leading-relaxed">
-          The web platform is strictly reserved for customer bookings and live tracking. All Fleet Management, Driver telemetry, and Administrative operations are securely hosted inside the official <b>Sithumina Driver & Admin Mobile App</b>.
+          Welcome to the official Sithumina Driver Portal. Access your assigned bookings, share live GPS locations, customize journey route waypoints, and track live kilometers.
         </p>
 
         <div className="pt-2 flex flex-col gap-2.5 w-full">
           <Link
-            href="/"
-            className="w-full py-2.5 rounded-xl bg-[var(--y)] text-[#26231B] text-xs font-black no-underline hover:opacity-90 transition-all"
+            href="/login?tab=employee"
+            className="w-full py-2.5 rounded-xl bg-[#26231B] text-[#FFC20E] text-xs font-black no-underline hover:opacity-90 transition-all flex items-center justify-center gap-1.5 shadow-sm"
           >
-            ← Return to Live Tracking Map
+            <span>📱</span>
+            <span>Open Driver App &amp; Portal (Login) →</span>
           </Link>
           <Link
-            href="/login"
-            className="w-full py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-xs font-bold text-[var(--ink)] no-underline hover:bg-[var(--y3)] transition-all"
+            href="/"
+            className="w-full py-2 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-xs font-bold text-[var(--ink)] no-underline hover:bg-[var(--y3)] transition-all"
           >
-            Open Customer Portal
+            ← Return to Home
           </Link>
         </div>
       </div>

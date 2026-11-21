@@ -86,7 +86,8 @@ export type BookingStatusValue =
   | "in_transit"
   | "delivered"
   | "cancelled"
-  | "booked";
+  | "booked"
+  | "completed";
 
 export type PaymentSlipStatus =
   | "none"
@@ -106,6 +107,15 @@ export interface StoredBooking {
   customerWhatsapp?: string;
   customerIdNumber?: string;
   distanceKm?: number;
+  actualDistanceKm?: number;
+  waypoints?: Array<{ name: string; lat: number; lng: number }>;
+  rideStartedAt?: number;
+  rideEndedAt?: number;
+  driverTripStatus?: "pending_acceptance" | "accepted" | "declined" | "in_transit" | "completed" | "empty_return";
+  isEmptyReturnActive?: boolean;
+  emptyReturnDistanceKm?: number;
+  emptyReturnRoute?: string;
+  emptyReturnStartedAt?: number;
   pickupCity: string;
   deliveryCity: string;
   pickupLat?: number;
@@ -1200,6 +1210,20 @@ export function updateBookingStatusInStore(
     endTime?: string;
     distanceKm?: number;
     customerIdNumber?: string;
+    pickupCity?: string;
+    deliveryCity?: string;
+    cargoNature?: string;
+    cargoWeight?: string;
+    helpersCount?: string | number;
+    actualDistanceKm?: number;
+    waypoints?: Array<{ name: string; lat: number; lng: number }>;
+    rideStartedAt?: number;
+    rideEndedAt?: number;
+    driverTripStatus?: "pending_acceptance" | "accepted" | "declined" | "in_transit" | "completed" | "empty_return";
+    isEmptyReturnActive?: boolean;
+    emptyReturnDistanceKm?: number;
+    emptyReturnRoute?: string;
+    emptyReturnStartedAt?: number;
   },
   paymentMeta?: {
     quotedAmount?: number;
@@ -1278,6 +1302,48 @@ export function updateBookingStatusInStore(
     if (assignment.customerIdNumber !== undefined && assignment.customerIdNumber.trim() !== "") {
       store.bookings[idx].customerIdNumber = assignment.customerIdNumber.trim();
     }
+    if (assignment.pickupCity !== undefined && assignment.pickupCity.trim() !== "") {
+      store.bookings[idx].pickupCity = assignment.pickupCity.trim();
+    }
+    if (assignment.deliveryCity !== undefined && assignment.deliveryCity.trim() !== "") {
+      store.bookings[idx].deliveryCity = assignment.deliveryCity.trim();
+    }
+    if (assignment.cargoNature !== undefined) {
+      store.bookings[idx].cargoNature = assignment.cargoNature;
+    }
+    if (assignment.cargoWeight !== undefined) {
+      store.bookings[idx].cargoWeight = assignment.cargoWeight;
+    }
+    if (assignment.helpersCount !== undefined) {
+      store.bookings[idx].helpersCount = assignment.helpersCount;
+    }
+    if (assignment.actualDistanceKm !== undefined && !Number.isNaN(Number(assignment.actualDistanceKm))) {
+      store.bookings[idx].actualDistanceKm = Number(assignment.actualDistanceKm);
+    }
+    if (assignment.waypoints !== undefined) {
+      store.bookings[idx].waypoints = assignment.waypoints;
+    }
+    if (assignment.rideStartedAt !== undefined) {
+      store.bookings[idx].rideStartedAt = assignment.rideStartedAt;
+    }
+    if (assignment.rideEndedAt !== undefined) {
+      store.bookings[idx].rideEndedAt = assignment.rideEndedAt;
+    }
+    if (assignment.driverTripStatus !== undefined) {
+      store.bookings[idx].driverTripStatus = assignment.driverTripStatus;
+    }
+    if (assignment.isEmptyReturnActive !== undefined) {
+      store.bookings[idx].isEmptyReturnActive = assignment.isEmptyReturnActive;
+    }
+    if (assignment.emptyReturnDistanceKm !== undefined) {
+      store.bookings[idx].emptyReturnDistanceKm = assignment.emptyReturnDistanceKm;
+    }
+    if (assignment.emptyReturnRoute !== undefined) {
+      store.bookings[idx].emptyReturnRoute = assignment.emptyReturnRoute;
+    }
+    if (assignment.emptyReturnStartedAt !== undefined) {
+      store.bookings[idx].emptyReturnStartedAt = assignment.emptyReturnStartedAt;
+    }
 
     // For outside lorries, permanently lock driver assignment to the registered owner/driver
     const targetPlate = (store.bookings[idx].assignedPlate || "").trim().toUpperCase();
@@ -1334,6 +1400,43 @@ export function deleteBookingFromStore(id: string): boolean {
     return true;
   }
   return false;
+}
+
+export function updateBookingInStore(
+  id: string,
+  partial: Partial<StoredBooking>
+): StoredBooking | null {
+  const store = readStore();
+  const cleanId = (id || "").trim();
+  const idx = store.bookings.findIndex((b) => b.id === cleanId);
+  if (idx === -1) return null;
+
+  store.bookings[idx] = {
+    ...store.bookings[idx],
+    ...partial,
+    updatedAt: Date.now(),
+  };
+
+  // For outside lorries, permanently lock driver assignment to registered owner
+  const targetPlate = (store.bookings[idx].assignedPlate || "").trim().toUpperCase();
+  const matchedOutEmp = targetPlate
+    ? store.outsideEmployees.find((e) => e.plateNumber?.trim().toUpperCase() === targetPlate)
+    : null;
+  const matchedOutLorry = targetPlate
+    ? store.lorries.find((l) => (l.isOutsideLorry || l.ownershipType === "outside") && l.plate?.trim().toUpperCase() === targetPlate)
+    : null;
+  if (matchedOutEmp) {
+    store.bookings[idx].assignedDriverId = matchedOutEmp.driverId || matchedOutEmp.id;
+    store.bookings[idx].assignedDriverName = matchedOutEmp.name;
+    store.bookings[idx].assignedDriverPhone = matchedOutEmp.phone;
+  } else if (matchedOutLorry) {
+    store.bookings[idx].assignedDriverId = matchedOutLorry.driverId || "";
+    store.bookings[idx].assignedDriverName = matchedOutLorry.driverName || "";
+    store.bookings[idx].assignedDriverPhone = matchedOutLorry.driverPhone || "";
+  }
+
+  writeStore(store);
+  return store.bookings[idx];
 }
 
 /* ============================================================

@@ -110,6 +110,8 @@ async function fetchLorriesFromApi(type: "live" | "fleet" = "live"): Promise<Lor
       availableCapacityKg: l.availableCapacityKg || "",
       hasFreezer: !!l.hasFreezer,
       hasHelper: !!l.hasHelper,
+      isOutsideLorry: Boolean(l.isOutsideLorry || l.ownershipType === "outside"),
+      ownershipType: (l.ownershipType || (l.isOutsideLorry ? "outside" : "company")) as "company" | "outside",
     }));
   } catch {
     return [];
@@ -239,6 +241,8 @@ export function subscribeLorries(
       availableCapacityKg: data.availableWeight || data.availableCapacityKg || "",
       hasFreezer: !!(data.freezer ?? data.hasFreezer),
       hasHelper: !!(data.helper ?? data.hasHelper),
+      isOutsideLorry: Boolean(data.isOutsideLorry || data.ownershipType === "outside"),
+      ownershipType: (data.ownershipType || (data.isOutsideLorry ? "outside" : "company")) as "company" | "outside",
     };
   };
 
@@ -382,6 +386,8 @@ export function subscribeFleetVehicles(
             lng: Number.isFinite(Number(data.lng)) ? Number(data.lng) : 79.8612,
             status: (data.status as LorryStatus) || "empty",
             lastUpdated: data.lastUpdated || "Available",
+            isOutsideLorry: Boolean(data.isOutsideLorry || data.ownershipType === "outside"),
+            ownershipType: (data.ownershipType || (data.isOutsideLorry ? "outside" : "company")) as "company" | "outside",
           };
           const key = (item.plate || item.id).toUpperCase();
           if (!byPlate.has(key) || docSnap.id.startsWith("lorry-")) {

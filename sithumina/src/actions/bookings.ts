@@ -14,6 +14,9 @@ import {
   getStoredOutsideEmployeeByPlate,
   getAllStoredLorries,
   getAllStoredOutsideEmployees,
+  updateBookingInStore,
+  updateLorryGpsInStore,
+  updateLorryStatusInStore,
   StoredBooking,
   StoredComplaint,
   StoredLorry,
@@ -1437,6 +1440,424 @@ export async function updateBookingStatusAction(
       success: false,
       error: "Failed to update booking status.",
     };
+  }
+}
+
+/**
+ * Server Action to edit booking details (Date, Time, Distance KM, Locations, Quoted Amount, Rider, Vehicle, Cargo).
+ * For outside lorries, permanently enforces driver assignment to registered owner.
+ */
+export async function editBookingAction(
+  id: string,
+  updates: {
+    date?: string;
+    dates?: string[];
+    startTime?: string;
+    endTime?: string;
+    distanceKm?: number;
+    pickupCity?: string;
+    deliveryCity?: string;
+    quotedAmount?: number;
+    advanceAmount?: number;
+    pendingAmount?: number;
+    cargoNature?: string;
+    cargoWeight?: string;
+    helpersCount?: string | number;
+    assignedPlate?: string;
+    assignedLorryId?: string;
+    assignedDriverId?: string;
+    assignedDriverName?: string;
+    assignedDriverPhone?: string;
+  }
+): Promise<ActionResult<StoredBooking>> {
+  try {
+    const cleanId = (id || "").trim();
+    if (!cleanId) return { success: false, error: "Booking ID is required." };
+
+    // Resolve outside vehicle driver lock
+    const targetPlate = (updates.assignedPlate || "").trim().toUpperCase();
+    if (targetPlate) {
+      const outsideEmp = getStoredOutsideEmployeeByPlate(targetPlate);
+      if (outsideEmp) {
+        updates.assignedDriverId = outsideEmp.driverId || outsideEmp.id;
+        updates.assignedDriverName = outsideEmp.name;
+        updates.assignedDriverPhone = outsideEmp.phone;
+      } else {
+        const storeLorries = getAllStoredLorries();
+        const matchedL = storeLorries.find((l) => normalizePlate(l.plate) === normalizePlate(targetPlate));
+        if (matchedL && (matchedL.isOutsideLorry || matchedL.ownershipType === "outside")) {
+          updates.assignedDriverId = matchedL.driverId || "";
+          updates.assignedDriverName = matchedL.driverName || "";
+          updates.assignedDriverPhone = matchedL.driverPhone || "";
+        }
+      }
+    }
+
+    const updated = updateBookingInStore(cleanId, updates);
+
+    // Sync to Firestore
+    try {
+      await updateDoc(doc(db, "bookings", cleanId), {
+        ...updates,
+        updatedAt: Date.now(),
+      });
+    } catch (e) {
+      console.warn("Firestore editBookingAction updateDoc notice:", e);
+    }
+
+    try {
+      revalidatePath("/admin");
+      revalidatePath("/login");
+      revalidatePath("/manage");
+    } catch {}
+
+    return {
+      success: true,
+      data: updated || ({} as StoredBooking),
+    };
+  } catch (err: unknown) {
+    console.error("editBookingAction error:", err);
+    return { success: false, error: "Failed to edit booking details." };
+  }
+}
+
+/**
+ * Server Action: Start Ride manually.
+ * Transitions booking to in_transit and sets rideStartedAt.
+ */
+export async function startRideAction(bookingId: string): Promise<ActionResult<StoredBooking>> {
+  try {
+    const cleanId = (bookingId || "").trim();
+    if (!cleanId) return { success: false, error: "Booking ID required." };
+
+    const now = Date.now();
+    const updated = updateBookingInStore(cleanId, {
+      status: "in_transit",
+      rideStartedAt: now,
+      driverTripStatus: "in_transit",
+    });
+
+    const targetLorry = updated?.assignedLorryId || updated?.assignedPlate;
+    if (targetLorry) {
+      updateLorryStatusInStore(targetLorry, "on_trip");
+    }
+
+    try {
+      await updateDoc(doc(db, "bookings", cleanId), {
+        status: "in_transit",
+        rideStartedAt: now,
+        driverTripStatus: "in_transit",
+        updatedAt: now,
+      });
+    } catch (e) {
+      console.warn("Firestore startRideAction notice:", e);
+    }
+
+    try {
+      revalidatePath("/admin");
+      revalidatePath("/login");
+      revalidatePath("/manage");
+    } catch {}
+
+    return { success: true, data: updated || ({} as StoredBooking) };
+  } catch (err: unknown) {
+    console.error("startRideAction error:", err);
+    return { success: false, error: "Failed to start ride." };
+  }
+}
+
+/**
+ * Server Action: End / Close Ride manually.
+ * Auto-routes:
+ * - If payment pending -> status: delivered (moves to Pending Payment tab)
+ * - If payment complete -> status: completed (moves to Completed tab)
+ */
+export async function endRideAction(
+  bookingId: string
+): Promise<ActionResult<{ booking: StoredBooking; isPaymentPending: boolean }>> {
+  try {
+    const cleanId = (bookingId || "").trim();
+    if (!cleanId) return { success: false, error: "Booking ID required." };
+
+    const store = getAllStoredBookings();
+    const booking = store.find((b) => b.id === cleanId);
+    if (!booking) return { success: false, error: "Booking not found." };
+
+    const isPending =
+      (typeof booking.pendingAmount === "number" && booking.pendingAmount > 0) ||
+      booking.paymentSlipStatus === "cash_pending" ||
+      booking.paymentSlipStatus === "pending_review" ||
+      (booking.paymentMethod === "cash_manual" && (!booking.paymentApprovedAt || booking.paymentApprovedAt <= 0)) ||
+      (!booking.paymentApprovedAt && booking.paymentSlipStatus !== "approved" && (booking.paymentSlipStatus as string) !== "manual_approved");
+
+    const targetStatus: BookingStatusValue = isPending ? "delivered" : "completed";
+    const now = Date.now();
+
+    const updated = updateBookingInStore(cleanId, {
+      status: targetStatus,
+      rideEndedAt: now,
+      driverTripStatus: "completed",
+    });
+
+    try {
+      await updateDoc(doc(db, "bookings", cleanId), {
+        status: targetStatus,
+        rideEndedAt: now,
+        driverTripStatus: "completed",
+        updatedAt: now,
+      });
+    } catch (e) {
+      console.warn("Firestore endRideAction notice:", e);
+    }
+
+    try {
+      revalidatePath("/admin");
+      revalidatePath("/login");
+      revalidatePath("/manage");
+    } catch {}
+
+    return {
+      success: true,
+      data: {
+        booking: updated || booking,
+        isPaymentPending: isPending,
+      },
+    };
+  } catch (err: unknown) {
+    console.error("endRideAction error:", err);
+    return { success: false, error: "Failed to end ride." };
+  }
+}
+
+/**
+ * Server Action: Driver accepts or declines an assigned booking.
+ */
+export async function driverAcceptBookingAction(
+  bookingId: string,
+  accept: boolean
+): Promise<ActionResult<StoredBooking>> {
+  try {
+    const cleanId = (bookingId || "").trim();
+    const updated = updateBookingInStore(cleanId, {
+      driverTripStatus: accept ? "accepted" : "declined",
+    });
+    try {
+      await updateDoc(doc(db, "bookings", cleanId), {
+        driverTripStatus: accept ? "accepted" : "declined",
+        updatedAt: Date.now(),
+      });
+    } catch (e) {
+      console.warn("Firestore driverAcceptBookingAction notice:", e);
+    }
+    try {
+      revalidatePath("/admin");
+      revalidatePath("/login");
+      revalidatePath("/manage");
+    } catch {}
+    return { success: true, data: updated || ({} as StoredBooking) };
+  } catch (err: unknown) {
+    return { success: false, error: "Failed to update trip status." };
+  }
+}
+
+/**
+ * Server Action: Driver updates route waypoints (up to 3) and actual distance KM.
+ * Live-updates the booking record in server-store and Firestore.
+ */
+export async function driverUpdateTripRouteAction(
+  bookingId: string,
+  waypoints: Array<{ name: string; lat: number; lng: number }>,
+  actualDistanceKm: number
+): Promise<ActionResult<StoredBooking>> {
+  try {
+    const cleanId = (bookingId || "").trim();
+    const updated = updateBookingInStore(cleanId, {
+      waypoints,
+      actualDistanceKm: Number(actualDistanceKm),
+    });
+    try {
+      await updateDoc(doc(db, "bookings", cleanId), {
+        waypoints,
+        actualDistanceKm: Number(actualDistanceKm),
+        updatedAt: Date.now(),
+      });
+    } catch (e) {
+      console.warn("Firestore driverUpdateTripRouteAction notice:", e);
+    }
+    try {
+      revalidatePath("/admin");
+      revalidatePath("/login");
+      revalidatePath("/manage");
+    } catch {}
+    return { success: true, data: updated || ({} as StoredBooking) };
+  } catch (err: unknown) {
+    return { success: false, error: "Failed to update route waypoints." };
+  }
+}
+
+/**
+ * Server Action: Driver streams live GPS location.
+ * Automatically marks ride as in_transit and ongoing!
+ */
+export async function driverShareLiveGpsAction(
+  bookingId: string,
+  lorryId: string,
+  lat: number,
+  lng: number,
+  heading: number = 0,
+  speedKmH: number = 0
+): Promise<ActionResult<StoredBooking>> {
+  try {
+    const cleanId = (bookingId || "").trim();
+    const now = Date.now();
+
+    // 1. Update lorry live GPS
+    if (lorryId) {
+      updateLorryGpsInStore(lorryId, lat, lng, heading, speedKmH);
+    }
+
+    // 2. Automatically make ride Ongoing if not already ongoing
+    const store = getAllStoredBookings();
+    const current = store.find((b) => b.id === cleanId);
+    const needStart =
+      current &&
+      current.status !== "in_transit" &&
+      current.status !== "delivered" &&
+      current.status !== "completed";
+
+    const partialUpdates: Partial<StoredBooking> = {
+      pickupLat: lat,
+      pickupLng: lng,
+    };
+    if (needStart) {
+      partialUpdates.status = "in_transit";
+      partialUpdates.rideStartedAt = now;
+      partialUpdates.driverTripStatus = "in_transit";
+    }
+
+    const updated = updateBookingInStore(cleanId, partialUpdates);
+
+    // 3. Sync to Firestore
+    try {
+      const fsPayload: Record<string, any> = {
+        lat,
+        lng,
+        updatedAt: now,
+      };
+      if (needStart) {
+        fsPayload.status = "in_transit";
+        fsPayload.rideStartedAt = now;
+        fsPayload.driverTripStatus = "in_transit";
+      }
+      await updateDoc(doc(db, "bookings", cleanId), fsPayload);
+
+      // Also update lorry live record
+      if (lorryId) {
+        const rawLiveKey = (updated?.assignedPlate || lorryId)
+          .replace(/^lorry-/i, "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, "");
+        if (rawLiveKey) {
+          await setDoc(
+            doc(db, "lorries_live", rawLiveKey),
+            { lat, lng, heading, speedKmH, updatedAt: now },
+            { merge: true }
+          );
+        }
+      }
+    } catch (e) {
+      console.warn("Firestore driverShareLiveGpsAction notice:", e);
+    }
+
+    try {
+      revalidatePath("/admin");
+      revalidatePath("/login");
+      revalidatePath("/manage");
+    } catch {}
+
+    return { success: true, data: updated || ({} as StoredBooking) };
+  } catch (err: unknown) {
+    return { success: false, error: "Failed to stream live GPS location." };
+  }
+}
+
+/**
+ * Server Action: Driver toggles Empty Return mode after delivery.
+ * Sets lorry status to empty so it appears on /find-empty-lorry.
+ */
+export async function driverToggleEmptyReturnAction(
+  bookingId: string,
+  lorryId: string,
+  startEmptyReturn: boolean,
+  returnDistanceKm?: number,
+  returnRoute?: string
+): Promise<ActionResult<StoredBooking>> {
+  try {
+    const cleanId = (bookingId || "").trim();
+    const now = Date.now();
+
+    const updated = updateBookingInStore(cleanId, {
+      isEmptyReturnActive: startEmptyReturn,
+      emptyReturnDistanceKm: returnDistanceKm,
+      emptyReturnRoute: returnRoute,
+      emptyReturnStartedAt: startEmptyReturn ? now : undefined,
+    });
+
+    if (lorryId) {
+      updateLorryStatusInStore(lorryId, startEmptyReturn ? "empty" : "on_trip");
+    }
+
+    try {
+      await updateDoc(doc(db, "bookings", cleanId), {
+        isEmptyReturnActive: startEmptyReturn,
+        emptyReturnDistanceKm: returnDistanceKm,
+        emptyReturnRoute: returnRoute,
+        emptyReturnStartedAt: startEmptyReturn ? now : undefined,
+        updatedAt: now,
+      });
+    } catch (e) {
+      console.warn("Firestore driverToggleEmptyReturnAction notice:", e);
+    }
+
+    try {
+      revalidatePath("/admin");
+      revalidatePath("/login");
+      revalidatePath("/manage");
+      revalidatePath("/find-empty-lorry");
+    } catch {}
+
+    return { success: true, data: updated || ({} as StoredBooking) };
+  } catch (err: unknown) {
+    return { success: false, error: "Failed to toggle empty return mode." };
+  }
+}
+
+/**
+ * Server Action: Fetch bookings assigned to a driver by driverId, phone, or plate.
+ */
+export async function getDriverAssignedBookingsAction(
+  driverIdOrPlate: string
+): Promise<ActionResult<StoredBooking[]>> {
+  try {
+    const clean = (driverIdOrPlate || "").trim().toLowerCase();
+    const cleanPlateNorm = normalizePlate(clean);
+    if (!clean) return { success: true, data: [] };
+
+    const store = getAllStoredBookings();
+    const matched = store.filter((b) => {
+      const bDriverId = (b.assignedDriverId || "").trim().toLowerCase();
+      const bPlateNorm = normalizePlate(b.assignedPlate || b.selectedVehiclePlate);
+      return (
+        bDriverId === clean ||
+        (cleanPlateNorm && bPlateNorm === cleanPlateNorm) ||
+        (clean.length >= 9 && phonesMatch(b.assignedDriverPhone, clean))
+      );
+    });
+
+    matched.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    return { success: true, data: matched };
+  } catch (err: unknown) {
+    return { success: false, error: "Failed to fetch driver bookings." };
   }
 }
 
