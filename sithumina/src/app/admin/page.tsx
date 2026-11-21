@@ -69,6 +69,13 @@ import {
   getCustomersAction,
   registerCustomerAction,
   deleteCustomerAction,
+  getAllOutsideEmployeesAction,
+  getAllTopupSlipsAction,
+  approveTopupSlipAction,
+  deleteTopupSlipAction,
+  OutsideEmployeeRecord,
+  TopupSlipRecord,
+  CommissionTransactionRecord,
 } from "@/actions";
 import { SRI_LANKA_CITIES } from "@/lib/sri-lanka-routes";
 import { getDistanceFromLatLonInKm } from "@/lib/geo-utils";
@@ -84,6 +91,8 @@ type NavSection =
   | "complaints"
   | "revenue"
   | "vehicle_registrations"
+  | "outside_employees"
+  | "topup_slips"
   | "contact_submissions"
   | "fleet"
   | "riders"
@@ -480,6 +489,20 @@ export default function MasterAdminDashboard() {
   const [regSearch, setRegSearch] = useState("");
   const [regActionId, setRegActionId] = useState<string | null>(null);
 
+  // ---- Outside Employees State ----
+  const [outsideEmployees, setOutsideEmployees] = useState<OutsideEmployeeRecord[]>([]);
+  const [loadingOutsideEmployees, setLoadingOutsideEmployees] = useState(true);
+  const [outsideSearch, setOutsideSearch] = useState("");
+  const [outsideFilter, setOutsideFilter] = useState<"all" | "available" | "unavailable" | "low_balance">("all");
+
+  // ---- Top-up Slips State ----
+  const [topupSlips, setTopupSlips] = useState<TopupSlipRecord[]>([]);
+  const [loadingTopupSlips, setLoadingTopupSlips] = useState(true);
+  const [topupSearch, setTopupSearch] = useState("");
+  const [topupStatusFilter, setTopupStatusFilter] = useState<"all" | "pending" | "approved" | "rejected">("all");
+  const [topupActionId, setTopupActionId] = useState<string | null>(null);
+  const [viewingSlipImage, setViewingSlipImage] = useState<string | null>(null);
+
   // ---- Contact Inquiries State ----
   const [inquiries, setInquiries] = useState<(StoredInquiry & { type?: string })[]>([]);
   const [loadingInquiries, setLoadingInquiries] = useState(true);
@@ -760,12 +783,16 @@ export default function MasterAdminDashboard() {
     setFleetVehicles([]);
     setDrivers([]);
     setRegistrations([]);
+    setOutsideEmployees([]);
+    setTopupSlips([]);
     setInquiries([]);
     setRegisteredUsers([]);
     setLoadingBookings(true);
     setLoadingFleet(true);
     setLoadingDrivers(true);
     setLoadingRegistrations(true);
+    setLoadingOutsideEmployees(true);
+    setLoadingTopupSlips(true);
     setLoadingInquiries(true);
     setLoadingUsers(true);
     try {
@@ -782,11 +809,15 @@ export default function MasterAdminDashboard() {
       setFleetVehicles([]);
       setDrivers([]);
       setRegistrations([]);
+      setOutsideEmployees([]);
+      setTopupSlips([]);
       setInquiries([]);
       setRegisteredUsers([]);
       setLoadingFleet(true);
       setLoadingDrivers(true);
       setLoadingRegistrations(true);
+      setLoadingOutsideEmployees(true);
+      setLoadingTopupSlips(true);
       setLoadingInquiries(true);
       setLoadingUsers(true);
       return;
@@ -860,11 +891,17 @@ export default function MasterAdminDashboard() {
             id: d.id,
             ownerName: String(data.ownerName || ""),
             phone: String(data.phone || ""),
+            idNumber: data.idNumber ? String(data.idNumber) : undefined,
             plateNumber: String(data.plateNumber || data.vehicleNumber || ""),
             vehicleNumber: String(data.vehicleNumber || data.plateNumber || ""),
             vehicleType: String(data.vehicleType || "Lorry"),
             baseCity: String(data.baseCity || ""),
             capacity: String(data.capacity || ""),
+            maxWeight: data.maxWeight ? String(data.maxWeight) : undefined,
+            dimensions: data.dimensions ? String(data.dimensions) : undefined,
+            images: Array.isArray(data.images) ? data.images : (data.imageUrl ? [data.imageUrl] : []),
+            depositSlipUrl: data.depositSlipUrl ? String(data.depositSlipUrl) : undefined,
+            initialDepositAmount: Number(data.initialDepositAmount) || 5000,
             province: String(data.province || ""),
             status: (data.status as "pending" | "approved" | "rejected") || "pending",
             createdAt: Number(data.createdAt) || Date.now(),
@@ -954,12 +991,56 @@ export default function MasterAdminDashboard() {
       }
     );
 
+    const unsubOutsideEmployees = onSnapshot(
+      collection(db, "outside_employees"),
+      (snap) => {
+        const list: OutsideEmployeeRecord[] = [];
+        snap.forEach((d) => {
+          list.push(d.data() as OutsideEmployeeRecord);
+        });
+        list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        setOutsideEmployees(list);
+        setLoadingOutsideEmployees(false);
+      },
+      async (err) => {
+        console.warn("Firestore outside_employees subscription notice:", err);
+        const res = await getAllOutsideEmployeesAction();
+        if (res.success && res.data) {
+          setOutsideEmployees(res.data);
+        }
+        setLoadingOutsideEmployees(false);
+      }
+    );
+
+    const unsubTopupSlips = onSnapshot(
+      collection(db, "outside_topup_slips"),
+      (snap) => {
+        const list: TopupSlipRecord[] = [];
+        snap.forEach((d) => {
+          list.push(d.data() as TopupSlipRecord);
+        });
+        list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        setTopupSlips(list);
+        setLoadingTopupSlips(false);
+      },
+      async (err) => {
+        console.warn("Firestore outside_topup_slips subscription notice:", err);
+        const res = await getAllTopupSlipsAction();
+        if (res.success && res.data) {
+          setTopupSlips(res.data);
+        }
+        setLoadingTopupSlips(false);
+      }
+    );
+
     return () => {
       unsubFleet();
       unsubDrivers();
       unsubBankAccounts();
       unsubSlipsMeta();
       unsubRegistrations();
+      unsubOutsideEmployees();
+      unsubTopupSlips();
       unsubInquiries();
       unsubComplaints();
       unsubUsers();
@@ -2759,6 +2840,45 @@ export default function MasterAdminDashboard() {
     }
   };
 
+  // ---- Top-up Slip Handlers ----
+  const handleApproveTopupSlip = async (slip: TopupSlipRecord) => {
+    setTopupActionId(slip.id);
+    try {
+      const res = await approveTopupSlipAction(slip.id);
+      if (res.success) {
+        showToast(`Top-up approved! Rs. ${Number(slip.amount || 0).toLocaleString()} credited to partner wallet.`, "success");
+        const slipsRes = await getAllTopupSlipsAction();
+        if (slipsRes.success && slipsRes.data) setTopupSlips(slipsRes.data);
+        const empRes = await getAllOutsideEmployeesAction();
+        if (empRes.success && empRes.data) setOutsideEmployees(empRes.data);
+      } else {
+        showToast(res.error || "Failed to approve slip.", "error");
+      }
+    } catch {
+      showToast("An error occurred while approving top-up slip.", "error");
+    } finally {
+      setTopupActionId(null);
+    }
+  };
+
+  const handleDeleteTopupSlip = async (slipId: string) => {
+    if (!confirm("Are you sure you want to permanently delete this top-up slip?")) return;
+    setTopupActionId(slipId);
+    try {
+      const res = await deleteTopupSlipAction(slipId);
+      if (res.success) {
+        showToast("Top-up slip deleted.", "success");
+        setTopupSlips((prev) => prev.filter((s) => s.id !== slipId));
+      } else {
+        showToast(res.error || "Failed to delete slip.", "error");
+      }
+    } catch {
+      showToast("An error occurred while deleting slip.", "error");
+    } finally {
+      setTopupActionId(null);
+    }
+  };
+
   // ---- Contact Inquiry Handlers ----
   const handleUpdateInquiryStatus = async (
     id: string,
@@ -3414,6 +3534,7 @@ export default function MasterAdminDashboard() {
       return (
         (r.ownerName && r.ownerName.toLowerCase().includes(q)) ||
         (r.phone && r.phone.toLowerCase().includes(q)) ||
+        (r.idNumber && r.idNumber.toLowerCase().includes(q)) ||
         plate.includes(q) ||
         (r.baseCity && r.baseCity.toLowerCase().includes(q)) ||
         (r.vehicleType && r.vehicleType.toLowerCase().includes(q)) ||
@@ -3421,6 +3542,65 @@ export default function MasterAdminDashboard() {
       );
     });
   }, [registrations, regFilter, regSearch]);
+
+  // ---- Outside Employees Memos & Filtering ----
+  const availableOutsideCount = useMemo(
+    () => outsideEmployees.filter((e) => e.isAvailable).length,
+    [outsideEmployees]
+  );
+  const lowBalanceOutsideCount = useMemo(
+    () => outsideEmployees.filter((e) => (e.balance || 0) < 2000).length,
+    [outsideEmployees]
+  );
+  const totalOutsideCommissionEarned = useMemo(
+    () => outsideEmployees.reduce((sum, e) => sum + (e.totalCommissionDeducted || 0), 0),
+    [outsideEmployees]
+  );
+
+  const filteredOutsideEmployees = useMemo(() => {
+    return outsideEmployees.filter((emp) => {
+      if (outsideFilter === "available" && !emp.isAvailable) return false;
+      if (outsideFilter === "unavailable" && emp.isAvailable) return false;
+      if (outsideFilter === "low_balance" && (emp.balance || 0) >= 2000) return false;
+
+      if (!outsideSearch.trim()) return true;
+      const q = outsideSearch.toLowerCase();
+      return (
+        (emp.name && emp.name.toLowerCase().includes(q)) ||
+        (emp.phone && emp.phone.toLowerCase().includes(q)) ||
+        (emp.idNumber && emp.idNumber.toLowerCase().includes(q)) ||
+        (emp.plateNumber && emp.plateNumber.toLowerCase().includes(q)) ||
+        (emp.baseCity && emp.baseCity.toLowerCase().includes(q)) ||
+        (emp.id && emp.id.toLowerCase().includes(q))
+      );
+    });
+  }, [outsideEmployees, outsideFilter, outsideSearch]);
+
+  // ---- Top-up Slips Memos & Filtering ----
+  const pendingTopupSlipsCount = useMemo(
+    () => topupSlips.filter((s) => s.status === "pending").length,
+    [topupSlips]
+  );
+  const approvedTopupSlipsCount = useMemo(
+    () => topupSlips.filter((s) => s.status === "approved").length,
+    [topupSlips]
+  );
+
+  const filteredTopupSlips = useMemo(() => {
+    return topupSlips.filter((s) => {
+      if (topupStatusFilter !== "all" && s.status !== topupStatusFilter) return false;
+      if (!topupSearch.trim()) return true;
+      const q = topupSearch.toLowerCase();
+      return (
+        (s.employeeName && s.employeeName.toLowerCase().includes(q)) ||
+        (s.phone && s.phone.toLowerCase().includes(q)) ||
+        (s.idNumber && s.idNumber.toLowerCase().includes(q)) ||
+        (s.plateNumber && s.plateNumber.toLowerCase().includes(q)) ||
+        (s.bankUsed && s.bankUsed.toLowerCase().includes(q)) ||
+        (s.employeeId && s.employeeId.toLowerCase().includes(q))
+      );
+    });
+  }, [topupSlips, topupStatusFilter, topupSearch]);
 
   // ---- Contact Inquiries Memos & Filtering ----
   const unreadInquiriesCount = useMemo(
@@ -5354,6 +5534,69 @@ export default function MasterAdminDashboard() {
               )}
             </button>
 
+            {/* Outside Employees / Partners */}
+            <button
+              onClick={() => {
+                setActiveNav("outside_employees");
+                setSidebarOpen(false);
+              }}
+              className={`w-full px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all text-left flex items-center justify-between cursor-pointer ${
+                activeNav === "outside_employees"
+                  ? "bg-[#FFC20E] text-[#26231B]"
+                  : "text-white/75 hover:bg-white/10 hover:text-white"
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                  <circle cx="9" cy="7" r="4" />
+                  <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                </svg>
+                <span>Outside Employees</span>
+              </div>
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                activeNav === "outside_employees" ? "bg-[#26231B] text-white" : "bg-white/15 text-white/80"
+              }`}>
+                {loadingOutsideEmployees ? "..." : outsideEmployees.length}
+              </span>
+            </button>
+
+            {/* Top-up Slips */}
+            <button
+              onClick={() => {
+                setActiveNav("topup_slips");
+                setSidebarOpen(false);
+              }}
+              className={`w-full px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all text-left flex items-center justify-between cursor-pointer ${
+                activeNav === "topup_slips"
+                  ? "bg-[#FFC20E] text-[#26231B]"
+                  : "text-white/75 hover:bg-white/10 hover:text-white"
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="4" width="20" height="16" rx="2" />
+                  <line x1="12" y1="8" x2="12" y2="16" />
+                  <line x1="8" y1="12" x2="16" y2="12" />
+                </svg>
+                <span>Top-up Slips</span>
+              </div>
+              {!loadingTopupSlips && pendingTopupSlipsCount > 0 ? (
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold ${
+                  activeNav === "topup_slips" ? "bg-[#26231B] text-[#FFC20E]" : "bg-amber-400 text-[#26231B]"
+                }`}>
+                  {pendingTopupSlipsCount}
+                </span>
+              ) : (
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                  activeNav === "topup_slips" ? "bg-[#26231B] text-white" : "bg-white/15 text-white/80"
+                }`}>
+                  {loadingTopupSlips ? "..." : topupSlips.length}
+                </span>
+              )}
+            </button>
+
             {/* Contact Inquiries */}
             <button
               onClick={() => {
@@ -5521,6 +5764,8 @@ export default function MasterAdminDashboard() {
                 {activeNav === "complaints" && "Complaints & Deletions"}
                 {activeNav === "revenue" && "Revenue"}
                 {activeNav === "vehicle_registrations" && "Vehicle & Partner Registrations"}
+                {activeNav === "outside_employees" && "Outside Employees & Fleet Partners"}
+                {activeNav === "topup_slips" && "Employee Top-up Bank Slips"}
                 {activeNav === "contact_submissions" && "Contact Inquiries & Support"}
                 {activeNav === "fleet" && "Fleet Lorries Management"}
                 {activeNav === "riders" && "Riders Registry"}
@@ -5541,6 +5786,10 @@ export default function MasterAdminDashboard() {
                   ? "Individual & Live Lorry · Resets daily at 12:00 AM"
                   : activeNav === "vehicle_registrations"
                   ? "Incoming lorry partner applications from /register-vehicle"
+                  : activeNav === "outside_employees"
+                  ? "Outside partner tracking, wallet balance & 20% commission monitoring"
+                  : activeNav === "topup_slips"
+                  ? "Top-up bank transfer slips uploaded by outside drivers for balance recharge"
                   : activeNav === "contact_submissions"
                   ? "Direct customer inquiries & rate quotes from /contact"
                   : "Head Office Dispatch Operations"}
@@ -9782,10 +10031,88 @@ export default function MasterAdminDashboard() {
                             </div>
 
                             <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">National ID (NIC)</span>
+                              <span className="text-xs font-mono font-bold text-[#26231B] mt-0.5 block">
+                                {reg.idNumber || "—"}
+                              </span>
+                            </div>
+
+                            <div>
                               <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Location / Base</span>
                               <span className="text-xs font-bold text-[#26231B] mt-0.5 block">
                                 {reg.baseCity ? `${reg.baseCity}, ` : ""}{reg.province || "Western Province"}
                               </span>
+                            </div>
+
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Max Load / Payload</span>
+                              <span className="text-xs font-bold text-[#26231B] mt-0.5 block">
+                                {reg.maxWeight || "—"}{reg.capacity ? ` (${reg.capacity})` : ""}
+                              </span>
+                            </div>
+
+                            {reg.dimensions && (
+                              <div className="sm:col-span-2">
+                                <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Cargo Dimensions (L × W × H)</span>
+                                <span className="text-xs font-semibold text-[#26231B] mt-0.5 block">
+                                  {reg.dimensions}
+                                </span>
+                              </div>
+                            )}
+
+                            {/* 3 Vehicle Photos */}
+                            {Array.isArray(reg.images) && reg.images.length > 0 && (
+                              <div className="sm:col-span-2 pt-2 border-t border-[#E7E2D0]/60">
+                                <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block mb-1.5">
+                                  Vehicle Photos ({reg.images.length})
+                                </span>
+                                <div className="grid grid-cols-3 gap-2">
+                                  {reg.images.slice(0, 3).map((img, idx) => (
+                                    <button
+                                      key={idx}
+                                      type="button"
+                                      onClick={() => setViewingSlipImage(img)}
+                                      className="relative aspect-[16/10] rounded-xl overflow-hidden border border-[#E7E2D0] hover:border-[#FFC20E] transition-all cursor-pointer group/img"
+                                    >
+                                      <img src={img} alt={`Vehicle ${idx + 1}`} className="w-full h-full object-cover group-hover/img:scale-105 transition-transform" />
+                                      <span className="absolute bottom-1 right-1 bg-black/75 text-white text-[9px] font-bold px-1.5 py-0.2 rounded">
+                                        Photo {idx + 1}
+                                      </span>
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Rs. 5,000 Security Deposit Slip */}
+                            <div className="sm:col-span-2 pt-2 border-t border-[#E7E2D0]/60">
+                              {reg.depositSlipUrl ? (
+                                <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-base">💵</span>
+                                    <div>
+                                      <span className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider block">
+                                        Rs. 5,000 Security Deposit Slip
+                                      </span>
+                                      <span className="text-xs font-black text-emerald-950">
+                                        Bank Transfer Receipt Uploaded
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => setViewingSlipImage(reg.depositSlipUrl || null)}
+                                    className="px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition-colors cursor-pointer shadow-xs"
+                                  >
+                                    Inspect Slip
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="p-2 rounded-xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800 flex items-center gap-1.5">
+                                  <span>⚠️</span>
+                                  <span>No security deposit slip uploaded</span>
+                                </div>
+                              )}
                             </div>
 
                             <div className="sm:col-span-2 flex items-center justify-between text-[11px] text-[#6F6A5A] pt-1 border-t border-[#E7E2D0]/60">
@@ -9858,6 +10185,522 @@ export default function MasterAdminDashboard() {
                             onClick={() => handleDeleteRegistration(reg.id, plate)}
                             className="p-2 rounded-xl text-rose-600 hover:bg-rose-50 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
                             title="Delete Application"
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="3 6 5 6 21 6" />
+                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+
+          {/* ========================================================= */}
+          {/* TAB: OUTSIDE EMPLOYEES & FLEET PARTNERS                   */}
+          {/* ========================================================= */}
+          {activeNav === "outside_employees" && (
+            <div className="flex flex-col gap-5">
+              {/* Summary Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+                <div className="p-4 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A]">Total Partners</span>
+                  <div className="text-2xl font-black text-[#26231B] mt-1">{outsideEmployees.length}</div>
+                  <span className="text-[10px] text-[#6F6A5A] mt-0.5">Approved Outside Lorries</span>
+                </div>
+
+                <div className="p-4 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-800">Available on Duty</span>
+                  <div className="text-2xl font-black text-emerald-700 mt-1">{availableOutsideCount}</div>
+                  <span className="text-[10px] text-emerald-800 mt-0.5">Ready for Bookings</span>
+                </div>
+
+                <div className="p-4 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-amber-800">Low Balance Warning</span>
+                  <div className="text-2xl font-black text-amber-700 mt-1">{lowBalanceOutsideCount}</div>
+                  <span className="text-[10px] text-amber-800 mt-0.5">&lt; Rs. 2,000 in Wallet</span>
+                </div>
+
+                <div className="p-4 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#5B4300]">Total 20% Commission</span>
+                  <div className="text-xl sm:text-2xl font-black text-[#5B4300] mt-1 font-mono">
+                    Rs. {totalOutsideCommissionEarned.toLocaleString()}
+                  </div>
+                  <span className="text-[10px] text-[#5B4300] mt-0.5">Earned from Outside Hires</span>
+                </div>
+              </div>
+
+              {/* Filter & Search Bar */}
+              <div className="p-4 sm:p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col gap-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-base font-black text-[#26231B]">Outside Lorry Fleet Partners</h2>
+                    <p className="text-xs text-[#6F6A5A] mt-0.5">
+                      Independent lorry owners operating on the 20% commission model with Rs. 5,000 security deposit.
+                    </p>
+                  </div>
+
+                  {/* Filter Pills */}
+                  <div className="flex flex-wrap items-center gap-1.5 p-1 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0]">
+                    <button
+                      type="button"
+                      onClick={() => setOutsideFilter("all")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        outsideFilter === "all" ? "bg-[#26231B] text-[#FFC20E] shadow-xs" : "text-[#6F6A5A] hover:text-[#26231B]"
+                      }`}
+                    >
+                      All ({outsideEmployees.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOutsideFilter("available")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        outsideFilter === "available" ? "bg-emerald-600 text-white shadow-xs" : "text-[#6F6A5A] hover:text-emerald-700"
+                      }`}
+                    >
+                      Available ({availableOutsideCount})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOutsideFilter("unavailable")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        outsideFilter === "unavailable" ? "bg-neutral-700 text-white shadow-xs" : "text-[#6F6A5A] hover:text-[#26231B]"
+                      }`}
+                    >
+                      Unavailable ({outsideEmployees.length - availableOutsideCount})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOutsideFilter("low_balance")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        outsideFilter === "low_balance" ? "bg-amber-500 text-[#26231B] shadow-xs" : "text-[#6F6A5A] hover:text-amber-800"
+                      }`}
+                    >
+                      Low Balance ({lowBalanceOutsideCount})
+                    </button>
+                  </div>
+                </div>
+
+                {/* Search Bar */}
+                <div className="pt-3 border-t border-[#E7E2D0] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="relative flex-1">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#6F6A5A] pointer-events-none">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="11" cy="11" r="8" />
+                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                      </svg>
+                    </span>
+                    <input
+                      type="text"
+                      placeholder="Search by partner ID (ST-OUT-...), owner name, NIC, phone, plate, base city..."
+                      value={outsideSearch}
+                      onChange={(e) => setOutsideSearch(e.target.value)}
+                      className="w-full pl-9 pr-9 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B] placeholder:text-[#8A836E]"
+                    />
+                    {outsideSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setOutsideSearch("")}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 w-6 h-6 rounded-lg bg-[#E7E2D0]/70 text-[#26231B] flex items-center justify-center text-xs font-black cursor-pointer hover:bg-[#FFC20E]"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                  <span className="px-2.5 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-[11px] font-bold text-[#6F6A5A] shrink-0">
+                    Showing <b className="text-[#26231B]">{filteredOutsideEmployees.length}</b> of <b className="text-[#26231B]">{outsideEmployees.length}</b>
+                  </span>
+                </div>
+              </div>
+
+              {/* Partners Grid */}
+              {loadingOutsideEmployees ? (
+                <div className="p-12 rounded-3xl bg-white border border-[#E7E2D0] text-center">
+                  <div className="inline-block w-8 h-8 border-3 border-[#FFC20E] border-t-transparent rounded-full animate-spin mb-3" />
+                  <p className="text-xs font-bold text-[#6F6A5A]">Syncing outside partners...</p>
+                </div>
+              ) : filteredOutsideEmployees.length === 0 ? (
+                <div className="p-12 rounded-3xl bg-white border border-[#E7E2D0] text-center flex flex-col items-center justify-center">
+                  <h3 className="text-sm font-black text-[#26231B]">No Outside Partners Found</h3>
+                  <p className="text-xs text-[#6F6A5A] mt-1 max-w-sm">
+                    {outsideSearch.trim() || outsideFilter !== "all"
+                      ? "No outside employees match your current filter or search criteria."
+                      : "Approved outside lorries from /register-vehicle will automatically appear here as registered partners."}
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {filteredOutsideEmployees.map((emp) => {
+                    const isLowBalance = (emp.balance || 0) < 2000;
+                    return (
+                      <div
+                        key={emp.id}
+                        className="p-5 sm:p-6 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs hover:border-[#FFC20E] transition-all flex flex-col justify-between gap-4"
+                      >
+                        <div>
+                          {/* Top Badges */}
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E7E2D0]/60 pb-3">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="px-3 py-1 rounded-xl bg-[#26231B] text-[#FFC20E] font-black font-mono text-xs tracking-wider shadow-xs">
+                                {emp.id}
+                              </span>
+                              <span className="px-2.5 py-0.5 rounded-lg bg-amber-50 border border-amber-200 text-xs font-mono font-bold text-amber-900">
+                                {emp.plateNumber}
+                              </span>
+                              <span className="px-2.5 py-0.5 rounded-lg bg-[#F7F5EE] border border-[#E7E2D0] text-[11px] font-bold text-[#26231B]">
+                                {emp.vehicleType}
+                              </span>
+                            </div>
+
+                            {/* Duty Status Badge */}
+                            <div>
+                              {emp.isAvailable ? (
+                                <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 text-[11px] font-black flex items-center gap-1.5">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse" />
+                                  Available
+                                </span>
+                              ) : (
+                                <span className="px-2.5 py-1 rounded-full bg-neutral-100 text-neutral-700 border border-neutral-300 text-[11px] font-bold flex items-center gap-1.5">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-neutral-500" />
+                                  Unavailable
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Owner Details */}
+                          <div className="mt-3.5">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A]">Partner / Vehicle Owner</span>
+                            <h3 className="text-base font-black text-[#26231B]">{emp.name}</h3>
+                          </div>
+
+                          {/* Info Grid */}
+                          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2.5 p-3 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0]">
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Phone Number</span>
+                              <div className="flex items-center gap-2 mt-0.5">
+                                <span className="text-xs font-mono font-bold text-[#26231B]">{emp.phone}</span>
+                                <a
+                                  href={`tel:${emp.phone}`}
+                                  className="px-2 py-0.5 rounded-lg bg-white border border-[#E7E2D0] hover:bg-[#FFC20E] text-[10px] font-bold text-[#26231B]"
+                                >
+                                  📞 Call
+                                </a>
+                              </div>
+                            </div>
+
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">National ID (NIC)</span>
+                              <span className="text-xs font-mono font-bold text-[#26231B] mt-0.5 block">
+                                {emp.idNumber || "—"}
+                              </span>
+                            </div>
+
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Base Location</span>
+                              <span className="text-xs font-bold text-[#26231B] mt-0.5 block">
+                                📍 {emp.baseCity || "Registered Base"}
+                              </span>
+                            </div>
+
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Hires Completed</span>
+                              <span className="text-xs font-mono font-bold text-[#26231B] mt-0.5 block">
+                                {emp.totalHiresCompleted || 0} Hires
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Wallet Balance & Commission Section */}
+                          <div className={`mt-3 p-3.5 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                            isLowBalance
+                              ? "bg-rose-50/70 border-rose-200"
+                              : "bg-emerald-50/70 border-emerald-200"
+                          }`}>
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">
+                                Security Deposit / Wallet Balance
+                              </span>
+                              <div className="flex items-baseline gap-2 mt-0.5">
+                                <span className={`text-lg font-black font-mono ${
+                                  isLowBalance ? "text-rose-700" : "text-emerald-700"
+                                }`}>
+                                  Rs. {Number(emp.balance || 0).toLocaleString()}
+                                </span>
+                                {isLowBalance ? (
+                                  <span className="text-[10px] font-bold text-rose-700 bg-rose-100 px-2 py-0.2 rounded-full border border-rose-300">
+                                    ⚠️ Low Balance (&lt; Rs. 2,000)
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-2 py-0.2 rounded-full border border-emerald-300">
+                                    ✅ Ready for Hires
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="sm:text-right">
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">
+                                20% Commission Deducted
+                              </span>
+                              <span className="text-xs font-mono font-bold text-[#5B4300] mt-0.5 block">
+                                Rs. {Number(emp.totalCommissionDeducted || 0).toLocaleString()}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Footer */}
+                        <div className="pt-2 border-t border-[#E7E2D0] flex items-center justify-between text-[11px] text-[#6F6A5A]">
+                          <span>Partner Since: {formatInquiryDate(emp.createdAt)}</span>
+                          <span className="font-mono text-[10px]">ID: {emp.id}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB: TOP-UP BANK SLIPS                                     */}
+          {/* ========================================================= */}
+          {activeNav === "topup_slips" && (
+            <div className="flex flex-col gap-5">
+              {/* Summary Bar */}
+              <div className="p-4 sm:p-5 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col gap-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-base font-black text-[#26231B] flex items-center gap-2">
+                      <span>Employee Top-up Bank Slips</span>
+                      <span className="px-2 py-0.5 rounded-full bg-[#F7F5EE] border border-[#E7E2D0] text-[11px] font-mono text-[#6F6A5A]">
+                        {topupSlips.length} Total
+                      </span>
+                    </h2>
+                    <p className="text-xs text-[#6F6A5A] mt-0.5">
+                      Review and approve bank deposit slips uploaded by outside lorry drivers to recharge their balance.
+                    </p>
+                  </div>
+
+                  {/* Filter Pills */}
+                  <div className="flex flex-wrap items-center gap-1.5 p-1 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0]">
+                    <button
+                      type="button"
+                      onClick={() => setTopupStatusFilter("all")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        topupStatusFilter === "all" ? "bg-[#26231B] text-[#FFC20E] shadow-xs" : "text-[#6F6A5A] hover:text-[#26231B]"
+                      }`}
+                    >
+                      All ({topupSlips.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTopupStatusFilter("pending")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                        topupStatusFilter === "pending" ? "bg-amber-400 text-[#26231B] shadow-xs" : "text-[#6F6A5A] hover:text-amber-800"
+                      }`}
+                    >
+                      <span>Pending</span>
+                      {pendingTopupSlipsCount > 0 && (
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono font-black bg-[#26231B] text-[#FFC20E]">
+                          {pendingTopupSlipsCount}
+                        </span>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTopupStatusFilter("approved")}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        topupStatusFilter === "approved" ? "bg-emerald-600 text-white shadow-xs" : "text-[#6F6A5A] hover:text-emerald-700"
+                      }`}
+                    >
+                      Approved ({approvedTopupSlipsCount})
+                    </button>
+                  </div>
+                </div>
+
+                {/* Search Bar */}
+                <div className="pt-3 border-t border-[#E7E2D0] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="relative flex-1">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#6F6A5A] pointer-events-none">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="11" cy="11" r="8" />
+                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                      </svg>
+                    </span>
+                    <input
+                      type="text"
+                      placeholder="Search by driver name, phone, plate, NIC, bank..."
+                      value={topupSearch}
+                      onChange={(e) => setTopupSearch(e.target.value)}
+                      className="w-full pl-9 pr-9 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B] placeholder:text-[#8A836E]"
+                    />
+                    {topupSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setTopupSearch("")}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 w-6 h-6 rounded-lg bg-[#E7E2D0]/70 text-[#26231B] flex items-center justify-center text-xs font-black cursor-pointer hover:bg-[#FFC20E]"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                  <span className="px-2.5 py-1.5 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-[11px] font-bold text-[#6F6A5A] shrink-0">
+                    Showing <b className="text-[#26231B]">{filteredTopupSlips.length}</b> of <b className="text-[#26231B]">{topupSlips.length}</b>
+                  </span>
+                </div>
+              </div>
+
+              {/* Slips Grid */}
+              {loadingTopupSlips ? (
+                <div className="p-12 rounded-3xl bg-white border border-[#E7E2D0] text-center">
+                  <div className="inline-block w-8 h-8 border-3 border-[#FFC20E] border-t-transparent rounded-full animate-spin mb-3" />
+                  <p className="text-xs font-bold text-[#6F6A5A]">Syncing top-up slips...</p>
+                </div>
+              ) : filteredTopupSlips.length === 0 ? (
+                <div className="p-12 rounded-3xl bg-white border border-[#E7E2D0] text-center flex flex-col items-center justify-center">
+                  <h3 className="text-sm font-black text-[#26231B]">No Top-Up Slips Found</h3>
+                  <p className="text-xs text-[#6F6A5A] mt-1 max-w-sm">
+                    {topupSearch.trim() || topupStatusFilter !== "all"
+                      ? "No slips match your search criteria."
+                      : "When outside drivers submit bank slips for wallet recharge via Employee Login, they will appear here for verification."}
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {filteredTopupSlips.map((slip) => {
+                    const isActing = topupActionId === slip.id;
+                    return (
+                      <div
+                        key={slip.id}
+                        className="p-5 sm:p-6 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs hover:border-[#FFC20E] transition-all flex flex-col justify-between gap-4"
+                      >
+                        <div>
+                          {/* Header: Amount & Status */}
+                          <div className="flex items-center justify-between gap-2 border-b border-[#E7E2D0]/60 pb-3">
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Top-up Amount</span>
+                              <span className="text-xl font-black font-mono text-[#26231B]">
+                                Rs. {Number(slip.amount || 0).toLocaleString()}
+                              </span>
+                            </div>
+
+                            <div>
+                              {slip.status === "pending" && (
+                                <span className="px-2.5 py-1 rounded-full bg-amber-100 text-amber-900 border border-amber-300 text-[11px] font-bold flex items-center gap-1.5">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-amber-600 animate-pulse" />
+                                  Pending Review
+                                </span>
+                              )}
+                              {slip.status === "approved" && (
+                                <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 text-[11px] font-black flex items-center gap-1.5">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
+                                  Approved &amp; Credited
+                                </span>
+                              )}
+                              {slip.status === "rejected" && (
+                                <span className="px-2.5 py-1 rounded-full bg-rose-100 text-rose-800 border border-rose-300 text-[11px] font-black flex items-center gap-1.5">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-rose-600" />
+                                  Rejected
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Driver & Lorry Info */}
+                          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2.5 p-3 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0]">
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Driver / Partner</span>
+                              <span className="text-xs font-bold text-[#26231B] mt-0.5 block">{slip.employeeName}</span>
+                            </div>
+
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Partner ID / Plate</span>
+                              <span className="text-xs font-mono font-bold text-[#26231B] mt-0.5 block">
+                                {slip.employeeId} · {slip.plateNumber}
+                              </span>
+                            </div>
+
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Phone Number</span>
+                              <span className="text-xs font-mono font-bold text-[#26231B] mt-0.5 block">{slip.phone}</span>
+                            </div>
+
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">Bank Account Used</span>
+                              <span className="text-xs font-semibold text-[#26231B] mt-0.5 block">{slip.bankUsed || "Bank Transfer"}</span>
+                            </div>
+                          </div>
+
+                          {/* Slip Image Thumbnail */}
+                          {slip.slipUrl && (
+                            <div className="mt-3 p-3 rounded-2xl bg-[#F7F5EE] border border-[#E7E2D0] flex items-center justify-between gap-3">
+                              <div className="flex items-center gap-3">
+                                <div
+                                  onClick={() => setViewingSlipImage(slip.slipUrl)}
+                                  className="w-14 h-14 rounded-xl overflow-hidden border border-[#E7E2D0] bg-white cursor-pointer hover:border-[#FFC20E] shrink-0"
+                                >
+                                  <img src={slip.slipUrl} alt="Bank Slip" className="w-full h-full object-cover" />
+                                </div>
+                                <div>
+                                  <span className="text-xs font-bold text-[#26231B] block">Bank Receipt Document</span>
+                                  <span className="text-[10px] text-[#6F6A5A]">Click thumbnail or button to inspect</span>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setViewingSlipImage(slip.slipUrl)}
+                                className="px-3 py-1.5 rounded-xl bg-white border border-[#E7E2D0] hover:bg-[#FFC20E] text-[#26231B] text-xs font-bold transition-colors cursor-pointer shrink-0 shadow-xs"
+                              >
+                                🔍 Inspect Slip
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Action Buttons */}
+                        <div className="pt-3 border-t border-[#E7E2D0] flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            {slip.status === "pending" && (
+                              <button
+                                type="button"
+                                disabled={isActing}
+                                onClick={() => handleApproveTopupSlip(slip)}
+                                className="px-4 py-2 rounded-xl bg-[#FFC20E] hover:bg-[#e6ad00] text-[#26231B] text-xs font-black transition-colors cursor-pointer shadow-xs disabled:opacity-50 flex items-center gap-1.5"
+                              >
+                                {isActing ? (
+                                  <span>Crediting...</span>
+                                ) : (
+                                  <>
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                      <polyline points="20 6 9 17 4 12" />
+                                    </svg>
+                                    <span>Approve &amp; Credit Rs. {Number(slip.amount || 0).toLocaleString()}</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
+
+                            {slip.status === "approved" && (
+                              <span className="text-xs font-bold text-emerald-700 flex items-center gap-1.5">
+                                <span>✅</span>
+                                <span>Credited on {slip.reviewedAt ? formatInquiryDate(slip.reviewedAt) : "Approved"}</span>
+                              </span>
+                            )}
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled={isActing}
+                            onClick={() => handleDeleteTopupSlip(slip.id)}
+                            className="p-2 rounded-xl text-rose-600 hover:bg-rose-50 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                            title="Delete Top-up Slip"
                           >
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                               <polyline points="3 6 5 6 21 6" />
@@ -11215,9 +12058,85 @@ export default function MasterAdminDashboard() {
                   </div>
                 )}
 
+                {/* Assigned Vehicle Plate */}
                 <div>
-                  <label className="block text-xs font-bold text-[#26231B] mb-1">Select Rider *</label>
+                  <label className="block text-xs font-bold text-[#26231B] mb-1">Assigned Vehicle Plate *</label>
                   <select
+                    value={assignModal.plate}
+                    onChange={(e) => {
+                      const selPlate = e.target.value;
+                      const matchedV = fleetVehicles.find((v) => v.plate === selPlate);
+                      const isOut = Boolean(
+                        matchedV &&
+                        ((matchedV as any).isOutsideLorry || (matchedV as any).ownershipType === "outside")
+                      );
+                      setAssignModal((p) =>
+                        p
+                          ? {
+                              ...p,
+                              plate: selPlate,
+                              lorryId: matchedV?.id || `lorry-${normalizePlate(selPlate).toLowerCase()}`,
+                              ...(isOut && matchedV?.driverName
+                                ? {
+                                    driverName: matchedV.driverName,
+                                    driverPhone: matchedV.driverPhone || p.driverPhone,
+                                    driverId: (matchedV as any).ownerIdNumber || "OUTSIDE-OWNER",
+                                  }
+                                : {}),
+                            }
+                          : null
+                      );
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
+                  >
+                    <option value="">Select Lorry</option>
+                    {fleetVehicles.map((v) => {
+                      const isOut = (v as any).isOutsideLorry || (v as any).ownershipType === "outside";
+                      return (
+                        <option key={v.id || v.plate} value={v.plate}>
+                          {v.plate} — {v.vehicleType} {isOut ? "(🤝 Outside Partner)" : "(🏢 Company)"}
+                        </option>
+                      );
+                    })}
+                    {assignModal.plate && !fleetVehicles.some((v) => v.plate === assignModal.plate) && (
+                      <option value={assignModal.plate}>{assignModal.plate}</option>
+                    )}
+                  </select>
+                </div>
+
+                {/* Outside Partner Driver Lock Banner */}
+                {Boolean(
+                  assignModal.plate &&
+                  fleetVehicles.some(
+                    (v) =>
+                      v.plate === assignModal.plate &&
+                      ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
+                  )
+                ) && (
+                  <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-950 flex items-start gap-2">
+                    <span className="text-base">🔒</span>
+                    <div>
+                      <strong className="block font-bold">Outside Partner Vehicle (පිටත ලියාපදිංචි ලොරියක්)</strong>
+                      <span>
+                        Driver is permanently locked to registered owner: <b>{assignModal.driverName}</b> ({assignModal.driverPhone}). A company rider cannot be assigned.
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold text-[#26231B] mb-1">
+                    Select Rider {Boolean(assignModal.plate && fleetVehicles.some((v) => v.plate === assignModal.plate && ((v as any).isOutsideLorry || (v as any).ownershipType === "outside"))) ? "(Locked to Owner)" : "*"}
+                  </label>
+                  <select
+                    disabled={Boolean(
+                      assignModal.plate &&
+                      fleetVehicles.some(
+                        (v) =>
+                          v.plate === assignModal.plate &&
+                          ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
+                      )
+                    )}
                     value={assignModal.driverName}
                     onChange={(e) => {
                       const drv = drivers.find((d) => d.name === e.target.value);
@@ -11237,7 +12156,7 @@ export default function MasterAdminDashboard() {
                         };
                       });
                     }}
-                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
+                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] disabled:opacity-60 disabled:cursor-not-allowed"
                   >
                     <option value="">Select Rider</option>
                     {drivers.map((d) => (
@@ -11252,41 +12171,18 @@ export default function MasterAdminDashboard() {
                   </label>
                   <input
                     type="tel"
+                    disabled={Boolean(
+                      assignModal.plate &&
+                      fleetVehicles.some(
+                        (v) =>
+                          v.plate === assignModal.plate &&
+                          ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
+                      )
+                    )}
                     value={assignModal.driverPhone}
                     onChange={(e) => setAssignModal((p) => (p ? { ...p, driverPhone: e.target.value } : null))}
-                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
+                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B] disabled:opacity-60 disabled:cursor-not-allowed"
                   />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-[#26231B] mb-1">Assigned Vehicle Plate *</label>
-                  <select
-                    value={assignModal.plate}
-                    onChange={(e) => {
-                      const selPlate = e.target.value;
-                      const matchedV = fleetVehicles.find((v) => v.plate === selPlate);
-                      setAssignModal((p) =>
-                        p
-                          ? {
-                              ...p,
-                              plate: selPlate,
-                              lorryId: matchedV?.id || `lorry-${normalizePlate(selPlate).toLowerCase()}`,
-                            }
-                          : null
-                      );
-                    }}
-                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
-                  >
-                    <option value="">Select Lorry</option>
-                    {fleetVehicles.map((v) => (
-                      <option key={v.id || v.plate} value={v.plate}>
-                        {v.plate} — {v.vehicleType}
-                      </option>
-                    ))}
-                    {assignModal.plate && !fleetVehicles.some((v) => v.plate === assignModal.plate) && (
-                      <option value={assignModal.plate}>{assignModal.plate}</option>
-                    )}
-                  </select>
                 </div>
 
                 {modalConflict?.hasConflict && (
@@ -12247,6 +13143,37 @@ export default function MasterAdminDashboard() {
               >
                 {deletingBookingLoading ? "Deleting..." : "Confirm & Delete Booking"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* FULL-SIZE SLIP IMAGE INSPECTION MODAL */}
+      {viewingSlipImage && (
+        <div
+          className="fixed inset-0 z-[999999] bg-black/85 flex items-center justify-center p-4 backdrop-blur-xs"
+          onClick={() => setViewingSlipImage(null)}
+        >
+          <div
+            className="relative max-w-3xl max-h-[90vh] bg-white rounded-3xl overflow-hidden shadow-2xl flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-4 bg-[#26231B] text-white">
+              <span className="text-xs font-bold font-mono">Bank Deposit Slip Document</span>
+              <button
+                type="button"
+                onClick={() => setViewingSlipImage(null)}
+                className="w-7 h-7 rounded-full bg-white/20 hover:bg-white/30 text-white flex items-center justify-center text-xs font-black cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-4 overflow-auto flex items-center justify-center bg-[#F7F5EE] max-h-[80vh]">
+              <img
+                src={viewingSlipImage}
+                alt="Bank Slip"
+                className="max-h-[75vh] w-auto object-contain rounded-xl shadow-md border border-[#E7E2D0]"
+              />
             </div>
           </div>
         </div>

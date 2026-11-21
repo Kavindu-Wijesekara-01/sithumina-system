@@ -60,6 +60,61 @@ export interface VehicleRegistrationActionInput {
   driverCount?: string;
   capacity?: string;
   province?: string;
+  idNumber?: string;
+  maxWeight?: string;
+  dimensions?: string;
+  images?: string[];
+  depositSlipUrl?: string;
+  initialDepositAmount?: number;
+}
+
+export interface OutsideEmployeeRecord {
+  id: string;
+  registrationId: string;
+  name: string;
+  phone: string;
+  idNumber: string;
+  plateNumber: string;
+  vehicleType: string;
+  baseCity: string;
+  balance: number;
+  isAvailable: boolean;
+  status: "active" | "inactive" | "suspended";
+  totalCommissionDeducted: number;
+  totalHiresCompleted: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CommissionTransactionRecord {
+  id: string;
+  employeeId: string;
+  idNumber: string;
+  bookingId?: string;
+  type: "initial_deposit" | "topup" | "commission_deduction" | "adjustment";
+  hireAmount?: number;
+  commissionRate?: number;
+  amount: number;
+  balanceBefore: number;
+  balanceAfter: number;
+  slipUrl?: string;
+  note?: string;
+  createdAt: number;
+}
+
+export interface TopupSlipRecord {
+  id: string;
+  employeeId: string;
+  idNumber: string;
+  employeeName: string;
+  phone: string;
+  plateNumber: string;
+  amount: number;
+  bankUsed?: string;
+  slipUrl: string;
+  status: "pending" | "approved" | "rejected";
+  reviewedAt?: number;
+  createdAt: number;
 }
 
 export interface InquiryActionInput {

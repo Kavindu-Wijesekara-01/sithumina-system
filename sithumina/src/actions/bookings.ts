@@ -9,6 +9,9 @@ import {
   deleteBookingFromStore,
   getAllStoredComplaints,
   recordComplaintInStore,
+  checkOutsideLorryBookingEligibility,
+  deductCommissionForBookingInStore,
+  getStoredOutsideEmployeeByPlate,
   StoredBooking,
   StoredComplaint,
   BookingStatusValue,
@@ -529,6 +532,18 @@ export async function createBookingAction(
       }
     }
 
+    const effectivePlateInput = (input.assignedPlate || "").trim().toUpperCase();
+    const outsideOwnerForCreate = effectivePlateInput ? getStoredOutsideEmployeeByPlate(effectivePlateInput) : null;
+    let finalAssignedDriverId = resolvedInputDriverId;
+    let finalAssignedDriverName = resolvedInputDriverName;
+    let finalAssignedDriverPhone = resolvedInputDriverPhone;
+
+    if (outsideOwnerForCreate) {
+      finalAssignedDriverId = outsideOwnerForCreate.id;
+      finalAssignedDriverName = outsideOwnerForCreate.name;
+      finalAssignedDriverPhone = outsideOwnerForCreate.phone;
+    }
+
     // 2. Atomic store creation in server memory + file persistence
     const booking = createBookingInStore({
       customerName,
@@ -549,9 +564,9 @@ export async function createBookingAction(
       packageDetails,
       assignedPlate: input.assignedPlate?.trim(),
       assignedLorryId: input.assignedLorryId?.trim(),
-      assignedDriverId: resolvedInputDriverId || undefined,
-      assignedDriverName: resolvedInputDriverName || undefined,
-      assignedDriverPhone: resolvedInputDriverPhone || undefined,
+      assignedDriverId: finalAssignedDriverId || undefined,
+      assignedDriverName: finalAssignedDriverName || undefined,
+      assignedDriverPhone: finalAssignedDriverPhone || undefined,
       bookingType,
       cargoNature: input.cargoNature?.trim(),
       daysNeeded: resolvedDaysNeeded,
@@ -1145,6 +1160,73 @@ export async function updateBookingStatusAction(
             : {}),
         }
       : sanitizedAssignment || {};
+
+    // Outside Lorry handling: if vehicle is an outside lorry, enforce registered owner as driver
+    const effectivePlate = (
+      effectiveAssignment.assignedPlate ||
+      sanitizedAssignment?.assignedPlate ||
+      updatedLocal?.assignedPlate ||
+      ""
+    ).trim().toUpperCase();
+    const outsideOwner = effectivePlate ? getStoredOutsideEmployeeByPlate(effectivePlate) : null;
+    if (outsideOwner) {
+      effectiveAssignment.assignedDriverId = outsideOwner.id;
+      effectiveAssignment.assignedDriverName = outsideOwner.name;
+      effectiveAssignment.assignedDriverPhone = outsideOwner.phone;
+      effectiveAssignment.assignedPlate = outsideOwner.plateNumber;
+    }
+
+    // Outside Lorry 20% commission check & deduction on booking confirmation
+    const isConfirmedStatus =
+      ["accepted", "assigned", "booked"].includes(status) ||
+      Boolean(paymentMeta?.paymentApprovedAt) ||
+      paymentMeta?.paymentSlipStatus === "approved" ||
+      paymentMeta?.paymentSlipStatus === "manual_approved";
+
+    if (isConfirmedStatus && effectivePlate && outsideOwner) {
+      const hireAmount = Number(
+        paymentMeta?.quotedAmount ??
+        updatedLocal?.quotedAmount ??
+        0
+      );
+      if (hireAmount > 0) {
+        const commissionCheck = checkOutsideLorryBookingEligibility(effectivePlate, hireAmount);
+        if (commissionCheck.isOutside && !commissionCheck.allowed) {
+          return {
+            success: false,
+            error: commissionCheck.reason || "Outside vehicle owner has insufficient balance for 20% commission. Top-up required.",
+          };
+        }
+        // Deduct 20% commission
+        const deductResult = deductCommissionForBookingInStore(id, hireAmount, effectivePlate);
+        if (deductResult.success && deductResult.isOutside && deductResult.deductedAmount) {
+          try {
+            const txId = `TX-${Date.now()}-${id}`;
+            await setDoc(doc(db, "commission_transactions", txId), {
+              id: txId,
+              employeeId: outsideOwner.id,
+              idNumber: outsideOwner.idNumber,
+              bookingId: id,
+              type: "commission_deduction",
+              hireAmount,
+              commissionRate: 20,
+              amount: -deductResult.deductedAmount,
+              balanceAfter: deductResult.newBalance,
+              note: `20% Commission for Booking ${id} (Hire: LKR ${hireAmount.toLocaleString()})`,
+              createdAt: Date.now(),
+            });
+            await updateDoc(doc(db, "outside_employees", outsideOwner.id), {
+              balance: deductResult.newBalance,
+              totalCommissionDeducted: (outsideOwner.totalCommissionDeducted || 0) + deductResult.deductedAmount,
+              totalHiresCompleted: (outsideOwner.totalHiresCompleted || 0) + 1,
+              updatedAt: Date.now(),
+            });
+          } catch (e) {
+            console.warn("Firestore commission deduction sync notice:", e);
+          }
+        }
+      }
+    }
 
     if (updatedLocal && (Object.keys(effectiveAssignment).length > 0 || paymentMeta)) {
       updatedLocal =

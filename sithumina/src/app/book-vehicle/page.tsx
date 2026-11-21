@@ -12,7 +12,27 @@ import {
   trackBookingAction,
 } from "@/actions";
 import { normalizePhoneNumber } from "@/lib/phone-utils";
-import { findNearestSriLankanCity } from "@/lib/geo-utils";
+import { findNearestSriLankanCity, getDistanceFromLatLonInKm } from "@/lib/geo-utils";
+import { SRI_LANKA_CITIES } from "@/lib/sri-lanka-routes";
+
+function resolveCityCoords(cityName?: string): [number, number] | null {
+  if (!cityName) return null;
+  const clean = cityName.toLowerCase().trim().replace(/[^a-z]/g, "");
+  if (!clean) return null;
+  if (SRI_LANKA_CITIES[clean]) return SRI_LANKA_CITIES[clean];
+  const keys = Object.keys(SRI_LANKA_CITIES);
+  const match = keys.find((k) => clean.includes(k) || k.includes(clean));
+  if (match) return SRI_LANKA_CITIES[match];
+  return null;
+}
+
+function getLorryBaseCity(lorry: Lorry): string {
+  const isOutside = (lorry as any).isOutsideLorry || (lorry as any).ownershipType === "outside";
+  if (isOutside) {
+    return (lorry as any).baseCity || (lorry as any).baseLocation || lorry.route || "Registered Base";
+  }
+  return "Kiribathgoda";
+}
 
 type ViewState = "fleet" | "detail" | "booking-form" | "booking-success" | "track";
 
@@ -40,6 +60,7 @@ function getVehicleImages(lorry: Lorry): string[] {
 interface FleetVehicleCardProps {
   lorry: Lorry;
   locale: string;
+  distanceKm?: number | null;
   onSelect: (lorry: Lorry) => void;
   onBook: (lorry: Lorry) => void;
 }
@@ -47,6 +68,7 @@ interface FleetVehicleCardProps {
 function FleetVehicleCard({
   lorry,
   locale,
+  distanceKm,
   onSelect,
   onBook,
 }: FleetVehicleCardProps) {
@@ -55,6 +77,10 @@ function FleetVehicleCard({
 
   const currentIdx = images.length > 0 ? activeIdx % images.length : 0;
   const currentImg = images[currentIdx] || PLACEHOLDER_VEHICLE_IMAGE;
+
+  const isOutside = (lorry as any).isOutsideLorry || (lorry as any).ownershipType === "outside";
+  const baseCity = getLorryBaseCity(lorry);
+  const isAvailable = (lorry as any).isAvailable !== false;
 
   const handlePrev = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -69,7 +95,11 @@ function FleetVehicleCard({
   };
 
   return (
-    <div className="rounded-2xl bg-[var(--card)] border border-[var(--line)] hover:border-[#FFC20E] transition-all shadow-xs flex flex-col justify-between overflow-hidden group">
+    <div
+      className={`rounded-2xl bg-[var(--card)] border transition-all shadow-xs flex flex-col justify-between overflow-hidden group ${
+        isAvailable ? "border-[var(--line)] hover:border-[#FFC20E]" : "border-neutral-300 opacity-80"
+      }`}
+    >
       <div className="flex flex-col">
         {/* Interactive Image Container with Direct On-Card Photo Switching (Zero outer padding) */}
         <div
@@ -90,10 +120,21 @@ function FleetVehicleCard({
             }}
           />
 
-          {/* Vehicle Plate Badge */}
-          <span className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-black/80 text-white font-mono text-[11px] font-black z-10 backdrop-blur-xs shadow-xs">
-            {lorry.plate}
-          </span>
+          {/* Vehicle Plate Badge & Fleet Ownership Tag */}
+          <div className="absolute top-2 left-2 flex items-center gap-1.5 z-10 flex-wrap">
+            <span className="px-2 py-0.5 rounded-md bg-black/85 text-white font-mono text-[11px] font-black backdrop-blur-xs shadow-xs">
+              {lorry.plate}
+            </span>
+            {isOutside ? (
+              <span className="px-1.5 py-0.5 rounded-md bg-amber-500 text-white font-black text-[9px] backdrop-blur-xs shadow-xs uppercase tracking-tight">
+                🤝 Outside Partner
+              </span>
+            ) : (
+              <span className="px-1.5 py-0.5 rounded-md bg-blue-600 text-white font-black text-[9px] backdrop-blur-xs shadow-xs uppercase tracking-tight">
+                🏢 Company Fleet
+              </span>
+            )}
+          </div>
 
           {/* Photo Counter Pill (e.g. 1/3 Photos) */}
           <div className="absolute top-2 right-2 px-2 py-0.5 rounded-md bg-black/80 text-white text-[10px] font-bold z-10 backdrop-blur-xs flex items-center gap-1 shadow-xs">
@@ -186,7 +227,7 @@ function FleetVehicleCard({
           )}
         </div>
 
-        <div className="p-3.5 pb-2 flex flex-col gap-1.5">
+        <div className="p-3.5 pb-2.5 flex flex-col gap-1.5">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm font-black text-[var(--ink)] truncate">
               {lorry.vehicleType || "Lorry Fleet"}
@@ -214,11 +255,41 @@ function FleetVehicleCard({
               </span>
             )}
           </div>
-          {lorry.driverName ? (
-            <p className="text-[11px] text-[var(--mut)]">
-              {locale === "en" ? "Driver: " : "රියදුරු: "}{lorry.driverName}
-            </p>
-          ) : null}
+
+          {/* Base Location & Distance */}
+          <div className="flex items-center justify-between gap-1 text-[11px] pt-1.5 border-t border-[var(--line)]">
+            <span className="text-[var(--mut)] flex items-center gap-1 truncate">
+              <span>📍</span>
+              <span className="font-normal">{locale === "en" ? "Base:" : "මූලස්ථානය:"}</span>
+              <strong className="text-[var(--ink)] font-bold">{baseCity}</strong>
+            </span>
+            {typeof distanceKm === "number" ? (
+              <span className="px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px] shrink-0">
+                ~{Math.round(distanceKm)} km
+              </span>
+            ) : null}
+          </div>
+
+          {/* Driver & Availability status */}
+          <div className="flex items-center justify-between text-[11px] pt-0.5">
+            {lorry.driverName ? (
+              <span className="text-[var(--mut)] text-[11px] truncate">
+                {locale === "en" ? "Driver: " : "රියදුරු: "}<strong className="text-[var(--ink)] font-semibold">{lorry.driverName}</strong>
+              </span>
+            ) : <span />}
+
+            {isAvailable ? (
+              <span className="inline-flex items-center gap-1 text-emerald-700 font-bold text-[10px] shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                {locale === "en" ? "Available" : "සේවයට සූදානම්"}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-rose-600 font-bold text-[10px] shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                {locale === "en" ? "Unavailable" : "දැනට සේවයේ නැත"}
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
@@ -230,13 +301,24 @@ function FleetVehicleCard({
         >
           {locale === "en" ? "Specs" : "විස්තර"}
         </button>
-        <button
-          type="button"
-          onClick={() => onBook(lorry)}
-          className="flex-1 py-2 rounded-xl bg-[var(--y)] text-[#26231B] text-xs font-black border-0 cursor-pointer hover:opacity-90 transition-all shadow-xs"
-        >
-          {locale === "en" ? "Book Vehicle" : "වෙන්කරන්න"}
-        </button>
+        {isAvailable ? (
+          <button
+            type="button"
+            onClick={() => onBook(lorry)}
+            className="flex-1 py-2 rounded-xl bg-[var(--y)] text-[#26231B] text-xs font-black border-0 cursor-pointer hover:opacity-90 transition-all shadow-xs"
+          >
+            {locale === "en" ? "Book Vehicle" : "වෙන්කරන්න"}
+          </button>
+        ) : (
+          <button
+            type="button"
+            disabled
+            className="flex-1 py-2 rounded-xl bg-neutral-200 text-neutral-500 text-xs font-bold border-0 cursor-not-allowed opacity-75"
+            title={locale === "en" ? "This lorry is currently set to unavailable by owner" : "මෙම ලොරිය දැනට සේවයේ නොමැත"}
+          >
+            {locale === "en" ? "Unavailable" : "සේවයේ නැත"}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -262,6 +344,59 @@ function BookVehicleContent() {
   const [isLocating, setIsLocating] = useState(false);
   const [gpsCoords, setGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [gpsError, setGpsError] = useState<string | null>(null);
+
+  // Location Proximity Search & Filter state
+  const [searchLocation, setSearchLocation] = useState("");
+  const [filterOwnership, setFilterOwnership] = useState<"all" | "company" | "outside">("all");
+
+  // Active coordinates derived from search city or live GPS
+  const activeSearchCoords = React.useMemo<[number, number] | null>(() => {
+    if (searchLocation.trim()) {
+      return resolveCityCoords(searchLocation);
+    }
+    if (gpsCoords) {
+      return [gpsCoords.lat, gpsCoords.lng];
+    }
+    return null;
+  }, [searchLocation, gpsCoords]);
+
+  // Proximity sorted and filtered fleet list
+  const filteredAndSortedFleet = React.useMemo(() => {
+    let list = fleet;
+
+    if (filterOwnership === "company") {
+      list = list.filter((l) => !(l as any).isOutsideLorry && (l as any).ownershipType !== "outside");
+    } else if (filterOwnership === "outside") {
+      list = list.filter((l) => (l as any).isOutsideLorry || (l as any).ownershipType === "outside");
+    }
+
+    const withDistance = list.map((lorry) => {
+      let dist: number | null = null;
+      if (activeSearchCoords) {
+        const base = getLorryBaseCity(lorry);
+        const lorryCoords = resolveCityCoords(base) || SRI_LANKA_CITIES["kiribathgoda"];
+        if (lorryCoords) {
+          dist = getDistanceFromLatLonInKm(
+            activeSearchCoords[0],
+            activeSearchCoords[1],
+            lorryCoords[0],
+            lorryCoords[1]
+          );
+        }
+      }
+      return { lorry, dist };
+    });
+
+    if (activeSearchCoords) {
+      withDistance.sort((a, b) => {
+        if (a.dist === null) return 1;
+        if (b.dist === null) return -1;
+        return a.dist - b.dist;
+      });
+    }
+
+    return withDistance;
+  }, [fleet, filterOwnership, activeSearchCoords]);
 
   // Booking form state
   const [submitting, setSubmitting] = useState(false);
@@ -412,6 +547,15 @@ function BookVehicleContent() {
         locale === "en"
           ? "Please select a vehicle to book."
           : "කරුණාකර වෙන්කරගැනීම සඳහා වාහනයක් තෝරන්න."
+      );
+      return;
+    }
+
+    if ((selectedVehicle as any).isAvailable === false) {
+      alert(
+        locale === "en"
+          ? "This vehicle is currently unavailable. Please choose another lorry."
+          : "මෙම වාහනය දැනට සේවයේ නොමැත. කරුණාකර වෙනත් වාහනයක් තෝරාගන්න."
       );
       return;
     }
@@ -619,9 +763,129 @@ function BookVehicleContent() {
       {/* VIEW 1: FLEET LIST VIEW */}
       {view === "fleet" && (
         <div className="flex flex-col gap-5">
+          {/* Location Proximity Search & Filters */}
+          <div className="p-4 sm:p-5 rounded-2xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-3.5">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+              {/* Search City Input */}
+              <div className="relative flex-1">
+                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--mut)] pointer-events-none">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="11" cy="11" r="8"/>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                  </svg>
+                </span>
+                <input
+                  type="text"
+                  placeholder={
+                    locale === "en"
+                      ? "Search city to find nearest lorries (e.g. Kiribathgoda, Colombo, Kandy, Negombo)..."
+                      : "ළඟම ඇති ලොරි සෙවීමට ඔබ සිටින නගරය ඇතුළත් කරන්න (උදා: කිරිබත්ගොඩ, කොළඹ, මහනුවර)..."
+                  }
+                  value={searchLocation}
+                  onChange={(e) => setSearchLocation(e.target.value)}
+                  className="w-full pl-9 pr-9 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-xs font-semibold text-[var(--ink)] placeholder:text-[var(--mut)] focus:outline-none focus:border-[#FFC20E] transition-colors"
+                />
+                {searchLocation && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchLocation("")}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 w-6 h-6 rounded-lg bg-[var(--line)]/50 text-[var(--ink)] text-xs font-black flex items-center justify-center cursor-pointer hover:bg-[#FFC20E]"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              {/* Live GPS Locate Me Button */}
+              <button
+                type="button"
+                onClick={handleCaptureLiveLocation}
+                disabled={isLocating}
+                className="px-3.5 py-2.5 rounded-xl bg-[var(--bg)] hover:bg-[var(--y3)] border border-[var(--line)] text-xs font-bold text-[var(--ink)] flex items-center justify-center gap-1.5 transition-colors cursor-pointer shrink-0 disabled:opacity-50"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="3 11 22 2 13 21 11 13 3 11"/>
+                </svg>
+                <span>
+                  {isLocating
+                    ? (locale === "en" ? "Locating..." : "ස්ථානය සොයමින්...")
+                    : (locale === "en" ? "Use My Location (GPS)" : "මගේ ස්ථානය (GPS)")}
+                </span>
+              </button>
+            </div>
+
+            {/* Quick City Filter Chips */}
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              <span className="text-[10px] font-bold text-[var(--mut)] uppercase tracking-wider mr-1">
+                {locale === "en" ? "Quick Cities:" : "නගර:"}
+              </span>
+              {["Kiribathgoda", "Colombo", "Gampaha", "Kandy", "Negombo", "Kurunegala", "Galle", "Kalutara"].map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => setSearchLocation(c)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                    searchLocation.toLowerCase() === c.toLowerCase()
+                      ? "bg-[#FFC20E] text-[#26231B] shadow-xs"
+                      : "bg-[var(--bg)] text-[var(--ink)] border border-[var(--line)] hover:border-[#FFC20E]"
+                  }`}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+
+            {/* Fleet Ownership Filter & Active Location Notice */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--line)]">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setFilterOwnership("all")}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    filterOwnership === "all"
+                      ? "bg-[#26231B] text-[#FFC20E]"
+                      : "bg-[var(--bg)] text-[var(--mut)] border border-[var(--line)] hover:text-[var(--ink)]"
+                  }`}
+                >
+                  {locale === "en" ? "All Lorries" : "සියලු වාහන"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFilterOwnership("company")}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    filterOwnership === "company"
+                      ? "bg-blue-600 text-white"
+                      : "bg-[var(--bg)] text-[var(--mut)] border border-[var(--line)] hover:text-[var(--ink)]"
+                  }`}
+                >
+                  🏢 {locale === "en" ? "Company Fleet" : "ආයතනයේ ලොරි"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFilterOwnership("outside")}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    filterOwnership === "outside"
+                      ? "bg-amber-500 text-white"
+                      : "bg-[var(--bg)] text-[var(--mut)] border border-[var(--line)] hover:text-[var(--ink)]"
+                  }`}
+                >
+                  🤝 {locale === "en" ? "Outside Partners" : "පිටත ලොරි"}
+                </button>
+              </div>
+
+              {activeSearchCoords && (
+                <span className="text-[11px] font-bold text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
+                  📍 {locale === "en"
+                    ? `Nearest to ${searchLocation || "GPS location"}`
+                    : `${searchLocation || "ඔබගේ ස්ථානයට"} ආසන්නතම අනුපිළිවෙළින්`}
+                </span>
+              )}
+            </div>
+          </div>
+
           <div className="flex items-center justify-between">
             <span className="text-xs font-extrabold text-[var(--ink)] uppercase tracking-wider">
-              {locale === "en" ? "Verified Active Vehicles" : "සක්‍රීය ලොරි රථ"} ({fleetLoading ? "..." : fleet.length})
+              {locale === "en" ? "Available Fleet Lorries" : "ලියාපදිංචි ලොරි රථ"} ({fleetLoading ? "..." : filteredAndSortedFleet.length})
             </span>
           </div>
 
@@ -631,19 +895,20 @@ function BookVehicleContent() {
                 <div key={i} className="h-48 rounded-2xl bg-[var(--card)] border border-[var(--line)] animate-pulse" />
               ))}
             </div>
-          ) : fleet.length === 0 ? (
+          ) : filteredAndSortedFleet.length === 0 ? (
             <div className="p-12 text-center bg-[var(--card)] rounded-2xl border border-[var(--line)]">
               <p className="text-sm font-bold text-[var(--ink)]">
-                {locale === "en" ? "No fleet vehicles currently registered." : "දැනට ලියාපදිංචි වාහන නොමැත."}
+                {locale === "en" ? "No fleet vehicles match your criteria." : "ගැලපෙන ලියාපදිංචි වාහන හමු නොවීය."}
               </p>
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-              {fleet.map((lorry) => (
+              {filteredAndSortedFleet.map(({ lorry, dist }) => (
                 <FleetVehicleCard
                   key={lorry.id}
                   lorry={lorry}
                   locale={locale}
+                  distanceKm={dist}
                   onSelect={handleSelectVehicle}
                   onBook={handleStartBookingWithVehicle}
                 />
@@ -754,34 +1019,53 @@ function BookVehicleContent() {
             <div className="p-5 rounded-2xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-4">
               <div className="flex items-start justify-between gap-3 flex-wrap">
                 <div>
-                  <span className="font-mono text-xs font-black px-2.5 py-1 rounded-md bg-[var(--y3)] text-[#5B4300] border border-[var(--y2)]">
-                    {selectedVehicle.plate}
-                  </span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-mono text-xs font-black px-2.5 py-1 rounded-md bg-[var(--y3)] text-[#5B4300] border border-[var(--y2)]">
+                      {selectedVehicle.plate}
+                    </span>
+                    {(selectedVehicle as any).isOutsideLorry || (selectedVehicle as any).ownershipType === "outside" ? (
+                      <span className="px-2.5 py-1 rounded-md bg-amber-500 text-white font-bold text-xs uppercase tracking-tight shadow-xs">
+                        🤝 Outside Partner ({getLorryBaseCity(selectedVehicle)})
+                      </span>
+                    ) : (
+                      <span className="px-2.5 py-1 rounded-md bg-blue-600 text-white font-bold text-xs uppercase tracking-tight shadow-xs">
+                        🏢 Company Fleet (Kiribathgoda)
+                      </span>
+                    )}
+                  </div>
                   <h2 className="text-xl font-black text-[var(--ink)] mt-2">
                     {selectedVehicle.vehicleType}
                   </h2>
                   {selectedVehicle.driverName ? (
                     <p className="text-xs text-[var(--mut)] mt-1">
-                      {locale === "en" ? "Driver: " : "රියදුරු: "}
+                      {locale === "en" ? "Driver / Owner: " : "රියදුරු / හිමිකරු: "}
                       <span className="font-semibold text-[var(--ink)]">{selectedVehicle.driverName}</span>
                       {selectedVehicle.driverPhone ? ` · ${selectedVehicle.driverPhone}` : ""}
                     </p>
                   ) : null}
-                  {selectedVehicle.route ? (
-                    <p className="text-xs text-[var(--mut)] mt-0.5">
-                      {locale === "en" ? "Route: " : "ගමන් මග: "}
-                      <span className="font-semibold text-[var(--ink)]">{selectedVehicle.route}</span>
-                    </p>
-                  ) : null}
+                  <p className="text-xs text-[var(--mut)] mt-0.5">
+                    {locale === "en" ? "Base Location: " : "මූලස්ථානය: "}
+                    <span className="font-semibold text-[var(--ink)]">{getLorryBaseCity(selectedVehicle)}</span>
+                  </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => setView("booking-form")}
-                  className="px-5 py-2.5 rounded-xl bg-[var(--y)] text-[#26231B] text-xs font-black border-0 cursor-pointer hover:opacity-90 shadow-xs"
-                >
-                  {locale === "en" ? "Reserve This Lorry" : "මෙම ලොරිය වෙන්කරන්න"}
-                </button>
+                {(selectedVehicle as any).isAvailable !== false ? (
+                  <button
+                    type="button"
+                    onClick={() => setView("booking-form")}
+                    className="px-5 py-2.5 rounded-xl bg-[var(--y)] text-[#26231B] text-xs font-black border-0 cursor-pointer hover:opacity-90 shadow-xs"
+                  >
+                    {locale === "en" ? "Reserve This Lorry" : "මෙම ලොරිය වෙන්කරන්න"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled
+                    className="px-5 py-2.5 rounded-xl bg-neutral-200 text-neutral-500 text-xs font-bold border-0 cursor-not-allowed opacity-75"
+                  >
+                    {locale === "en" ? "Currently Unavailable" : "දැනට සේවයේ නැත"}
+                  </button>
+                )}
               </div>
 
               {/* Grid of All Real Vehicle Specs From App */}
@@ -811,12 +1095,21 @@ function BookVehicleContent() {
                   <span className="text-[10px] font-bold text-[var(--mut)] uppercase tracking-wider">
                     {locale === "en" ? "Availability Status" : "වෙන්කිරීමේ තත්ත්වය"}
                   </span>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                    <span className="font-black text-sm text-emerald-700">
-                      {locale === "en" ? "Available for Booking" : "වෙන්කරවා ගත හැක"}
-                    </span>
-                  </div>
+                  {(selectedVehicle as any).isAvailable !== false ? (
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                      <span className="font-black text-sm text-emerald-700">
+                        {locale === "en" ? "Available for Booking" : "වෙන්කරවා ගත හැක"}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <span className="w-2 h-2 rounded-full bg-rose-500" />
+                      <span className="font-black text-sm text-rose-700">
+                        {locale === "en" ? "Currently Unavailable" : "දැනට සේවයේ නැත"}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -892,6 +1185,45 @@ function BookVehicleContent() {
                   {locale === "en" ? "Change Vehicle" : "වෙනත් වාහනයක් තෝරන්න"}
                 </button>
               </div>
+
+              {/* Outside Partner Link Notice */}
+              {((selectedVehicle as any).isOutsideLorry || (selectedVehicle as any).ownershipType === "outside") && (
+                <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2.5">
+                  <span className="text-lg">🤝</span>
+                  <div className="flex flex-col gap-0.5">
+                    <div className="flex items-center gap-2">
+                      <strong className="font-bold text-amber-950">
+                        {locale === "en" ? "Outside Partner Lorry" : "පිටත ලියාපදිංචි ලොරි රථයකි"}
+                      </strong>
+                      <span className="px-2 py-0.2 rounded-full bg-amber-200/80 text-amber-900 font-mono text-[10px] font-bold">
+                        Base: {getLorryBaseCity(selectedVehicle)}
+                      </span>
+                    </div>
+                    <p className="text-[11.5px] text-amber-800">
+                      {locale === "en"
+                        ? `Direct Partner: Driver is locked to the registered vehicle owner (${selectedVehicle.driverName || "Registered Partner"}${selectedVehicle.driverPhone ? ` · ${selectedVehicle.driverPhone}` : ""}). No separate driver will be dispatched.`
+                        : `මෙම ලොරිය සඳහා ලියාපදිංචි හිමිකරු (${selectedVehicle.driverName || "හිමිකරු"}${selectedVehicle.driverPhone ? ` · ${selectedVehicle.driverPhone}` : ""}) සෘජුවම සම්බන්ධ වන අතර වෙනම රියදුරෙකු පත් නොකෙරේ.`}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Unavailable Warning */}
+              {(selectedVehicle as any).isAvailable === false && (
+                <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-center gap-2.5">
+                  <span className="text-lg">⚠️</span>
+                  <div>
+                    <strong className="font-bold block">
+                      {locale === "en" ? "Vehicle Currently Unavailable" : "මෙම වාහනය දැනට සේවයේ නොමැත"}
+                    </strong>
+                    <span className="text-[11px]">
+                      {locale === "en"
+                        ? "The owner has marked this vehicle as unavailable. Please choose another active vehicle from the fleet."
+                        : "වාහන හිමිකරු විසින් මෙය Unavailable ලෙස සලකුණු කර ඇත. කරුණාකර වෙනත් වාහනයක් තෝරාගන්න."}
+                    </span>
+                  </div>
+                </div>
+              )}
 
               {/* 3 Photos Gallery for Vehicle Inspection Before Booking */}
               <div className="flex flex-col gap-2.5">

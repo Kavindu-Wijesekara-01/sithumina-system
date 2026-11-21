@@ -29,6 +29,12 @@ export interface StoredLorry {
   vehicleType: string;
   capacity?: string;
   maxWeight?: string;
+  dimensions?: string;
+  isOutsideLorry?: boolean;
+  ownershipType?: "company" | "outside";
+  ownerIdNumber?: string;
+  isAvailable?: boolean;
+  baseCity?: string;
   imageUrl?: string;
   images?: string[];
   description?: string;
@@ -151,11 +157,70 @@ export interface StoredRegistration {
   id: string;
   ownerName: string;
   phone: string;
+  idNumber?: string;
   vehicleNumber: string;
+  plateNumber?: string;
   vehicleType: string;
+  baseCity?: string;
   capacity: string;
+  maxWeight?: string;
+  dimensions?: string;
+  images?: string[];
+  depositSlipUrl?: string;
+  initialDepositAmount?: number;
   province: string;
   status: "pending" | "approved" | "rejected";
+  outsideEmployeeId?: string;
+  createdAt: number;
+  updatedAt?: number;
+}
+
+export interface StoredOutsideEmployee {
+  id: string;
+  registrationId: string;
+  name: string;
+  phone: string;
+  idNumber: string;
+  plateNumber: string;
+  vehicleType: string;
+  baseCity: string;
+  balance: number;
+  isAvailable: boolean;
+  status: "active" | "inactive" | "suspended";
+  totalCommissionDeducted: number;
+  totalHiresCompleted: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface StoredCommissionTransaction {
+  id: string;
+  employeeId: string;
+  idNumber: string;
+  bookingId?: string;
+  type: "initial_deposit" | "topup" | "commission_deduction" | "adjustment";
+  hireAmount?: number;
+  commissionRate?: number;
+  amount: number;
+  balanceBefore: number;
+  balanceAfter: number;
+  slipUrl?: string;
+  note?: string;
+  createdAt: number;
+}
+
+export interface StoredTopupSlip {
+  id: string;
+  employeeId: string;
+  idNumber: string;
+  employeeName: string;
+  phone: string;
+  plateNumber: string;
+  amount: number;
+  bankUsed?: string;
+  slipUrl: string;
+  status: "pending" | "approved" | "rejected";
+  reviewedAt?: number;
   createdAt: number;
 }
 
@@ -203,6 +268,9 @@ interface FleetStoreData {
   bookings: StoredBooking[];
   complaints: StoredComplaint[];
   registrations: StoredRegistration[];
+  outsideEmployees: StoredOutsideEmployee[];
+  commissionTransactions: StoredCommissionTransaction[];
+  topupSlips: StoredTopupSlip[];
   inquiries: StoredInquiry[];
   reviews: StoredReview[];
 }
@@ -218,21 +286,32 @@ function normalizeLorry(l: any, index: number): StoredLorry {
     ? l.images.filter((img: string) => img && typeof img === "string" && !img.startsWith("/img"))
     : (l.imageUrl && typeof l.imageUrl === "string" && !l.imageUrl.startsWith("/img") ? [l.imageUrl] : []);
 
+  const isOutside = Boolean(l.isOutsideLorry || l.ownershipType === "outside");
+  const baseCity = (l.baseCity || l.startLocation || (isOutside ? "" : "Kiribathgoda")).trim();
+  const startLoc = (l.startLocation || baseCity || (isOutside ? "" : "Kiribathgoda")).trim();
+
   return {
     ...l,
     plate: (l.plate || "").toUpperCase().trim(),
     vehicleType: l.vehicleType || "Lorry Fleet",
     capacity: l.capacity || "",
     maxWeight: l.maxWeight || "",
+    dimensions: l.dimensions || "",
+    isOutsideLorry: isOutside,
+    ownershipType: isOutside ? "outside" : (l.ownershipType || "company"),
+    ownerIdNumber: l.ownerIdNumber || "",
+    isAvailable: l.isAvailable !== false,
+    baseCity: baseCity,
+    startLocation: startLoc,
     imageUrl: images[0] || (l.imageUrl && typeof l.imageUrl === "string" && !l.imageUrl.startsWith("/img") ? l.imageUrl : ""),
     images: images,
     description: l.description || "",
-    route: l.route || "",
+    route: l.route || (baseCity ? `${baseCity} – Island-wide` : ""),
     driverName: l.driverName || "",
     driverPhone: l.driverPhone || "",
     viaWaypoints: Array.isArray(l.viaWaypoints) ? l.viaWaypoints : undefined,
     status: l.status || "empty",
-    lastUpdated: l.lastUpdated || "Available",
+    lastUpdated: l.isAvailable === false ? "Unavailable" : (l.lastUpdated || "Available"),
     updatedAt: l.updatedAt || Date.now(),
   };
 }
@@ -256,6 +335,9 @@ function readStore(): FleetStoreData {
         bookings: [],
         complaints: [],
         registrations: [],
+        outsideEmployees: [],
+        commissionTransactions: [],
+        topupSlips: [],
         inquiries: [],
         reviews: DEFAULT_REVIEWS_SEED,
       };
@@ -292,6 +374,9 @@ function readStore(): FleetStoreData {
       bookings: Array.isArray(parsed.bookings) ? parsed.bookings : [],
       complaints: Array.isArray(parsed.complaints) ? parsed.complaints : [],
       registrations: Array.isArray(parsed.registrations) ? parsed.registrations : [],
+      outsideEmployees: Array.isArray(parsed.outsideEmployees) ? parsed.outsideEmployees : [],
+      commissionTransactions: Array.isArray(parsed.commissionTransactions) ? parsed.commissionTransactions : [],
+      topupSlips: Array.isArray(parsed.topupSlips) ? parsed.topupSlips : [],
       inquiries: Array.isArray(parsed.inquiries) ? parsed.inquiries : [],
       reviews: Array.isArray(parsed.reviews) ? parsed.reviews : [],
     };
@@ -310,6 +395,9 @@ function readStore(): FleetStoreData {
       bookings: [],
       complaints: [],
       registrations: [],
+      outsideEmployees: [],
+      commissionTransactions: [],
+      topupSlips: [],
       inquiries: [],
       reviews: DEFAULT_REVIEWS_SEED,
     };
@@ -1229,24 +1317,42 @@ export function addRegistrationInStore(input: {
   ownerName: string;
   phone: string;
   vehicleNumber: string;
+  plateNumber?: string;
   vehicleType: string;
-  capacity: string;
-  province: string;
+  baseCity?: string;
+  capacity?: string;
+  province?: string;
+  idNumber?: string;
+  maxWeight?: string;
+  dimensions?: string;
+  images?: string[];
+  depositSlipUrl?: string;
+  initialDepositAmount?: number;
 }): StoredRegistration {
   const store = readStore();
   const randomSuffix = Math.floor(1000 + Math.random() * 9000);
   const id = `ST-REG-${randomSuffix}`;
+  const cleanPlate = (input.plateNumber || input.vehicleNumber || "").trim().toUpperCase();
 
   const reg: StoredRegistration = {
     id,
     ownerName: input.ownerName.trim(),
     phone: input.phone.trim(),
-    vehicleNumber: input.vehicleNumber.trim().toUpperCase(),
+    idNumber: input.idNumber?.trim() || "",
+    vehicleNumber: cleanPlate,
+    plateNumber: cleanPlate,
     vehicleType: input.vehicleType.trim(),
-    capacity: input.capacity.trim(),
-    province: input.province.trim(),
+    baseCity: input.baseCity?.trim() || "Colombo",
+    capacity: input.capacity?.trim() || "Standard",
+    maxWeight: input.maxWeight?.trim() || "",
+    dimensions: input.dimensions?.trim() || "",
+    images: Array.isArray(input.images) ? input.images : [],
+    depositSlipUrl: input.depositSlipUrl || "",
+    initialDepositAmount: input.initialDepositAmount || 5000,
+    province: input.province?.trim() || "Western",
     status: "pending",
     createdAt: Date.now(),
+    updatedAt: Date.now(),
   };
 
   store.registrations.unshift(reg);
@@ -1263,8 +1369,401 @@ export function updateRegistrationStatusInStore(
   if (idx === -1) return null;
 
   store.registrations[idx].status = status;
+  store.registrations[idx].updatedAt = Date.now();
+  const reg = store.registrations[idx];
+
+  if (status === "approved") {
+    // Generate outside employee ID if not set
+    if (!reg.outsideEmployeeId) {
+      const nextId = 1000 + (store.outsideEmployees?.length || 0) + 1;
+      reg.outsideEmployeeId = `ST-OUT-${nextId}`;
+    }
+
+    // Upsert into outsideEmployees
+    const existingEmpIdx = store.outsideEmployees.findIndex(
+      (e) => e.registrationId === reg.id || e.idNumber === reg.idNumber || e.id === reg.outsideEmployeeId
+    );
+    const empData: StoredOutsideEmployee = {
+      id: reg.outsideEmployeeId,
+      registrationId: reg.id,
+      name: reg.ownerName,
+      phone: reg.phone,
+      idNumber: reg.idNumber || "",
+      plateNumber: reg.vehicleNumber,
+      vehicleType: reg.vehicleType,
+      baseCity: reg.baseCity || "Colombo",
+      balance: existingEmpIdx >= 0 ? store.outsideEmployees[existingEmpIdx].balance : (reg.initialDepositAmount || 5000),
+      isAvailable: true,
+      status: "active",
+      totalCommissionDeducted: existingEmpIdx >= 0 ? store.outsideEmployees[existingEmpIdx].totalCommissionDeducted : 0,
+      totalHiresCompleted: existingEmpIdx >= 0 ? store.outsideEmployees[existingEmpIdx].totalHiresCompleted : 0,
+      createdAt: existingEmpIdx >= 0 ? store.outsideEmployees[existingEmpIdx].createdAt : Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    if (existingEmpIdx >= 0) {
+      store.outsideEmployees[existingEmpIdx] = empData;
+    } else {
+      store.outsideEmployees.unshift(empData);
+
+      // Record initial Rs. 5,000 deposit transaction
+      store.commissionTransactions.unshift({
+        id: `TX-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+        employeeId: empData.id,
+        idNumber: empData.idNumber,
+        type: "initial_deposit",
+        amount: reg.initialDepositAmount || 5000,
+        balanceBefore: 0,
+        balanceAfter: reg.initialDepositAmount || 5000,
+        note: `Approved Initial Registration Deposit (රු. ${(reg.initialDepositAmount || 5000).toLocaleString()})`,
+        slipUrl: reg.depositSlipUrl || "",
+        createdAt: Date.now(),
+      });
+    }
+
+    // Register / update vehicle in lorries
+    const cleanPlate = reg.vehicleNumber.trim().toUpperCase();
+    const docId = `lorry-${cleanPlate.replace(/[^A-Z0-9]/gi, "").toLowerCase()}`;
+    const lorryIdx = store.lorries.findIndex(
+      (l) => l.plate.toUpperCase() === cleanPlate || l.id === docId
+    );
+
+    const lorryPayload: StoredLorry = {
+      id: docId,
+      plate: cleanPlate,
+      route: `${reg.baseCity || "Island-wide"} – Island-wide`,
+      driverName: reg.ownerName,
+      driverPhone: reg.phone,
+      driverId: reg.outsideEmployeeId,
+      vehicleType: reg.vehicleType,
+      capacity: reg.capacity || "",
+      maxWeight: reg.maxWeight || "",
+      dimensions: reg.dimensions || "",
+      isOutsideLorry: true,
+      ownershipType: "outside",
+      ownerIdNumber: reg.idNumber || "",
+      isAvailable: true,
+      baseCity: reg.baseCity || "Colombo",
+      startLocation: reg.baseCity || "Colombo",
+      imageUrl: (reg.images && reg.images[0]) || "",
+      images: reg.images || [],
+      description: `Outside Partner Lorry operated by ${reg.ownerName}. Base: ${reg.baseCity || "Colombo"}.`,
+      lat: 6.9271,
+      lng: 79.8612,
+      heading: 0,
+      speedKmH: 0,
+      status: "empty",
+      lastUpdated: "Available",
+      updatedAt: Date.now(),
+    };
+
+    if (lorryIdx >= 0) {
+      store.lorries[lorryIdx] = { ...store.lorries[lorryIdx], ...lorryPayload };
+    } else {
+      store.lorries.unshift(lorryPayload);
+    }
+  }
+
   writeStore(store);
-  return store.registrations[idx];
+  return reg;
+}
+
+/* ============================================================
+ * OUTSIDE EMPLOYEES & COMMISSION LEDGER
+ * ============================================================ */
+
+export function getAllStoredOutsideEmployees(): StoredOutsideEmployee[] {
+  return readStore().outsideEmployees || [];
+}
+
+export function getStoredOutsideEmployeeByIdNumber(idNumber: string): StoredOutsideEmployee | null {
+  const store = readStore();
+  const cleanId = (idNumber || "").trim().toLowerCase();
+  if (!cleanId) return null;
+  return (store.outsideEmployees || []).find(
+    (e) => (e.idNumber || "").trim().toLowerCase() === cleanId
+  ) || null;
+}
+
+export function getStoredOutsideEmployeeByPlate(plate: string): StoredOutsideEmployee | null {
+  const store = readStore();
+  const cleanPlate = (plate || "").trim().toUpperCase();
+  if (!cleanPlate) return null;
+  return (store.outsideEmployees || []).find(
+    (e) => (e.plateNumber || "").trim().toUpperCase() === cleanPlate
+  ) || null;
+}
+
+export function getStoredOutsideEmployeeById(id: string): StoredOutsideEmployee | null {
+  const store = readStore();
+  const cleanId = (id || "").trim().toUpperCase();
+  if (!cleanId) return null;
+  return (store.outsideEmployees || []).find(
+    (e) => (e.id || "").trim().toUpperCase() === cleanId
+  ) || null;
+}
+
+export function toggleOutsideEmployeeAvailabilityInStore(
+  idNumberOrId: string,
+  isAvailable: boolean
+): { success: boolean; isAvailable: boolean; employee?: StoredOutsideEmployee; error?: string } {
+  const store = readStore();
+  const cleanKey = (idNumberOrId || "").trim().toLowerCase();
+  const empIdx = (store.outsideEmployees || []).findIndex(
+    (e) => (e.idNumber || "").trim().toLowerCase() === cleanKey || (e.id || "").trim().toLowerCase() === cleanKey
+  );
+  if (empIdx === -1) {
+    return { success: false, isAvailable: false, error: "Employee not found." };
+  }
+
+  store.outsideEmployees[empIdx].isAvailable = isAvailable;
+  store.outsideEmployees[empIdx].updatedAt = Date.now();
+  const emp = store.outsideEmployees[empIdx];
+
+  // Also update lorry availability
+  const cleanPlate = (emp.plateNumber || "").trim().toUpperCase();
+  const lorryIdx = store.lorries.findIndex(
+    (l) => (l.plate || "").trim().toUpperCase() === cleanPlate
+  );
+  if (lorryIdx !== -1) {
+    store.lorries[lorryIdx].isAvailable = isAvailable;
+    store.lorries[lorryIdx].status = isAvailable ? "empty" : "on_trip";
+    store.lorries[lorryIdx].lastUpdated = isAvailable ? "Available" : "Unavailable";
+    store.lorries[lorryIdx].updatedAt = Date.now();
+  }
+
+  writeStore(store);
+  return { success: true, isAvailable, employee: emp };
+}
+
+export function getStoredCommissionTransactions(employeeIdOrIdNumber: string): StoredCommissionTransaction[] {
+  const store = readStore();
+  const key = (employeeIdOrIdNumber || "").trim().toLowerCase();
+  if (!key) return store.commissionTransactions || [];
+  return (store.commissionTransactions || []).filter(
+    (tx) => (tx.employeeId || "").trim().toLowerCase() === key || (tx.idNumber || "").trim().toLowerCase() === key
+  );
+}
+
+export function getAllStoredCommissionTransactions(): StoredCommissionTransaction[] {
+  return readStore().commissionTransactions || [];
+}
+
+export function checkOutsideLorryBookingEligibility(
+  plate: string,
+  hireAmount: number
+): {
+  isOutside: boolean;
+  allowed: boolean;
+  reason?: string;
+  balance?: number;
+  requiredCommission?: number;
+  employee?: StoredOutsideEmployee;
+} {
+  const store = readStore();
+  const cleanPlate = (plate || "").trim().toUpperCase();
+  if (!cleanPlate) return { isOutside: false, allowed: true };
+
+  const employee = (store.outsideEmployees || []).find(
+    (e) => (e.plateNumber || "").trim().toUpperCase() === cleanPlate
+  );
+  if (!employee) {
+    return { isOutside: false, allowed: true };
+  }
+
+  if (employee.isAvailable === false) {
+    return {
+      isOutside: true,
+      allowed: false,
+      reason: `Vehicle ${cleanPlate} is currently marked Unavailable by the owner.`,
+      balance: employee.balance,
+      employee,
+    };
+  }
+
+  const requiredCommission = Math.round(Number(hireAmount || 0) * 0.20);
+  if (employee.balance < requiredCommission) {
+    return {
+      isOutside: true,
+      allowed: false,
+      reason: `Owner balance (LKR ${employee.balance.toLocaleString()}) is insufficient for 20% commission (LKR ${requiredCommission.toLocaleString()}). Top-up required before confirming new bookings.`,
+      balance: employee.balance,
+      requiredCommission,
+      employee,
+    };
+  }
+
+  return {
+    isOutside: true,
+    allowed: true,
+    balance: employee.balance,
+    requiredCommission,
+    employee,
+  };
+}
+
+export function deductCommissionForBookingInStore(
+  bookingId: string,
+  hireAmount: number,
+  plate: string
+): {
+  success: boolean;
+  isOutside: boolean;
+  error?: string;
+  deductedAmount?: number;
+  newBalance?: number;
+} {
+  const store = readStore();
+  const cleanPlate = (plate || "").trim().toUpperCase();
+  const employeeIdx = (store.outsideEmployees || []).findIndex(
+    (e) => (e.plateNumber || "").trim().toUpperCase() === cleanPlate
+  );
+  if (employeeIdx === -1) {
+    return { success: true, isOutside: false };
+  }
+
+  const employee = store.outsideEmployees[employeeIdx];
+
+  // Prevent duplicate deduction for same booking
+  const alreadyDeducted = (store.commissionTransactions || []).some(
+    (tx) => tx.bookingId === bookingId && tx.type === "commission_deduction"
+  );
+  if (alreadyDeducted) {
+    return { success: true, isOutside: true, newBalance: employee.balance };
+  }
+
+  const commissionAmount = Math.round(Number(hireAmount || 0) * 0.20);
+  if (employee.balance < commissionAmount) {
+    return {
+      success: false,
+      isOutside: true,
+      error: `Insufficient balance (Current: LKR ${employee.balance.toLocaleString()}) to deduct 20% commission (LKR ${commissionAmount.toLocaleString()}) for booking ${bookingId}. Please top up.`,
+    };
+  }
+
+  const balanceBefore = employee.balance;
+  const balanceAfter = balanceBefore - commissionAmount;
+  employee.balance = balanceAfter;
+  employee.totalCommissionDeducted = (employee.totalCommissionDeducted || 0) + commissionAmount;
+  employee.totalHiresCompleted = (employee.totalHiresCompleted || 0) + 1;
+  employee.updatedAt = Date.now();
+
+  const tx: StoredCommissionTransaction = {
+    id: `TX-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+    employeeId: employee.id,
+    idNumber: employee.idNumber,
+    bookingId,
+    type: "commission_deduction",
+    hireAmount: Number(hireAmount || 0),
+    commissionRate: 20,
+    amount: -commissionAmount,
+    balanceBefore,
+    balanceAfter,
+    note: `20% Commission for Booking ${bookingId} (Hire Value: LKR ${Number(hireAmount).toLocaleString()})`,
+    createdAt: Date.now(),
+  };
+
+  store.commissionTransactions.unshift(tx);
+  writeStore(store);
+  return {
+    success: true,
+    isOutside: true,
+    deductedAmount: commissionAmount,
+    newBalance: balanceAfter,
+  };
+}
+
+export function getAllTopupSlipsInStore(): StoredTopupSlip[] {
+  return readStore().topupSlips || [];
+}
+
+export function addTopupSlipInStore(input: {
+  employeeId?: string;
+  idNumber: string;
+  employeeName?: string;
+  phone?: string;
+  plateNumber?: string;
+  amount: number;
+  bankUsed?: string;
+  slipUrl: string;
+}): StoredTopupSlip {
+  const store = readStore();
+  const emp = (store.outsideEmployees || []).find(
+    (e) => (e.idNumber || "").trim().toLowerCase() === (input.idNumber || "").trim().toLowerCase() ||
+           (e.id || "").trim().toUpperCase() === (input.employeeId || "").trim().toUpperCase()
+  );
+
+  const id = `SLIP-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+  const slip: StoredTopupSlip = {
+    id,
+    employeeId: emp?.id || input.employeeId || "",
+    idNumber: input.idNumber.trim(),
+    employeeName: emp?.name || input.employeeName || "Lorry Owner",
+    phone: emp?.phone || input.phone || "",
+    plateNumber: emp?.plateNumber || input.plateNumber || "",
+    amount: Number(input.amount || 0),
+    bankUsed: input.bankUsed || "",
+    slipUrl: input.slipUrl,
+    status: "pending",
+    createdAt: Date.now(),
+  };
+
+  store.topupSlips.unshift(slip);
+  writeStore(store);
+  return slip;
+}
+
+export function approveTopupSlipInStore(slipId: string): { success: boolean; slip?: StoredTopupSlip; error?: string } {
+  const store = readStore();
+  const slipIdx = (store.topupSlips || []).findIndex((s) => s.id === slipId);
+  if (slipIdx === -1) return { success: false, error: "Top-up slip not found" };
+
+  const slip = store.topupSlips[slipIdx];
+  if (slip.status === "approved") {
+    return { success: true, slip };
+  }
+
+  slip.status = "approved";
+  slip.reviewedAt = Date.now();
+
+  const empIdx = (store.outsideEmployees || []).findIndex(
+    (e) => (e.idNumber || "").trim().toLowerCase() === (slip.idNumber || "").trim().toLowerCase() ||
+           (e.id || "").trim().toUpperCase() === (slip.employeeId || "").trim().toUpperCase()
+  );
+
+  if (empIdx !== -1) {
+    const emp = store.outsideEmployees[empIdx];
+    const balanceBefore = emp.balance;
+    const balanceAfter = balanceBefore + slip.amount;
+    emp.balance = balanceAfter;
+    emp.updatedAt = Date.now();
+
+    const tx: StoredCommissionTransaction = {
+      id: `TX-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      employeeId: emp.id,
+      idNumber: emp.idNumber,
+      type: "topup",
+      amount: slip.amount,
+      balanceBefore,
+      balanceAfter,
+      slipUrl: slip.slipUrl,
+      note: `Bank Slip Top-up Approved (Slip: ${slip.id})`,
+      createdAt: Date.now(),
+    };
+    store.commissionTransactions.unshift(tx);
+  }
+
+  writeStore(store);
+  return { success: true, slip };
+}
+
+export function deleteTopupSlipInStore(slipId: string): boolean {
+  const store = readStore();
+  const idx = (store.topupSlips || []).findIndex((s) => s.id === slipId);
+  if (idx === -1) return false;
+  store.topupSlips.splice(idx, 1);
+  writeStore(store);
+  return true;
 }
 
 /* ============================================================

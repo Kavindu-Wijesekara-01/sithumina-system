@@ -18,6 +18,7 @@ import {
   uploadPaymentSlipToDb,
 } from "@/lib/payment-settings";
 import { Lorry } from "@/lib/mock-lorries";
+import EmployeePortal from "@/components/EmployeePortal";
 
 type BookingFilterTab = "all" | "pending" | "approved" | "completed" | "cancelled";
 
@@ -47,6 +48,7 @@ export default function CustomerPortalPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<BookingFilterTab>("all");
+  const [accountMode, setAccountMode] = useState<"customer" | "employee">("customer");
   const [showLookupForm, setShowLookupForm] = useState(false);
   const [lookupInput, setLookupInput] = useState("");
   const [lookupLoading, setLookupLoading] = useState(false);
@@ -57,6 +59,10 @@ export default function CustomerPortalPage() {
 
     if (typeof window !== "undefined") {
       const sp = new URLSearchParams(window.location.search);
+      const urlTab = sp.get("tab") || sp.get("mode") || sp.get("role");
+      if (urlTab === "employee") {
+        setAccountMode("employee");
+      }
       const urlPhone = sp.get("phone");
       if (urlPhone) {
         setPhone(urlPhone);
@@ -969,6 +975,43 @@ export default function CustomerPortalPage() {
         </p>
       </div>
 
+      {/* 2. ACCOUNT MODE SELECTOR TABS (Customer Login vs Employee Login) */}
+      <div className="flex items-center gap-2 p-1.5 rounded-2xl bg-[var(--card)] border border-[var(--line)] w-fit shadow-xs">
+        <button
+          type="button"
+          onClick={() => setAccountMode("customer")}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-extrabold transition-all cursor-pointer ${
+            accountMode === "customer"
+              ? "bg-[var(--y)] text-[#26231B] shadow-xs"
+              : "text-[var(--mut)] hover:text-[var(--ink)]"
+          }`}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
+          </svg>
+          <span>{locale === "en" ? "Customer Portal" : "පාරිභෝගික ගිණුම (Customer)"}</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setAccountMode("employee")}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-extrabold transition-all cursor-pointer ${
+            accountMode === "employee"
+              ? "bg-[#26231B] text-[#FFC20E] shadow-xs"
+              : "text-[var(--mut)] hover:text-[var(--ink)]"
+          }`}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="1" y="3" width="15" height="13" /><polygon points="16,8 20,8 23,11 23,16 16,16 16,8" /><circle cx="5.5" cy="18.5" r="2.5" /><circle cx="18.5" cy="18.5" r="2.5" />
+          </svg>
+          <span>{locale === "en" ? "Employee / Lorry Owner Portal" : "සේවක / වාහන හිමිකරු (Employee)"}</span>
+        </button>
+      </div>
+
+      {accountMode === "employee" ? (
+        <EmployeePortal locale={locale} />
+      ) : (
+        <>
       {/* STATE 1: NOT LOGGED IN */}
       {!mounted || !profile ? (
         <div className="grid grid-cols-1 md:grid-cols-12 gap-5 sm:gap-6 items-start">
@@ -2186,6 +2229,8 @@ export default function CustomerPortalPage() {
             )}
           </div>
         </div>
+      )}
+        </>
       )}
     </main>
   );
