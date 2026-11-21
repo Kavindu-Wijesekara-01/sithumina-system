@@ -1278,6 +1278,24 @@ export function updateBookingStatusInStore(
     if (assignment.customerIdNumber !== undefined && assignment.customerIdNumber.trim() !== "") {
       store.bookings[idx].customerIdNumber = assignment.customerIdNumber.trim();
     }
+
+    // For outside lorries, permanently lock driver assignment to the registered owner/driver
+    const targetPlate = (store.bookings[idx].assignedPlate || "").trim().toUpperCase();
+    const matchedOutEmp = targetPlate
+      ? store.outsideEmployees.find((e) => e.plateNumber?.trim().toUpperCase() === targetPlate)
+      : null;
+    const matchedOutLorry = targetPlate
+      ? store.lorries.find((l) => (l.isOutsideLorry || l.ownershipType === "outside") && l.plate?.trim().toUpperCase() === targetPlate)
+      : null;
+    if (matchedOutEmp) {
+      store.bookings[idx].assignedDriverId = matchedOutEmp.driverId || matchedOutEmp.id;
+      store.bookings[idx].assignedDriverName = matchedOutEmp.name;
+      store.bookings[idx].assignedDriverPhone = matchedOutEmp.phone;
+    } else if (matchedOutLorry) {
+      store.bookings[idx].assignedDriverId = matchedOutLorry.driverId || "";
+      store.bookings[idx].assignedDriverName = matchedOutLorry.driverName || "";
+      store.bookings[idx].assignedDriverPhone = matchedOutLorry.driverPhone || "";
+    }
   }
 
   if (paymentMeta) {

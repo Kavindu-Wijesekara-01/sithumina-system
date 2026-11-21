@@ -1081,6 +1081,27 @@ export default function MasterAdminDashboard() {
               : resolvedDate
               ? [resolvedDate]
               : [];
+          const rawAssignedPlate = data.assignedPlate || data.selectedVehiclePlate || "";
+          const matchedFleet = rawAssignedPlate
+            ? fleetVehicles.find((v) => normalizePlate(v.plate) === normalizePlate(rawAssignedPlate))
+            : null;
+          const isOutside = Boolean(
+            matchedFleet &&
+            ((matchedFleet as any).isOutsideLorry || (matchedFleet as any).ownershipType === "outside")
+          );
+          const rawDriverName =
+            data.assignedDriverName &&
+            data.assignedDriverName !== "Driver" &&
+            data.assignedDriverName !== "Unassigned"
+              ? String(data.assignedDriverName).trim()
+              : "";
+          const resolvedDriverName =
+            rawDriverName || (isOutside ? matchedFleet?.driverName || "" : "");
+          const resolvedDriverPhone =
+            String(data.assignedDriverPhone || "").trim() || (isOutside ? matchedFleet?.driverPhone || "" : "");
+          const resolvedDriverId =
+            data.assignedDriverId ? String(data.assignedDriverId).trim() : (isOutside ? matchedFleet?.driverId || "" : "");
+
           items.push({
             id: resolvedId,
             customerName: data.customerName || data.name || "Customer",
@@ -1104,16 +1125,11 @@ export default function MasterAdminDashboard() {
             helpersCount: data.helpersCount || "0",
             packageDetails: data.packageDetails || data.notes || "",
             status: (data.status as BookingStatus) || "pending",
-            assignedLorryId: data.assignedLorryId || "",
-            assignedDriverId: data.assignedDriverId ? String(data.assignedDriverId).trim() : "",
-            assignedDriverName:
-              data.assignedDriverName &&
-              data.assignedDriverName !== "Driver" &&
-              data.assignedDriverName !== "Unassigned"
-                ? String(data.assignedDriverName).trim()
-                : "",
-            assignedDriverPhone: String(data.assignedDriverPhone || "").trim(),
-            assignedPlate: data.assignedPlate || data.selectedVehiclePlate || "",
+            assignedLorryId: data.assignedLorryId || (matchedFleet?.id || ""),
+            assignedDriverId: resolvedDriverId,
+            assignedDriverName: resolvedDriverName,
+            assignedDriverPhone: resolvedDriverPhone,
+            assignedPlate: rawAssignedPlate,
             quotedAmount:
               typeof data.quotedAmount === "number" && !Number.isNaN(data.quotedAmount)
                 ? data.quotedAmount
@@ -1157,7 +1173,7 @@ export default function MasterAdminDashboard() {
         loadBookingsFromStore();
       }
     );
-  }, [loadBookingsFromStore]);
+  }, [loadBookingsFromStore, fleetVehicles]);
 
   useEffect(() => {
     if (!authed) {
@@ -1183,6 +1199,10 @@ export default function MasterAdminDashboard() {
             (bPlateNorm && normalizePlate(v.plate) === bPlateNorm) ||
             (bLorryId && (v.id || "").toLowerCase() === bLorryId)
         ) || null;
+      const isOutside = Boolean(
+        matchedVehicle &&
+          ((matchedVehicle as any).isOutsideLorry || (matchedVehicle as any).ownershipType === "outside")
+      );
       const existingDriverName = cleanRiderName(b.assignedDriverName);
       const matchedDriver =
         drivers.find(
@@ -1195,6 +1215,17 @@ export default function MasterAdminDashboard() {
       const startDate = b.date || bDates[0] || new Date().toISOString().split("T")[0];
       const endDate = bDates.length > 1 ? bDates[bDates.length - 1] : startDate;
       const isMultiDate = bDates.length > 1 || (b.daysNeeded !== undefined && Number(b.daysNeeded) > 1);
+
+      const resolvedDriverName = isOutside
+        ? (matchedVehicle?.driverName || existingDriverName || matchedDriver?.name || "")
+        : (existingDriverName || matchedDriver?.name || "");
+      const resolvedDriverPhone = isOutside
+        ? (matchedVehicle?.driverPhone || b.assignedDriverPhone || matchedDriver?.phone || "")
+        : (b.assignedDriverPhone || matchedDriver?.phone || "");
+      const resolvedDriverId = isOutside
+        ? (matchedVehicle?.driverId || b.assignedDriverId || matchedDriver?.driverId || "")
+        : (b.assignedDriverId || matchedDriver?.driverId || "");
+
       return {
         date: startDate,
         endDate: endDate,
@@ -1204,9 +1235,9 @@ export default function MasterAdminDashboard() {
         endTime: b.endTime || "",
         plate: b.assignedPlate || matchedVehicle?.plate || "",
         lorryId: b.assignedLorryId || matchedVehicle?.id || "",
-        driverId: b.assignedDriverId || matchedDriver?.driverId || "",
-        driverName: existingDriverName || matchedDriver?.name || "",
-        driverPhone: b.assignedDriverPhone || matchedDriver?.phone || "",
+        driverId: resolvedDriverId,
+        driverName: resolvedDriverName,
+        driverPhone: resolvedDriverPhone,
         distanceKm: b.distanceKm ? String(b.distanceKm) : "",
       };
     },
@@ -4294,7 +4325,14 @@ export default function MasterAdminDashboard() {
                               <span className="font-medium">
                                 {b.assignedPlate || "No Lorry"}
                               </span>
-                              {b.assignedDriverName ? ` · ${b.assignedDriverName}` : " · No rider"}
+                              {(() => {
+                                const resolvedRider =
+                                  b.assignedDriverName ||
+                                  (b.assignedPlate
+                                    ? fleetVehicles.find((v) => normalizePlate(v.plate) === normalizePlate(b.assignedPlate))?.driverName
+                                    : "");
+                                return resolvedRider ? ` · ${resolvedRider}` : " · No rider";
+                              })()}
                             </div>
                           </div>
                         </div>
@@ -4575,11 +4613,20 @@ export default function MasterAdminDashboard() {
                                         onChange={(e) => {
                                           const selPlate = e.target.value;
                                           const matchedV = fleetVehicles.find((v) => v.plate === selPlate);
+                                          const isOut = Boolean(
+                                            matchedV &&
+                                            ((matchedV as any).isOutsideLorry || (matchedV as any).ownershipType === "outside")
+                                          );
                                           updateScheduleDraft(b, {
                                             plate: selPlate,
                                             lorryId:
                                               matchedV?.id ||
                                               `lorry-${normalizePlate(selPlate).toLowerCase()}`,
+                                            ...(isOut && matchedV ? {
+                                              driverId: matchedV.driverId || "",
+                                              driverName: matchedV.driverName || "",
+                                              driverPhone: matchedV.driverPhone || "",
+                                            } : {}),
                                           });
                                         }}
                                         className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-xs text-gray-900 focus:border-gray-900 focus:outline-none"
@@ -4592,31 +4639,60 @@ export default function MasterAdminDashboard() {
                                         ))}
                                       </select>
                                     </div>
-                                    <div>
-                                      <label className="block text-xs font-medium text-gray-700 mb-1">
-                                        Assign Rider *
-                                      </label>
-                                      <select
-                                        aria-label={`Dashboard schedule rider for ${b.id}`}
-                                        value={draft.driverName}
-                                        onChange={(e) => {
-                                          const drv = drivers.find((d) => d.name === e.target.value);
-                                          updateScheduleDraft(b, {
-                                            driverId: drv?.driverId || "",
-                                            driverName: drv?.name || e.target.value,
-                                            driverPhone: drv?.phone || "",
-                                          });
-                                        }}
-                                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-xs text-gray-900 focus:border-gray-900 focus:outline-none"
-                                      >
-                                        <option value="">Select Rider</option>
-                                        {drivers.map((d) => (
-                                          <option key={d.driverId} value={d.name}>
-                                            {d.name} ({d.driverId}) - {d.phone}
-                                          </option>
-                                        ))}
-                                      </select>
-                                    </div>
+                                    {Boolean(
+                                      draft.plate &&
+                                      fleetVehicles.some(
+                                        (v) =>
+                                          v.plate === draft.plate &&
+                                          ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
+                                      )
+                                    ) ? (
+                                      <div>
+                                        <label className="block text-xs font-medium text-gray-700 mb-1 flex items-center justify-between">
+                                          <span>Assign Rider *</span>
+                                          <span className="text-[10px] font-bold text-amber-700">🔒 ස්ථිර රියදුරු</span>
+                                        </label>
+                                        <div className="w-full px-3 py-2 rounded-md border border-amber-300 bg-amber-50/80 text-xs text-amber-950 flex items-center justify-between shadow-2xs">
+                                          <div className="flex items-center gap-1.5 font-bold text-amber-950 truncate">
+                                            <span className="truncate">{draft.driverName || "Permanent Driver"}</span>
+                                            {draft.driverId && (
+                                              <span className="px-1.5 py-0.5 rounded bg-gray-900 text-[#FDB813] font-mono text-[10px] font-black shrink-0">
+                                                {draft.driverId}
+                                              </span>
+                                            )}
+                                          </div>
+                                          <span className="font-mono font-bold text-amber-800 text-[11px] shrink-0 ml-1">
+                                            {draft.driverPhone || ""}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div>
+                                        <label className="block text-xs font-medium text-gray-700 mb-1">
+                                          Assign Rider *
+                                        </label>
+                                        <select
+                                          aria-label={`Dashboard schedule rider for ${b.id}`}
+                                          value={draft.driverName}
+                                          onChange={(e) => {
+                                            const drv = drivers.find((d) => d.name === e.target.value);
+                                            updateScheduleDraft(b, {
+                                              driverId: drv?.driverId || "",
+                                              driverName: drv?.name || e.target.value,
+                                              driverPhone: drv?.phone || "",
+                                            });
+                                          }}
+                                          className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-xs text-gray-900 focus:border-gray-900 focus:outline-none"
+                                        >
+                                          <option value="">Select Rider</option>
+                                          {drivers.map((d) => (
+                                            <option key={d.driverId} value={d.name}>
+                                              {d.name} ({d.driverId}) - {d.phone}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </div>
+                                    )}
                                   </div>
 
                                   {draftConflict?.hasConflict ? (
@@ -6846,7 +6922,14 @@ export default function MasterAdminDashboard() {
                                 <span className="font-medium">
                                   {b.assignedPlate || "No Lorry"} ({b.vehicleType})
                                 </span>
-                                {b.assignedDriverName ? ` · ${b.assignedDriverName}` : " · No rider"}
+                                {(() => {
+                                  const resolvedRider =
+                                    b.assignedDriverName ||
+                                    (b.assignedPlate
+                                      ? fleetVehicles.find((v) => normalizePlate(v.plate) === normalizePlate(b.assignedPlate))?.driverName
+                                      : "");
+                                  return resolvedRider ? ` · ${resolvedRider}` : " · No rider";
+                                })()}
                               </div>
                             </div>
                             <div>
@@ -7160,11 +7243,20 @@ export default function MasterAdminDashboard() {
                                           onChange={(e) => {
                                             const selPlate = e.target.value;
                                             const matchedV = fleetVehicles.find((v) => v.plate === selPlate);
+                                            const isOut = Boolean(
+                                              matchedV &&
+                                              ((matchedV as any).isOutsideLorry || (matchedV as any).ownershipType === "outside")
+                                            );
                                             updateScheduleDraft(b, {
                                               plate: selPlate,
                                               lorryId:
                                                 matchedV?.id ||
                                                 `lorry-${normalizePlate(selPlate).toLowerCase()}`,
+                                              ...(isOut && matchedV ? {
+                                                driverId: matchedV.driverId || "",
+                                                driverName: matchedV.driverName || "",
+                                                driverPhone: matchedV.driverPhone || "",
+                                              } : {}),
                                             });
                                           }}
                                           className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
@@ -7177,31 +7269,60 @@ export default function MasterAdminDashboard() {
                                           ))}
                                         </select>
                                       </div>
-                                      <div>
-                                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                                          Assign Rider *
-                                        </label>
-                                        <select
-                                          aria-label={`Schedule rider for ${b.id}`}
-                                          value={draft.driverName}
-                                          onChange={(e) => {
-                                            const drv = drivers.find((d) => d.name === e.target.value);
-                                            updateScheduleDraft(b, {
-                                              driverId: drv?.driverId || "",
-                                              driverName: drv?.name || e.target.value,
-                                              driverPhone: drv?.phone || "",
-                                            });
-                                          }}
-                                          className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
-                                        >
-                                          <option value="">Select Rider</option>
-                                          {drivers.map((d) => (
-                                            <option key={d.driverId} value={d.name}>
-                                              {d.name} ({d.driverId}) - {d.phone}
-                                            </option>
-                                          ))}
-                                        </select>
-                                      </div>
+                                      {Boolean(
+                                        draft.plate &&
+                                        fleetVehicles.some(
+                                          (v) =>
+                                            v.plate === draft.plate &&
+                                            ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
+                                        )
+                                      ) ? (
+                                        <div>
+                                          <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center justify-between">
+                                            <span>Assign Rider *</span>
+                                            <span className="text-xs font-bold text-amber-700">🔒 ස්ථිර රියදුරු</span>
+                                          </label>
+                                          <div className="w-full px-3 py-2.5 rounded-md border border-amber-300 bg-amber-50/80 text-sm text-amber-950 flex items-center justify-between shadow-2xs">
+                                            <div className="flex items-center gap-2 font-bold text-amber-950 truncate">
+                                              <span className="truncate">{draft.driverName || "Permanent Driver"}</span>
+                                              {draft.driverId && (
+                                                <span className="px-2 py-0.5 rounded bg-gray-900 text-[#FDB813] font-mono text-xs font-black shrink-0">
+                                                  {draft.driverId}
+                                                </span>
+                                              )}
+                                            </div>
+                                            <span className="font-mono font-bold text-amber-800 text-xs shrink-0 ml-1">
+                                              {draft.driverPhone || ""}
+                                            </span>
+                                          </div>
+                                        </div>
+                                      ) : (
+                                        <div>
+                                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                                            Assign Rider *
+                                          </label>
+                                          <select
+                                            aria-label={`Schedule rider for ${b.id}`}
+                                            value={draft.driverName}
+                                            onChange={(e) => {
+                                              const drv = drivers.find((d) => d.name === e.target.value);
+                                              updateScheduleDraft(b, {
+                                                driverId: drv?.driverId || "",
+                                                driverName: drv?.name || e.target.value,
+                                                driverPhone: drv?.phone || "",
+                                              });
+                                            }}
+                                            className="w-full px-3 py-2.5 rounded-md border border-gray-300 bg-white text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+                                          >
+                                            <option value="">Select Rider</option>
+                                            {drivers.map((d) => (
+                                              <option key={d.driverId} value={d.name}>
+                                                {d.name} ({d.driverId}) - {d.phone}
+                                              </option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                      )}
                                     </div>
 
                                     {draftConflict?.hasConflict ? (
@@ -7953,7 +8074,14 @@ export default function MasterAdminDashboard() {
                             <span className="font-medium">
                               {b.assignedPlate || b.selectedVehiclePlate || "Live Lorry"}
                             </span>
-                            {b.assignedDriverName ? ` · ${b.assignedDriverName}` : " · No rider"}
+                            {(() => {
+                              const resolvedRider =
+                                b.assignedDriverName ||
+                                (b.assignedPlate
+                                  ? fleetVehicles.find((v) => normalizePlate(v.plate) === normalizePlate(b.assignedPlate))?.driverName
+                                  : "");
+                              return resolvedRider ? ` · ${resolvedRider}` : " · No rider";
+                            })()}
                           </div>
                         </div>
                         <div>
@@ -11523,10 +11651,19 @@ export default function MasterAdminDashboard() {
                       onChange={(e) => {
                         const selPlate = e.target.value;
                         const matched = fleetVehicles.find((v) => v.plate === selPlate);
+                        const isOut = Boolean(
+                          matched &&
+                          ((matched as any).isOutsideLorry || (matched as any).ownershipType === "outside")
+                        );
                         setManualForm((p) => ({
                           ...p,
                           plate: selPlate,
                           vehicleType: matched?.vehicleType || p.vehicleType || "Lorry",
+                          ...(isOut && matched ? {
+                            driverId: matched.driverId || "",
+                            driverName: matched.driverName || "",
+                            driverPhone: matched.driverPhone || "",
+                          } : {}),
                         }));
                       }}
                       className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-mono font-semibold text-gray-900 focus:border-gray-900 focus:outline-none"
@@ -11543,31 +11680,60 @@ export default function MasterAdminDashboard() {
                     </select>
                   </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-800 mb-1">Assign Rider (Mandatory) *</label>
-                    <select
-                      required
-                      aria-label="Manual booking rider"
-                      value={manualForm.driverName}
-                      onChange={(e) => {
-                        const drv = drivers.find((d) => d.name === e.target.value);
-                        setManualForm((p) => ({
-                          ...p,
-                          driverId: drv?.driverId || "",
-                          driverName: drv?.name || e.target.value,
-                          driverPhone: drv?.phone || "",
-                        }));
-                      }}
-                      className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-medium text-gray-900 focus:border-gray-900 focus:outline-none"
-                    >
-                      <option value="">Select Rider</option>
-                      {drivers.map((d) => (
-                        <option key={d.driverId} value={d.name}>
-                          {d.name} ({d.driverId}) - {d.phone}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                  {Boolean(
+                    manualResolvedPlate &&
+                    fleetVehicles.some(
+                      (v) =>
+                        v.plate === manualResolvedPlate &&
+                        ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
+                    )
+                  ) ? (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-800 mb-1 flex items-center justify-between">
+                        <span>Assign Rider (Mandatory) *</span>
+                        <span className="text-xs font-bold text-amber-700">🔒 ස්ථිර රියදුරු</span>
+                      </label>
+                      <div className="w-full px-3 py-2 rounded-md border border-amber-300 bg-amber-50/80 text-sm text-amber-950 flex items-center justify-between shadow-2xs">
+                        <div className="flex items-center gap-2 font-bold text-amber-950 truncate">
+                          <span className="truncate">{manualForm.driverName || "Permanent Driver"}</span>
+                          {manualForm.driverId && (
+                            <span className="px-2 py-0.5 rounded bg-gray-900 text-[#FDB813] font-mono text-xs font-black shrink-0">
+                              {manualForm.driverId}
+                            </span>
+                          )}
+                        </div>
+                        <span className="font-mono font-bold text-amber-800 text-xs shrink-0 ml-1">
+                          {manualForm.driverPhone || ""}
+                        </span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-800 mb-1">Assign Rider (Mandatory) *</label>
+                      <select
+                        required
+                        aria-label="Manual booking rider"
+                        value={manualForm.driverName}
+                        onChange={(e) => {
+                          const drv = drivers.find((d) => d.name === e.target.value);
+                          setManualForm((p) => ({
+                            ...p,
+                            driverId: drv?.driverId || "",
+                            driverName: drv?.name || e.target.value,
+                            driverPhone: drv?.phone || "",
+                          }));
+                        }}
+                        className="w-full px-3 py-2 rounded-md border border-gray-300 bg-white text-sm font-medium text-gray-900 focus:border-gray-900 focus:outline-none"
+                      >
+                        <option value="">Select Rider</option>
+                        {drivers.map((d) => (
+                          <option key={d.driverId} value={d.name}>
+                            {d.name} ({d.driverId}) - {d.phone}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
 
                 {/* Date + Time Duration Allocation */}
@@ -12124,7 +12290,7 @@ export default function MasterAdminDashboard() {
                                 ? {
                                     driverName: matchedV.driverName,
                                     driverPhone: matchedV.driverPhone || p.driverPhone,
-                                    driverId: (matchedV as any).ownerIdNumber || "OUTSIDE-OWNER",
+                                    driverId: matchedV.driverId || (matchedV as any).ownerIdNumber || "D-10",
                                   }
                                 : {}),
                             }

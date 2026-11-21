@@ -75,20 +75,43 @@ export async function GET(request: Request) {
       });
     }
 
-    const driversById = new Map<string, { name: string; phone: string }>();
-    const driversByPlate = new Map<string, { name: string; phone: string }>();
+    const driversById = new Map<string, { driverId: string; name: string; phone: string }>();
+    const driversByPlate = new Map<string, { driverId: string; name: string; phone: string }>();
     if (drvSnap) {
       drvSnap.forEach((d) => {
         const dd = d.data();
         const dName = isRealDriverName(dd.name);
         const dPhone = String(dd.phone || "").trim();
+        const dId = String(dd.driverId || d.id).trim();
         if (!dName && !dPhone) return;
         const idKey = String(dd.driverId || d.id).trim().toUpperCase();
-        if (idKey) driversById.set(idKey, { name: dName, phone: dPhone });
+        if (idKey) driversById.set(idKey, { driverId: dId, name: dName, phone: dPhone });
         const pKey = String(dd.plate || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-        if (pKey) driversByPlate.set(pKey, { name: dName, phone: dPhone });
+        if (pKey) driversByPlate.set(pKey, { driverId: dId, name: dName, phone: dPhone });
       });
     }
+
+    try {
+      const { getAllStoredLorries, getAllStoredOutsideEmployees } = await import("@/lib/server-store");
+      const storeLorries = getAllStoredLorries();
+      const storeOutside = getAllStoredOutsideEmployees();
+      storeLorries.forEach((l: any) => {
+        if ((l.isOutsideLorry || l.ownershipType === "outside") && l.driverName && l.plate) {
+          const pKey = l.plate.toUpperCase().replace(/[^A-Z0-9]/g, "");
+          if (pKey && !driversByPlate.has(pKey)) {
+            driversByPlate.set(pKey, { driverId: l.driverId || "", name: l.driverName, phone: l.driverPhone || "" });
+          }
+        }
+      });
+      storeOutside.forEach((o: any) => {
+        if (o.plateNumber && o.name) {
+          const pKey = o.plateNumber.toUpperCase().replace(/[^A-Z0-9]/g, "");
+          if (pKey) {
+            driversByPlate.set(pKey, { driverId: o.driverId || o.id, name: o.name, phone: o.phone || "" });
+          }
+        }
+      });
+    } catch {}
 
     const byId = new Map<string, any>();
 
@@ -122,9 +145,11 @@ export async function GET(request: Request) {
 
       const statusVal = String(data.status || "pending");
       const bookingTypeVal = data.bookingType || "individual_vehicle";
+      const isOutsideLorry = plateKey ? Boolean(driversByPlate.get(plateKey)) : false;
       const allowDriverFallback =
         ["assigned", "in_transit", "delivered"].includes(statusVal) ||
-        bookingTypeVal === "live_lorry";
+        bookingTypeVal === "live_lorry" ||
+        isOutsideLorry;
 
       const cleanDrvName =
         isRealDriverName(data.assignedDriverName) ||
@@ -132,6 +157,9 @@ export async function GET(request: Request) {
       const cleanDrvPhone =
         String(data.assignedDriverPhone || "").trim() ||
         (allowDriverFallback ? disp?.driverPhone || matchedDrv?.phone || "" : "");
+      const cleanDrvId =
+        String(data.assignedDriverId || "").trim() ||
+        (allowDriverFallback ? disp?.driverId || matchedDrv?.driverId || "" : "");
 
       byId.set(resolvedId, {
         id: resolvedId,
@@ -152,7 +180,7 @@ export async function GET(request: Request) {
         packageDetails: data.packageDetails || data.notes || "",
         status: statusVal,
         assignedLorryId: data.assignedLorryId || "",
-        assignedDriverId: data.assignedDriverId ? String(data.assignedDriverId).trim() : "",
+        assignedDriverId: cleanDrvId,
         assignedDriverName: cleanDrvName,
         assignedDriverPhone: cleanDrvPhone,
         assignedPlate: rawPlate,

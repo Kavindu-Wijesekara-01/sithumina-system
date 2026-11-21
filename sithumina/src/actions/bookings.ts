@@ -12,8 +12,12 @@ import {
   checkOutsideLorryBookingEligibility,
   deductCommissionForBookingInStore,
   getStoredOutsideEmployeeByPlate,
+  getAllStoredLorries,
+  getAllStoredOutsideEmployees,
   StoredBooking,
   StoredComplaint,
+  StoredLorry,
+  StoredOutsideEmployee,
   BookingStatusValue,
   PaymentSlipStatus,
   BookingPaymentMethod,
@@ -366,20 +370,42 @@ async function fetchBookingsAuthoritative(): Promise<StoredBooking[]> {
       });
     }
 
-    const driversById = new Map<string, { name: string; phone: string }>();
-    const driversByPlate = new Map<string, { name: string; phone: string }>();
+    const driversById = new Map<string, { driverId: string; name: string; phone: string }>();
+    const driversByPlate = new Map<string, { driverId: string; name: string; phone: string }>();
     if (drvSnap) {
       drvSnap.forEach((d) => {
         const dd = d.data();
         const dName = isRealDriverName(dd.name);
         const dPhone = String(dd.phone || "").trim();
+        const dId = String(dd.driverId || d.id).trim();
         if (!dName && !dPhone) return;
         const idKey = String(dd.driverId || d.id).trim().toUpperCase();
-        if (idKey) driversById.set(idKey, { name: dName, phone: dPhone });
+        if (idKey) driversById.set(idKey, { driverId: dId, name: dName, phone: dPhone });
         const pKey = normalizePlate(dd.plate);
-        if (pKey) driversByPlate.set(pKey, { name: dName, phone: dPhone });
+        if (pKey) driversByPlate.set(pKey, { driverId: dId, name: dName, phone: dPhone });
       });
     }
+
+    try {
+      const storeLorries = getAllStoredLorries();
+      const storeOutside = getAllStoredOutsideEmployees();
+      storeLorries.forEach((l: StoredLorry) => {
+        if ((l.isOutsideLorry || l.ownershipType === "outside") && l.driverName && l.plate) {
+          const pKey = normalizePlate(l.plate);
+          if (pKey && !driversByPlate.has(pKey)) {
+            driversByPlate.set(pKey, { driverId: l.driverId || "", name: l.driverName, phone: l.driverPhone || "" });
+          }
+        }
+      });
+      storeOutside.forEach((o: StoredOutsideEmployee) => {
+        if (o.plateNumber && o.name) {
+          const pKey = normalizePlate(o.plateNumber);
+          if (pKey) {
+            driversByPlate.set(pKey, { driverId: o.driverId || o.id, name: o.name, phone: o.phone || "" });
+          }
+        }
+      });
+    } catch {}
 
     const items: StoredBooking[] = [];
     const seenIds = new Set<string>();
@@ -399,15 +425,20 @@ async function fetchBookingsAuthoritative(): Promise<StoredBooking[]> {
       if (!mapped.assignedPlate && disp?.assignedPlate) {
         mapped.assignedPlate = disp.assignedPlate;
       }
+      const isOutsideLorry = plateNorm ? Boolean(driversByPlate.get(plateNorm)) : false;
       if (
         ["assigned", "in_transit", "delivered"].includes(mapped.status) ||
-        mapped.bookingType === "live_lorry"
+        mapped.bookingType === "live_lorry" ||
+        isOutsideLorry
       ) {
         if (!mapped.assignedDriverName) {
           mapped.assignedDriverName = disp?.driverName || matchedDrv?.name || "";
         }
         if (!mapped.assignedDriverPhone) {
           mapped.assignedDriverPhone = disp?.driverPhone || matchedDrv?.phone || "";
+        }
+        if (!mapped.assignedDriverId) {
+          mapped.assignedDriverId = disp?.driverId || matchedDrv?.driverId || "";
         }
       }
 
@@ -539,9 +570,17 @@ export async function createBookingAction(
     let finalAssignedDriverPhone = resolvedInputDriverPhone;
 
     if (outsideOwnerForCreate) {
-      finalAssignedDriverId = outsideOwnerForCreate.id;
+      finalAssignedDriverId = outsideOwnerForCreate.driverId || outsideOwnerForCreate.id;
       finalAssignedDriverName = outsideOwnerForCreate.name;
       finalAssignedDriverPhone = outsideOwnerForCreate.phone;
+    } else if (effectivePlateInput) {
+      const storeLorries = getAllStoredLorries();
+      const matchedL = storeLorries.find((l: StoredLorry) => normalizePlate(l.plate) === normalizePlate(effectivePlateInput));
+      if (matchedL && (matchedL.isOutsideLorry || matchedL.ownershipType === "outside")) {
+        finalAssignedDriverId = matchedL.driverId || "";
+        finalAssignedDriverName = matchedL.driverName || "";
+        finalAssignedDriverPhone = matchedL.driverPhone || "";
+      }
     }
 
     // 2. Atomic store creation in server memory + file persistence
@@ -630,9 +669,9 @@ export async function createBookingAction(
         notes: packageDetails,
         assignedPlate: input.assignedPlate?.trim() || resolvedDriverMeta.resolvedPlate || "",
         assignedLorryId: input.assignedLorryId?.trim() || resolvedDriverMeta.resolvedLorryId || "",
-        assignedDriverId: resolvedInputDriverId || resolvedDriverMeta.driverId || "",
-        assignedDriverName: resolvedInputDriverName || resolvedDriverMeta.driverName || "",
-        assignedDriverPhone: resolvedInputDriverPhone || resolvedDriverMeta.driverPhone || "",
+        assignedDriverId: finalAssignedDriverId || resolvedDriverMeta.driverId || "",
+        assignedDriverName: finalAssignedDriverName || resolvedDriverMeta.driverName || "",
+        assignedDriverPhone: finalAssignedDriverPhone || resolvedDriverMeta.driverPhone || "",
         bookingType: booking.bookingType,
         cargoNature: booking.cargoNature || "",
         daysNeeded: booking.daysNeeded || 1,
@@ -1170,10 +1209,19 @@ export async function updateBookingStatusAction(
     ).trim().toUpperCase();
     const outsideOwner = effectivePlate ? getStoredOutsideEmployeeByPlate(effectivePlate) : null;
     if (outsideOwner) {
-      effectiveAssignment.assignedDriverId = outsideOwner.id;
+      effectiveAssignment.assignedDriverId = outsideOwner.driverId || outsideOwner.id;
       effectiveAssignment.assignedDriverName = outsideOwner.name;
       effectiveAssignment.assignedDriverPhone = outsideOwner.phone;
       effectiveAssignment.assignedPlate = outsideOwner.plateNumber;
+    } else if (effectivePlate) {
+      const storeLorries = getAllStoredLorries();
+      const matchedL = storeLorries.find((l: StoredLorry) => normalizePlate(l.plate) === normalizePlate(effectivePlate));
+      if (matchedL && (matchedL.isOutsideLorry || matchedL.ownershipType === "outside")) {
+        effectiveAssignment.assignedDriverId = matchedL.driverId || "";
+        effectiveAssignment.assignedDriverName = matchedL.driverName || "";
+        effectiveAssignment.assignedDriverPhone = matchedL.driverPhone || "";
+        effectiveAssignment.assignedPlate = matchedL.plate;
+      }
     }
 
     // Outside Lorry 20% commission check & deduction on booking confirmation
