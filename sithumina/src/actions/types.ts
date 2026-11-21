@@ -70,6 +70,7 @@ export interface VehicleRegistrationActionInput {
 
 export interface OutsideEmployeeRecord {
   id: string;
+  driverId?: string;
   registrationId: string;
   name: string;
   phone: string;

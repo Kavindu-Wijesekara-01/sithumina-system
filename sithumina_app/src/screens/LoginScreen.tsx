@@ -96,7 +96,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
 
           {/* Riders & Admin Pill Badge */}
           <View style={styles.badge}>
-            <Text style={styles.badgeText}>Riders & Admin</Text>
+            <Text style={styles.badgeText}>Drivers, Riders & Admin</Text>
           </View>
 
           {/* Form Area */}
@@ -106,14 +106,14 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
               <Text style={styles.inputIcon}>🪪</Text>
               <TextInput
                 style={styles.textInput}
-                placeholder="Enter your ID"
+                placeholder="Enter ID (e.g. D-10, R-10)"
                 placeholderTextColor="#7D5E06"
                 value={loginId}
                 onChangeText={(text) => {
                   setLoginId(text);
                   if (errorMessage) setErrorMessage(null);
                 }}
-                autoCapitalize="none"
+                autoCapitalize="characters"
                 autoCorrect={false}
                 editable={!loading}
               />

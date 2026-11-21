@@ -2678,7 +2678,16 @@ export default function MasterAdminDashboard() {
       return;
     }
 
+    const matchedOutVehicle = fleetVehicles.find(
+      (v) =>
+        v.plate.toUpperCase() === cleanPlate &&
+        ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
+    );
     const matchedDriverObj = drivers.find((d) => d.name === lorryForm.rider);
+    const resolvedRider = matchedOutVehicle?.driverName || lorryForm.rider;
+    const resolvedDriverId = matchedOutVehicle?.driverId || matchedDriverObj?.driverId || "";
+    const resolvedDriverPhone = matchedOutVehicle?.driverPhone || matchedDriverObj?.phone || "";
+
     setLorrySubmitting(true);
     try {
       await saveAdminFleetVehicle({
@@ -2688,9 +2697,9 @@ export default function MasterAdminDashboard() {
         maxWeight: lorryForm.maxWeight,
         baseCity: lorryForm.baseCity,
         description: lorryForm.description,
-        rider: lorryForm.rider,
-        driverId: matchedDriverObj?.driverId || "",
-        driverPhone: matchedDriverObj?.phone || "",
+        rider: resolvedRider,
+        driverId: resolvedDriverId,
+        driverPhone: resolvedDriverPhone,
         images: lorryForm.images,
         imageUrl: lorryForm.images[0] || "",
       });
@@ -2716,9 +2725,16 @@ export default function MasterAdminDashboard() {
 
   // ---- Rider Registration & Management ----
   const handleOpenAddRider = () => {
-    const nextIdNum = Math.floor(1000 + Math.random() * 9000);
+    let maxRiderNum = 9;
+    drivers.forEach((d) => {
+      const m = String(d.driverId || "").match(/^R-(\d+)$/i);
+      if (m) {
+        const num = parseInt(m[1], 10);
+        if (num > maxRiderNum) maxRiderNum = num;
+      }
+    });
     setRiderForm({
-      driverId: `ST-DRV-${nextIdNum}`,
+      driverId: `R-${maxRiderNum + 1}`,
       name: "",
       phone: "",
       nic: "",
@@ -11060,17 +11076,45 @@ export default function MasterAdminDashboard() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-[#26231B] mb-1">Assign Rider</label>
-                  <select
-                    value={lorryForm.rider}
-                    onChange={(e) => setLorryForm((p) => ({ ...p, rider: e.target.value }))}
-                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
-                  >
-                    <option value="Unassigned">Unassigned</option>
-                    {drivers.map((d) => (
-                      <option key={d.driverId} value={d.name}>{d.name} ({d.driverId})</option>
-                    ))}
-                  </select>
+                  <label className="block text-xs font-bold text-[#26231B] mb-1">
+                    {editingLorryPlate &&
+                    fleetVehicles.some(
+                      (v) =>
+                        v.plate === editingLorryPlate &&
+                        ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
+                    )
+                      ? "🔒 Permanent Driver (Locked)"
+                      : "Assign Rider"}
+                  </label>
+                  {editingLorryPlate &&
+                  fleetVehicles.some(
+                    (v) =>
+                      v.plate === editingLorryPlate &&
+                      ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
+                  ) ? (
+                    <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs">
+                      <div className="font-bold text-amber-950 flex items-center justify-between">
+                        <span>{lorryForm.rider}</span>
+                        <span className="px-2 py-0.5 rounded bg-amber-200/80 font-mono text-[10px] text-amber-900">
+                          {fleetVehicles.find((v) => v.plate === editingLorryPlate)?.driverId || "Outside Driver"}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-amber-800 mt-1">
+                        පිට ලොරි සඳහා වෙනම රියදුරන් Assign කිරීම ඉවත් කර ඇති අතර ලියාපදිංචි කළ රියදුරු ස්ථිර වේ.
+                      </p>
+                    </div>
+                  ) : (
+                    <select
+                      value={lorryForm.rider}
+                      onChange={(e) => setLorryForm((p) => ({ ...p, rider: e.target.value }))}
+                      className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
+                    >
+                      <option value="Unassigned">Unassigned</option>
+                      {drivers.map((d) => (
+                        <option key={d.driverId} value={d.name}>{d.name} ({d.driverId})</option>
+                      ))}
+                    </select>
+                  )}
                 </div>
               </div>
 
@@ -12104,7 +12148,7 @@ export default function MasterAdminDashboard() {
                   </select>
                 </div>
 
-                {/* Outside Partner Driver Lock Banner */}
+                {/* Driver Assignment Section: Locked for Outside Lorry vs Selectable for Company Lorry */}
                 {Boolean(
                   assignModal.plate &&
                   fleetVehicles.some(
@@ -12112,78 +12156,78 @@ export default function MasterAdminDashboard() {
                       v.plate === assignModal.plate &&
                       ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
                   )
-                ) && (
-                  <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-950 flex items-start gap-2">
-                    <span className="text-base">🔒</span>
-                    <div>
-                      <strong className="block font-bold">Outside Partner Vehicle (පිටත ලියාපදිංචි ලොරියක්)</strong>
-                      <span>
-                        Driver is permanently locked to registered owner: <b>{assignModal.driverName}</b> ({assignModal.driverPhone}). A company rider cannot be assigned.
+                ) ? (
+                  <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-950 flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 font-bold text-amber-900">
+                        <span>🔒 ස්ථිර රියදුරු / Permanent Driver (Locked)</span>
+                      </div>
+                      <span className="px-2.5 py-0.5 rounded-md bg-[#26231B] text-[#FFC20E] font-mono text-[11px] font-black">
+                        {assignModal.driverId || "Assigned"}
                       </span>
                     </div>
+                    <div className="grid grid-cols-2 gap-2 mt-1">
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-amber-800/80 block">Driver Name</span>
+                        <span className="font-bold text-[#26231B]">{assignModal.driverName || "Registered Owner"}</span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-amber-800/80 block">Contact</span>
+                        <span className="font-bold font-mono text-[#26231B]">{assignModal.driverPhone || "—"}</span>
+                      </div>
+                    </div>
+                    <p className="text-[10.5px] text-amber-800 mt-0.5">
+                      පිට ලොරි සඳහා වෙනම රියදුරන් Assign කිරීම ඉවත් කර ඇති අතර ලියාපදිංචි කළ රියදුරු ස්වයංක්‍රීයව ස්ථිර රියදුරු ලෙස යොදවා ඇත.
+                    </p>
                   </div>
+                ) : (
+                  <>
+                    <div>
+                      <label className="block text-xs font-bold text-[#26231B] mb-1">
+                        Select Rider *
+                      </label>
+                      <select
+                        value={assignModal.driverName}
+                        onChange={(e) => {
+                          const drv = drivers.find((d) => d.name === e.target.value);
+                          setAssignModal((p) => {
+                            if (!p) return null;
+                            const preservedPlate = p.plate || drv?.plate || "";
+                            const derivedLorryId = preservedPlate
+                              ? `lorry-${normalizePlate(preservedPlate).toLowerCase()}`
+                              : p.lorryId;
+                            return {
+                              ...p,
+                              driverId: drv?.driverId || "",
+                              driverName: drv?.name || e.target.value,
+                              driverPhone: drv?.phone || p.driverPhone,
+                              plate: preservedPlate,
+                              lorryId: derivedLorryId,
+                            };
+                          });
+                        }}
+                        className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B]"
+                      >
+                        <option value="">Select Rider</option>
+                        {drivers.map((d) => (
+                          <option key={d.driverId} value={d.name}>{d.name} ({d.driverId}) - {d.phone}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-[#26231B] mb-1">
+                        Rider Mobile Number (Shown to Customer)
+                      </label>
+                      <input
+                        type="tel"
+                        value={assignModal.driverPhone}
+                        onChange={(e) => setAssignModal((p) => (p ? { ...p, driverPhone: e.target.value } : null))}
+                        className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B]"
+                      />
+                    </div>
+                  </>
                 )}
-
-                <div>
-                  <label className="block text-xs font-bold text-[#26231B] mb-1">
-                    Select Rider {Boolean(assignModal.plate && fleetVehicles.some((v) => v.plate === assignModal.plate && ((v as any).isOutsideLorry || (v as any).ownershipType === "outside"))) ? "(Locked to Owner)" : "*"}
-                  </label>
-                  <select
-                    disabled={Boolean(
-                      assignModal.plate &&
-                      fleetVehicles.some(
-                        (v) =>
-                          v.plate === assignModal.plate &&
-                          ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
-                      )
-                    )}
-                    value={assignModal.driverName}
-                    onChange={(e) => {
-                      const drv = drivers.find((d) => d.name === e.target.value);
-                      setAssignModal((p) => {
-                        if (!p) return null;
-                        const preservedPlate = p.plate || drv?.plate || "";
-                        const derivedLorryId = preservedPlate
-                          ? `lorry-${normalizePlate(preservedPlate).toLowerCase()}`
-                          : p.lorryId;
-                        return {
-                          ...p,
-                          driverId: drv?.driverId || "",
-                          driverName: drv?.name || e.target.value,
-                          driverPhone: drv?.phone || p.driverPhone,
-                          plate: preservedPlate,
-                          lorryId: derivedLorryId,
-                        };
-                      });
-                    }}
-                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] disabled:opacity-60 disabled:cursor-not-allowed"
-                  >
-                    <option value="">Select Rider</option>
-                    {drivers.map((d) => (
-                      <option key={d.driverId} value={d.name}>{d.name} ({d.driverId}) - {d.phone}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-[#26231B] mb-1">
-                    Rider Mobile Number (Shown to Customer)
-                  </label>
-                  <input
-                    type="tel"
-                    disabled={Boolean(
-                      assignModal.plate &&
-                      fleetVehicles.some(
-                        (v) =>
-                          v.plate === assignModal.plate &&
-                          ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
-                      )
-                    )}
-                    value={assignModal.driverPhone}
-                    onChange={(e) => setAssignModal((p) => (p ? { ...p, driverPhone: e.target.value } : null))}
-                    className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B] disabled:opacity-60 disabled:cursor-not-allowed"
-                  />
-                </div>
 
                 {modalConflict?.hasConflict && (
                   <div className="px-3 py-2 rounded-xl bg-red-50 border border-red-300 text-[11.5px] font-bold text-red-700">

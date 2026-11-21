@@ -298,17 +298,17 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
             <div>
               <label className="block text-xs font-extrabold text-[var(--ink)] mb-1.5 flex items-center justify-between">
                 <span>
-                  {locale === "en" ? "National ID Number (NIC) *" : "ජාතික හැඳුනුම්පත් අංකය (ID Number) *"}
+                  {locale === "en" ? "National ID (NIC) or Driver ID (e.g. D-10) *" : "ජාතික හැඳුනුම්පත් අංකය (NIC) හෝ Driver ID (උදා: D-10) *"}
                 </span>
-                <span className="text-[10px] text-amber-600 font-bold">Required to access portal</span>
+                <span className="text-[10px] text-amber-600 font-bold">Portal & Driver App Login</span>
               </label>
               <input
                 type="text"
                 required
                 placeholder={
                   locale === "en"
-                    ? "e.g. 199012345678 or 901234567V"
-                    : "උදා: 199012345678 හෝ 901234567V"
+                    ? "e.g. D-10 or 199012345678"
+                    : "උදා: D-10 හෝ 199012345678"
                 }
                 value={nicInput}
                 onChange={(e) => setNicInput(e.target.value)}
@@ -316,8 +316,8 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               />
               <p className="text-[11px] text-[var(--mut)] mt-1.5">
                 {locale === "en"
-                  ? "Use the NIC you entered when submitting the /register-vehicle form."
-                  : "වාහනය ලියාපදිංචි කිරීමේදී ලබාදුන් ජාතික හැඳුනුම්පත් අංකය ඇතුළත් කරන්න."}
+                  ? "Enter your National ID (NIC) or your assigned Driver ID (e.g. D-10)."
+                  : "ඔබගේ ජාතික හැඳුනුම්පත් අංකය (NIC) හෝ පද්ධතියෙන් ලැබුණු Driver ID අංකය (උදා: D-10) ඇතුළත් කරන්න."}
               </p>
             </div>
 
@@ -409,10 +409,21 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-lg sm:text-xl font-black text-[var(--ink)]">{employee.name}</h2>
                 <span className="px-2 py-0.5 rounded-md bg-[#26231B] text-[#FFC20E] font-mono text-xs font-black">
-                  {employee.id}
+                  ID: {employee.driverId || employee.id}
                 </span>
               </div>
-              <div className="flex items-center gap-3 text-xs text-[var(--mut)] mt-1 flex-wrap">
+              <div className="mt-1 flex items-center gap-2 flex-wrap">
+                <span className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-950 font-bold text-xs flex items-center gap-1.5 shadow-2xs">
+                  <span>📱 Driver App Login:</span>
+                  <strong className="font-mono text-xs font-black text-emerald-900">{employee.driverId || employee.id}</strong>
+                </span>
+                <span className="text-[11px] text-[var(--mut)]">
+                  {locale === "en"
+                    ? "Use this ID to log in to the Driver App"
+                    : "Driver App එකට Log වීමට මෙම අංකය භාවිතා කරන්න"}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 text-xs text-[var(--mut)] mt-1.5 flex-wrap">
                 <span>Plate: <strong className="text-[var(--ink)] font-mono">{employee.plateNumber}</strong></span>
                 <span>•</span>
                 <span>Type: <strong className="text-[var(--ink)]">{employee.vehicleType}</strong></span>

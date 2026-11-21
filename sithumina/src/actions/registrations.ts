@@ -6,6 +6,7 @@ import {
   getAllStoredRegistrations,
   updateRegistrationStatusInStore,
   registerDriverInStore,
+  generateNextSimpleDriverId,
   getAllStoredOutsideEmployees,
   getStoredOutsideEmployeeByIdNumber,
   getStoredOutsideEmployeeByPlate,
@@ -227,7 +228,7 @@ export async function approveRegistrationAndAddToFleetAction(
     if (reg) {
       const cleanPlate = (reg.vehicleNumber || "").toUpperCase().trim();
       const docId = `lorry-${cleanPlate.replace(/[^A-Z0-9]/gi, "").toLowerCase()}`;
-      const employeeId = reg.outsideEmployeeId || `ST-OUT-${Math.floor(1000 + Math.random() * 9000)}`;
+      const employeeId = reg.outsideEmployeeId || generateNextSimpleDriverId("D");
 
       // 1. Sync outside employee to Firestore
       try {
@@ -235,6 +236,7 @@ export async function approveRegistrationAndAddToFleetAction(
           doc(db, "outside_employees", employeeId),
           {
             id: employeeId,
+            driverId: employeeId,
             registrationId: reg.id,
             name: reg.ownerName,
             phone: reg.phone,
@@ -254,6 +256,31 @@ export async function approveRegistrationAndAddToFleetAction(
         );
       } catch (e) {
         console.warn("Firestore outside_employees sync notice:", e);
+      }
+
+      // 1b. Sync driver directly to Firestore "drivers" collection (Authoritative for Driver App login!)
+      try {
+        await setDoc(
+          doc(db, "drivers", employeeId),
+          {
+            id: employeeId,
+            driverId: employeeId,
+            name: reg.ownerName,
+            phone: reg.phone,
+            nic: reg.idNumber || "",
+            plate: cleanPlate,
+            vehicleType: reg.vehicleType,
+            route: route || `${reg.baseCity || "Colombo"} – Island-wide`,
+            lorryId: docId,
+            active: true,
+            isOutsideDriver: true,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          },
+          { merge: true }
+        );
+      } catch (e) {
+        console.warn("Firestore drivers sync notice:", e);
       }
 
       // 2. Sync initial Rs. 5,000 deposit transaction to Firestore
@@ -277,6 +304,7 @@ export async function approveRegistrationAndAddToFleetAction(
 
       // 3. Register driver in local store
       registerDriverInStore({
+        driverId: employeeId,
         name: reg.ownerName,
         phone: reg.phone,
         plate: cleanPlate,
@@ -358,7 +386,7 @@ export async function loginOutsideEmployeeAction(
   try {
     const cleanId = (idNumber || "").trim().toLowerCase();
     if (!cleanId) {
-      return { success: false, error: "National ID Number (NIC) is required / හැඳුනුම්පත් අංකය ඇතුළත් කරන්න." };
+      return { success: false, error: "National ID Number (NIC) or Driver ID is required / හැඳුනුම්පත් අංකය හෝ Driver ID ඇතුළත් කරන්න." };
     }
 
     let emp = getStoredOutsideEmployeeByIdNumber(cleanId);
@@ -369,7 +397,11 @@ export async function loginOutsideEmployeeAction(
         const snap = await getDocs(collection(db, "outside_employees"));
         for (const d of snap.docs) {
           const data = d.data() as StoredOutsideEmployee;
-          if ((data.idNumber || "").trim().toLowerCase() === cleanId) {
+          if (
+            (data.idNumber || "").trim().toLowerCase() === cleanId ||
+            (data.id || "").trim().toLowerCase() === cleanId ||
+            (data.driverId || "").trim().toLowerCase() === cleanId
+          ) {
             emp = data;
             break;
           }
@@ -383,7 +415,10 @@ export async function loginOutsideEmployeeAction(
     if (!emp) {
       const storeRegs = getAllStoredRegistrations();
       const matchedReg = storeRegs.find(
-        (r) => (r.idNumber || "").trim().toLowerCase() === cleanId && r.status === "approved"
+        (r) =>
+          ((r.idNumber || "").trim().toLowerCase() === cleanId ||
+            (r.outsideEmployeeId || "").trim().toLowerCase() === cleanId) &&
+          r.status === "approved"
       );
       if (matchedReg) {
         // Auto-initialize if registration was approved

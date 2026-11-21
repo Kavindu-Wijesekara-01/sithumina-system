@@ -1,7 +1,7 @@
 {
   "drivers": [
     {
-      "driverId": "ST-DRV-2795",
+      "driverId": "D-10",
       "name": "in palihawana",
       "phone": "0764011509",
       "plate": "JM 6675",
@@ -30,7 +30,7 @@
       "route": "Western – Island-wide",
       "driverName": "in palihawana",
       "driverPhone": "0764011509",
-      "driverId": "ST-DRV-2795",
+      "driverId": "D-10",
       "vehicleType": "14ft Lorry (දිග අඩි 14)",
       "capacity": "3 Tons Cargo Payload",
       "maxWeight": "3.5 Tons (3,500 kg)",
@@ -61,7 +61,7 @@
       "plate": "WP 4567",
       "route": "Colombo – Island-wide",
       "driverName": "D. M. Perera",
-      "driverId": "ST-DRV-5282",
+      "driverId": "R-1001",
       "vehicleType": "14.5ft Demountable Box Lorry",
       "lat": 6.9271,
       "lng": 79.8612,
@@ -163,7 +163,7 @@
       "status": "pending",
       "assignedPlate": "JM 6675",
       "assignedLorryId": "lorry-jm6675",
-      "assignedDriverId": "ST-OUT-1001",
+      "assignedDriverId": "D-10",
       "assignedDriverName": "in palihawana",
       "assignedDriverPhone": "0764011509",
       "bookingType": "individual_vehicle",
@@ -413,7 +413,7 @@
       "status": "approved",
       "createdAt": 1795244245725,
       "updatedAt": 1795244330147,
-      "outsideEmployeeId": "ST-OUT-1001"
+      "outsideEmployeeId": "D-10"
     },
     {
       "id": "ST-REG-1480",
@@ -442,7 +442,8 @@
   ],
   "outsideEmployees": [
     {
-      "id": "ST-OUT-1001",
+      "id": "D-10",
+      "driverId": "D-10",
       "registrationId": "ST-REG-6158",
       "name": "in palihawana",
       "phone": "0764011509",
@@ -462,7 +463,7 @@
   "commissionTransactions": [
     {
       "id": "TX-1795245023372-972",
-      "employeeId": "ST-OUT-1001",
+      "employeeId": "D-10",
       "idNumber": "200506002755",
       "bookingId": "ST-BK-6980",
       "type": "commission_deduction",
@@ -476,7 +477,7 @@
     },
     {
       "id": "TX-1795244641722-905",
-      "employeeId": "ST-OUT-1001",
+      "employeeId": "D-10",
       "idNumber": "200506002755",
       "type": "topup",
       "amount": 5000,
@@ -488,7 +489,7 @@
     },
     {
       "id": "TX-1795244330147-684",
-      "employeeId": "ST-OUT-1001",
+      "employeeId": "D-10",
       "idNumber": "200506002755",
       "type": "initial_deposit",
       "amount": 5000,
@@ -502,7 +503,7 @@
   "topupSlips": [
     {
       "id": "SLIP-1795244630439-265",
-      "employeeId": "ST-OUT-1001",
+      "employeeId": "D-10",
       "idNumber": "200506002755",
       "employeeName": "in palihawana",
       "phone": "0764011509",

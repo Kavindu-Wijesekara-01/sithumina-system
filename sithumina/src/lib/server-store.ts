@@ -11,6 +11,7 @@ export interface StoredDriver {
   driverId: string;
   name: string;
   phone: string;
+  nic?: string;
   plate: string;
   vehicleType: string;
   route: string;
@@ -177,6 +178,7 @@ export interface StoredRegistration {
 
 export interface StoredOutsideEmployee {
   id: string;
+  driverId?: string;
   registrationId: string;
   name: string;
   phone: string;
@@ -469,9 +471,40 @@ export function getAllStoredLorries(): StoredLorry[] {
   return activeLorries;
 }
 
+export function generateNextSimpleDriverId(prefix: "D" | "R" = "D"): string {
+  const store = readStore();
+  const regex = new RegExp(`^${prefix}-(\\d+)$`, "i");
+  let maxNum = 9; // starts at 10 (e.g. D-10, R-10)
+
+  for (const d of store.drivers || []) {
+    const match = String(d.driverId || "").trim().match(regex);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (num > maxNum) maxNum = num;
+    }
+  }
+
+  for (const emp of store.outsideEmployees || []) {
+    const match = String(emp.driverId || emp.id || "").trim().match(regex);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (num > maxNum) maxNum = num;
+    }
+  }
+
+  for (const l of store.lorries || []) {
+    const match = String(l.driverId || "").trim().match(regex);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (num > maxNum) maxNum = num;
+    }
+  }
+
+  return `${prefix}-${maxNum + 1}`;
+}
+
 export function generateUniqueDriverId(): string {
-  const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-  return `ST-DRV-${randomSuffix}`;
+  return generateNextSimpleDriverId("D");
 }
 
 export function registerDriverInStore(input: {
@@ -1373,18 +1406,18 @@ export function updateRegistrationStatusInStore(
   const reg = store.registrations[idx];
 
   if (status === "approved") {
-    // Generate outside employee ID if not set
+    // Generate outside driver ID (e.g. D-10, D-11...) if not set
     if (!reg.outsideEmployeeId) {
-      const nextId = 1000 + (store.outsideEmployees?.length || 0) + 1;
-      reg.outsideEmployeeId = `ST-OUT-${nextId}`;
+      reg.outsideEmployeeId = generateNextSimpleDriverId("D");
     }
 
     // Upsert into outsideEmployees
     const existingEmpIdx = store.outsideEmployees.findIndex(
-      (e) => e.registrationId === reg.id || e.idNumber === reg.idNumber || e.id === reg.outsideEmployeeId
+      (e) => e.registrationId === reg.id || e.idNumber === reg.idNumber || e.id === reg.outsideEmployeeId || e.driverId === reg.outsideEmployeeId
     );
     const empData: StoredOutsideEmployee = {
       id: reg.outsideEmployeeId,
+      driverId: reg.outsideEmployeeId,
       registrationId: reg.id,
       name: reg.ownerName,
       phone: reg.phone,
@@ -1421,9 +1454,31 @@ export function updateRegistrationStatusInStore(
       });
     }
 
-    // Register / update vehicle in lorries
+    // Register / update permanent driver in store.drivers
     const cleanPlate = reg.vehicleNumber.trim().toUpperCase();
     const docId = `lorry-${cleanPlate.replace(/[^A-Z0-9]/gi, "").toLowerCase()}`;
+    const driverIdx = store.drivers.findIndex(
+      (d) => d.driverId === reg.outsideEmployeeId || d.plate === cleanPlate
+    );
+    const driverData: StoredDriver = {
+      driverId: reg.outsideEmployeeId,
+      name: reg.ownerName,
+      phone: reg.phone,
+      nic: reg.idNumber || "",
+      plate: cleanPlate,
+      vehicleType: reg.vehicleType,
+      route: `${reg.baseCity || "Colombo"} – Island-wide`,
+      lorryId: docId,
+      active: true,
+      createdAt: Date.now(),
+    };
+    if (driverIdx >= 0) {
+      store.drivers[driverIdx] = driverData;
+    } else {
+      store.drivers.unshift(driverData);
+    }
+
+    // Register / update vehicle in lorries
     const lorryIdx = store.lorries.findIndex(
       (l) => l.plate.toUpperCase() === cleanPlate || l.id === docId
     );
@@ -1481,7 +1536,10 @@ export function getStoredOutsideEmployeeByIdNumber(idNumber: string): StoredOuts
   const cleanId = (idNumber || "").trim().toLowerCase();
   if (!cleanId) return null;
   return (store.outsideEmployees || []).find(
-    (e) => (e.idNumber || "").trim().toLowerCase() === cleanId
+    (e) =>
+      (e.idNumber || "").trim().toLowerCase() === cleanId ||
+      (e.id || "").trim().toLowerCase() === cleanId ||
+      (e.driverId || "").trim().toLowerCase() === cleanId
   ) || null;
 }
 
@@ -1510,7 +1568,10 @@ export function toggleOutsideEmployeeAvailabilityInStore(
   const store = readStore();
   const cleanKey = (idNumberOrId || "").trim().toLowerCase();
   const empIdx = (store.outsideEmployees || []).findIndex(
-    (e) => (e.idNumber || "").trim().toLowerCase() === cleanKey || (e.id || "").trim().toLowerCase() === cleanKey
+    (e) =>
+      (e.idNumber || "").trim().toLowerCase() === cleanKey ||
+      (e.id || "").trim().toLowerCase() === cleanKey ||
+      (e.driverId || "").trim().toLowerCase() === cleanKey
   );
   if (empIdx === -1) {
     return { success: false, isAvailable: false, error: "Employee not found." };

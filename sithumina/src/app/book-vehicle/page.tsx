@@ -78,7 +78,6 @@ function FleetVehicleCard({
   const currentIdx = images.length > 0 ? activeIdx % images.length : 0;
   const currentImg = images[currentIdx] || PLACEHOLDER_VEHICLE_IMAGE;
 
-  const isOutside = (lorry as any).isOutsideLorry || (lorry as any).ownershipType === "outside";
   const baseCity = getLorryBaseCity(lorry);
   const isAvailable = (lorry as any).isAvailable !== false;
 
@@ -120,20 +119,11 @@ function FleetVehicleCard({
             }}
           />
 
-          {/* Vehicle Plate Badge & Fleet Ownership Tag */}
+          {/* Vehicle Plate Badge */}
           <div className="absolute top-2 left-2 flex items-center gap-1.5 z-10 flex-wrap">
             <span className="px-2 py-0.5 rounded-md bg-black/85 text-white font-mono text-[11px] font-black backdrop-blur-xs shadow-xs">
               {lorry.plate}
             </span>
-            {isOutside ? (
-              <span className="px-1.5 py-0.5 rounded-md bg-amber-500 text-white font-black text-[9px] backdrop-blur-xs shadow-xs uppercase tracking-tight">
-                🤝 Outside Partner
-              </span>
-            ) : (
-              <span className="px-1.5 py-0.5 rounded-md bg-blue-600 text-white font-black text-[9px] backdrop-blur-xs shadow-xs uppercase tracking-tight">
-                🏢 Company Fleet
-              </span>
-            )}
           </div>
 
           {/* Photo Counter Pill (e.g. 1/3 Photos) */}
@@ -345,9 +335,8 @@ function BookVehicleContent() {
   const [gpsCoords, setGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [gpsError, setGpsError] = useState<string | null>(null);
 
-  // Location Proximity Search & Filter state
+  // Location Proximity Search state
   const [searchLocation, setSearchLocation] = useState("");
-  const [filterOwnership, setFilterOwnership] = useState<"all" | "company" | "outside">("all");
 
   // Active coordinates derived from search city or live GPS
   const activeSearchCoords = React.useMemo<[number, number] | null>(() => {
@@ -363,12 +352,6 @@ function BookVehicleContent() {
   // Proximity sorted and filtered fleet list
   const filteredAndSortedFleet = React.useMemo(() => {
     let list = fleet;
-
-    if (filterOwnership === "company") {
-      list = list.filter((l) => !(l as any).isOutsideLorry && (l as any).ownershipType !== "outside");
-    } else if (filterOwnership === "outside") {
-      list = list.filter((l) => (l as any).isOutsideLorry || (l as any).ownershipType === "outside");
-    }
 
     const withDistance = list.map((lorry) => {
       let dist: number | null = null;
@@ -396,7 +379,7 @@ function BookVehicleContent() {
     }
 
     return withDistance;
-  }, [fleet, filterOwnership, activeSearchCoords]);
+  }, [fleet, activeSearchCoords]);
 
   // Booking form state
   const [submitting, setSubmitting] = useState(false);
@@ -835,52 +818,19 @@ function BookVehicleContent() {
               ))}
             </div>
 
-            {/* Fleet Ownership Filter & Active Location Notice */}
-            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--line)]">
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <button
-                  type="button"
-                  onClick={() => setFilterOwnership("all")}
-                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                    filterOwnership === "all"
-                      ? "bg-[#26231B] text-[#FFC20E]"
-                      : "bg-[var(--bg)] text-[var(--mut)] border border-[var(--line)] hover:text-[var(--ink)]"
-                  }`}
-                >
-                  {locale === "en" ? "All Lorries" : "සියලු වාහන"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFilterOwnership("company")}
-                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                    filterOwnership === "company"
-                      ? "bg-blue-600 text-white"
-                      : "bg-[var(--bg)] text-[var(--mut)] border border-[var(--line)] hover:text-[var(--ink)]"
-                  }`}
-                >
-                  🏢 {locale === "en" ? "Company Fleet" : "ආයතනයේ ලොරි"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFilterOwnership("outside")}
-                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                    filterOwnership === "outside"
-                      ? "bg-amber-500 text-white"
-                      : "bg-[var(--bg)] text-[var(--mut)] border border-[var(--line)] hover:text-[var(--ink)]"
-                  }`}
-                >
-                  🤝 {locale === "en" ? "Outside Partners" : "පිටත ලොරි"}
-                </button>
-              </div>
-
-              {activeSearchCoords && (
+            {/* Active Location Distance Indicator */}
+            {activeSearchCoords && (
+              <div className="flex items-center justify-between gap-2 pt-2 border-t border-[var(--line)]">
                 <span className="text-[11px] font-bold text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
                   📍 {locale === "en"
                     ? `Nearest to ${searchLocation || "GPS location"}`
                     : `${searchLocation || "ඔබගේ ස්ථානයට"} ආසන්නතම අනුපිළිවෙළින්`}
                 </span>
-              )}
-            </div>
+                <span className="text-xs text-[var(--mut)]">
+                  {filteredAndSortedFleet.length} {locale === "en" ? "vehicles available" : "වාහන තිබේ"}
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center justify-between">
@@ -1023,15 +973,9 @@ function BookVehicleContent() {
                     <span className="font-mono text-xs font-black px-2.5 py-1 rounded-md bg-[var(--y3)] text-[#5B4300] border border-[var(--y2)]">
                       {selectedVehicle.plate}
                     </span>
-                    {(selectedVehicle as any).isOutsideLorry || (selectedVehicle as any).ownershipType === "outside" ? (
-                      <span className="px-2.5 py-1 rounded-md bg-amber-500 text-white font-bold text-xs uppercase tracking-tight shadow-xs">
-                        🤝 Outside Partner ({getLorryBaseCity(selectedVehicle)})
-                      </span>
-                    ) : (
-                      <span className="px-2.5 py-1 rounded-md bg-blue-600 text-white font-bold text-xs uppercase tracking-tight shadow-xs">
-                        🏢 Company Fleet (Kiribathgoda)
-                      </span>
-                    )}
+                    <span className="px-2.5 py-1 rounded-md bg-[var(--bg)] text-[var(--ink)] border border-[var(--line)] font-bold text-xs">
+                      📍 {getLorryBaseCity(selectedVehicle)}
+                    </span>
                   </div>
                   <h2 className="text-xl font-black text-[var(--ink)] mt-2">
                     {selectedVehicle.vehicleType}
@@ -1185,28 +1129,6 @@ function BookVehicleContent() {
                   {locale === "en" ? "Change Vehicle" : "වෙනත් වාහනයක් තෝරන්න"}
                 </button>
               </div>
-
-              {/* Outside Partner Link Notice */}
-              {((selectedVehicle as any).isOutsideLorry || (selectedVehicle as any).ownershipType === "outside") && (
-                <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2.5">
-                  <span className="text-lg">🤝</span>
-                  <div className="flex flex-col gap-0.5">
-                    <div className="flex items-center gap-2">
-                      <strong className="font-bold text-amber-950">
-                        {locale === "en" ? "Outside Partner Lorry" : "පිටත ලියාපදිංචි ලොරි රථයකි"}
-                      </strong>
-                      <span className="px-2 py-0.2 rounded-full bg-amber-200/80 text-amber-900 font-mono text-[10px] font-bold">
-                        Base: {getLorryBaseCity(selectedVehicle)}
-                      </span>
-                    </div>
-                    <p className="text-[11.5px] text-amber-800">
-                      {locale === "en"
-                        ? `Direct Partner: Driver is locked to the registered vehicle owner (${selectedVehicle.driverName || "Registered Partner"}${selectedVehicle.driverPhone ? ` · ${selectedVehicle.driverPhone}` : ""}). No separate driver will be dispatched.`
-                        : `මෙම ලොරිය සඳහා ලියාපදිංචි හිමිකරු (${selectedVehicle.driverName || "හිමිකරු"}${selectedVehicle.driverPhone ? ` · ${selectedVehicle.driverPhone}` : ""}) සෘජුවම සම්බන්ධ වන අතර වෙනම රියදුරෙකු පත් නොකෙරේ.`}
-                    </p>
-                  </div>
-                </div>
-              )}
 
               {/* Unavailable Warning */}
               {(selectedVehicle as any).isAvailable === false && (
