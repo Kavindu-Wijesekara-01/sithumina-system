@@ -1523,11 +1523,16 @@ export function subscribeAdminBookings(
 
 export async function updateBookingDispatch(input: {
   id: string;
-  status: "pending" | "assigned" | "goods_collected" | "in_transit" | "delivered" | "cancelled";
+  status: "pending" | "assigned" | "goods_collected" | "in_transit" | "delivered" | "completed" | "cancelled";
+  driverTripStatus?: "pending_acceptance" | "accepted" | "declined" | "in_transit" | "completed" | "empty_return";
+  rideStartedAt?: number;
+  rideEndedAt?: number;
   assignedLorryId?: string;
   assignedDriverName?: string;
   assignedDriverPhone?: string;
   assignedPlate?: string;
+  waypoints?: Array<{ name: string; lat?: number; lng?: number }>;
+  travelRoute?: string;
 }): Promise<boolean> {
   // 1. Direct Firestore update
   try {
@@ -1820,6 +1825,11 @@ export async function getCachedVehicles(): Promise<VehicleItem[]> {
   }
 }
 
+function stripSinhalaText(val: any): string {
+  if (!val || typeof val !== "string") return "";
+  return val.replace(/[\u0D80-\u0DFF]+/g, "").replace(/\(\s*\)/g, "").replace(/\s{2,}/g, " ").trim();
+}
+
 export function subscribeAdminVehicles(
   callback: (vehicles: VehicleItem[]) => void
 ): () => void {
@@ -1848,10 +1858,10 @@ export function subscribeAdminVehicles(
           const cap = data.capacity || data.availableCapacityKg || "";
           const item: VehicleItem = {
             plate,
-            type: data.vehicleType || "Lorry",
-            capacity: String(cap),
-            maxWeight: String(data.maxWeight || ""),
-            description: String(data.description || ""),
+            type: stripSinhalaText(data.vehicleType || "Lorry"),
+            capacity: stripSinhalaText(String(cap)),
+            maxWeight: stripSinhalaText(String(data.maxWeight || "")),
+            description: stripSinhalaText(String(data.description || "")),
             images: realImages,
             rider: String(data.driverName || data.driverId || "Unassigned"),
             status: data.status === "on_trip" ? "On trip" : "Empty",
@@ -2172,4 +2182,99 @@ export async function toggleAdminBanner(id: string): Promise<void> {
       updatedAt: Date.now(),
     });
   } catch {}
+}
+
+/* ============================================================
+ * COMPLAINTS & DELETION REASONS FIRESTORE SYNC
+ * ============================================================ */
+
+export interface ComplaintRecord {
+  id: string;
+  bookingId: string;
+  customerName: string;
+  customerPhone: string;
+  customerIdNumber?: string;
+  pickupCity: string;
+  deliveryCity: string;
+  date: string;
+  vehicleType?: string;
+  quotedAmount?: number;
+  distanceKm?: number;
+  reason: string;
+  deletedAt: number;
+  deletedBy?: string;
+}
+
+export function subscribeAdminComplaints(
+  callback: (complaints: ComplaintRecord[]) => void
+): () => void {
+  let isMounted = true;
+  let unsubscribeFs = () => {};
+
+  try {
+    const colRef = collection(db, "complaints");
+    unsubscribeFs = onSnapshot(
+      query(colRef),
+      (snapshot) => {
+        if (!isMounted) return;
+        const list: ComplaintRecord[] = [];
+        if (!snapshot.empty) {
+          snapshot.forEach((d) => {
+            const data = d.data();
+            list.push({
+              id: String(data.id || d.id),
+              bookingId: String(data.bookingId || ""),
+              customerName: String(data.customerName || ""),
+              customerPhone: String(data.customerPhone || ""),
+              customerIdNumber: data.customerIdNumber ? String(data.customerIdNumber) : undefined,
+              pickupCity: String(data.pickupCity || ""),
+              deliveryCity: String(data.deliveryCity || ""),
+              date: String(data.date || data.bookingDate || ""),
+              vehicleType: String(data.vehicleType || "Lorry"),
+              quotedAmount: typeof data.quotedAmount === "number" ? data.quotedAmount : (Number(data.quotedAmount || data.amount) || undefined),
+              distanceKm: typeof data.distanceKm === "number" ? data.distanceKm : (Number(data.distanceKm) || undefined),
+              reason: String(data.reason || "Booking deleted by admin"),
+              deletedAt: Number(data.deletedAt) || (data.deletedAt ? new Date(data.deletedAt).getTime() : Date.now()),
+              deletedBy: data.deletedBy ? String(data.deletedBy) : undefined,
+            });
+          });
+          list.sort((a, b) => (Number(b.deletedAt) || 0) - (Number(a.deletedAt) || 0));
+          callback(list);
+        } else {
+          callback([]);
+        }
+      },
+      (err) => {
+        console.warn("Complaints Firestore subscription notice:", err);
+        if (isMounted) callback([]);
+      }
+    );
+  } catch (err) {
+    console.warn("Complaints Firestore setup notice:", err);
+    callback([]);
+  }
+
+  return () => {
+    isMounted = false;
+    unsubscribeFs();
+  };
+}
+
+export async function deleteAdminComplaint(id: string): Promise<boolean> {
+  if (!id) return false;
+  try {
+    const docRef = doc(db, "complaints", id);
+    await deleteDoc(docRef);
+  } catch (e) {
+    console.warn("Firestore delete complaint notice:", e);
+  }
+
+  try {
+    await apiFetch("/api/complaints", {
+      method: "DELETE",
+      body: JSON.stringify({ id }),
+    });
+  } catch {}
+
+  return true;
 }

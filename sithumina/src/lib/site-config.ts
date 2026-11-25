@@ -62,21 +62,15 @@ export const siteConfig: SiteConfig = {
   phoneNumbers: [
     {
       type: "call",
-      display: "0771234567",
-      number: "0771234567",
-      link: "tel:0771234567",
-    },
-    {
-      type: "call",
-      display: "0717654321",
-      number: "0717654321",
-      link: "tel:0717654321",
+      display: "0112 984 984",
+      number: "0112984984",
+      link: "tel:0112984984",
     },
     {
       type: "whatsapp",
-      display: "0765550123",
-      number: "0765550123",
-      link: "https://wa.me/94765550123",
+      display: "0755 984 984",
+      number: "0755984984",
+      link: "https://wa.me/94755984984",
     },
   ],
   socialLinks: [
@@ -84,13 +78,13 @@ export const siteConfig: SiteConfig = {
       name: "Facebook",
       key: "facebook",
       label: "Facebook",
-      url: "https://facebook.com/sithuminatransport",
+      url: "https://www.facebook.com/share/1BJiDGsPNL/",
     },
     {
       name: "WhatsApp",
       key: "whatsapp",
       label: "WhatsApp",
-      url: "https://wa.me/94765550123",
+      url: "https://wa.me/94755984984",
     },
     {
       name: "YouTube",
@@ -110,13 +104,13 @@ export const siteConfig: SiteConfig = {
       name: "Facebook",
       key: "facebook",
       label: "Facebook",
-      url: "https://facebook.com/sithuminatransport",
+      url: "https://www.facebook.com/share/1BJiDGsPNL/",
     },
     {
       name: "WhatsApp",
       key: "whatsapp",
       label: "WhatsApp",
-      url: "https://wa.me/94765550123",
+      url: "https://wa.me/94755984984",
     },
 
     {

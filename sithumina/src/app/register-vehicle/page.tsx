@@ -284,7 +284,7 @@ export default function RegisterVehiclePage() {
                 <input
                   required
                   type="tel"
-                  placeholder="e.g. 077 123 4567"
+                  placeholder="e.g. 07X XXX XXXX"
                   value={form.phone}
                   onChange={(e) => setForm({ ...form, phone: e.target.value })}
                   className="p-3 text-sm rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] focus:outline-none focus:border-[#FFC20E]"

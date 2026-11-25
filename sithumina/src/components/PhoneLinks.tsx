@@ -21,10 +21,7 @@ export const PhoneLinks: React.FC<PhoneLinksProps> = ({
 
   // Select phone numbers according to limit
   let phones = siteConfig.phoneNumbers;
-  if (limit === 2) {
-    // 1 Call Hotline + 1 WhatsApp chat for ideal mobile utility
-    phones = [siteConfig.phoneNumbers[0], siteConfig.phoneNumbers[2]];
-  } else if (limit && limit > 0) {
+  if (limit && limit > 0) {
     phones = siteConfig.phoneNumbers.slice(0, limit);
   }
 

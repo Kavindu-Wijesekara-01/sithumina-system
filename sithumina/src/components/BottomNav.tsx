@@ -10,7 +10,7 @@ export const BottomNav: React.FC = () => {
   const pathname = usePathname();
   const { locale } = useLanguage();
 
-  const hotline = siteConfig.phoneNumbers[0]?.link || "tel:0771234567";
+  const hotline = siteConfig.phoneNumbers[0]?.link || "tel:0112984984";
 
   const isHomeActive = pathname === "/";
   const isLorriesActive = pathname === "/find-empty-lorry";

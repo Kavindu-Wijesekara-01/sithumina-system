@@ -324,6 +324,15 @@ export function subscribeLorries(
  * Returns all registered lorries with image, specifications, and availability.
  * Real-time connection to Firestore with zero dummy data.
  */
+function stripSinhalaText(val: string): string {
+  if (!val || typeof val !== "string") return "";
+  return val
+    .replace(/[\u0D80-\u0DFF]+/g, "")
+    .replace(/\(\s*\)/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 export function subscribeFleetVehicles(
   callback: (lorries: Lorry[]) => void,
   onError?: (error: Error) => void
@@ -366,9 +375,9 @@ export function subscribeFleetVehicles(
             driverName,
             driverPhone,
             driverId: data.driverId || cleanId,
-            vehicleType: data.vehicleType || data.type || "Lorry Fleet",
-            capacity: data.capacity || data.availableCapacityKg || data.availableSpace || "",
-            maxWeight: data.maxWeight || "",
+            vehicleType: stripSinhalaText(data.vehicleType || data.type || "Lorry Fleet"),
+            capacity: stripSinhalaText(data.capacity || data.availableCapacityKg || data.availableSpace || ""),
+            maxWeight: stripSinhalaText(data.maxWeight || ""),
             imageUrl: realImageUrl,
             images: realImages.length > 0 ? realImages : realImageUrl ? [realImageUrl] : [],
             description: data.description || "",
@@ -734,7 +743,7 @@ export async function addNewLorry(lorry: Omit<Lorry, "id">): Promise<string> {
   try {
     const res = await registerDriverAndLorryAction({
       name: lorry.driverName || "Driver",
-      phone: "0771234567",
+      phone: "0112984984",
       plate: lorry.plate,
       vehicleType: lorry.vehicleType,
       route: lorry.route,

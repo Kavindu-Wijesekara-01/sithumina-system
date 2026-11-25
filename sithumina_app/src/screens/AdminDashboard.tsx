@@ -31,6 +31,9 @@ import {
   updateRegistrationStatus,
   subscribeAdminReviews,
   deleteAdminReview,
+  subscribeAdminComplaints,
+  deleteAdminComplaint,
+  ComplaintRecord,
   addNewLorryToFleet,
   deleteLorryFromFleet,
   updateDriverInDb,
@@ -42,7 +45,7 @@ interface AdminDashboardProps {
   onLogout: () => void;
 }
 
-type TabType = "dash" | "riders" | "veh" | "req" | "rev" | "money" | "map" | "settings";
+type TabType = "dash" | "riders" | "veh" | "req" | "rev" | "money" | "map" | "settings" | "complaints";
 
 export interface AppBanner {
   id: string;
@@ -215,6 +218,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   const [loadingRiders, setLoadingRiders] = useState(true);
   const [loadingRequests, setLoadingRequests] = useState(true);
 
+  // Complaints & Deletions State
+  const [complaints, setComplaints] = useState<ComplaintRecord[]>([]);
+  const [loadingComplaints, setLoadingComplaints] = useState(true);
+  const [complaintSearch, setComplaintSearch] = useState("");
+
   // Filter and secondary states
   const [reqTab, setReqTab] = useState<"p" | "a" | "r">("p");
   const [revFilterStar, setRevFilterStar] = useState<number>(0);
@@ -267,7 +275,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   const [studioMobileImg, setStudioMobileImg] = useState("");
   const [studioTitle, setStudioTitle] = useState("");
   const [studioTag, setStudioTag] = useState("PROMO");
-  const [studioCta, setStudioCta] = useState("Call: 0755984984");
+  const [studioCta, setStudioCta] = useState("Call: 0112 984 984");
   const [studioIsUploading, setStudioIsUploading] = useState(false);
 
   const pickImageFromStorage = async (): Promise<string | null> => {
@@ -421,7 +429,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
         viewMode: "all",
         desktopImage: finalDesktop,
         mobileImage: finalMobile,
-        ctaText: studioCta.trim() || "Call: 0755984984",
+        ctaText: studioCta.trim() || "Call: 0112 984 984",
         isActive: true,
         createdAt: now,
       };
@@ -431,7 +439,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
       setStudioMobileImg("");
       setStudioTitle("");
       setStudioTag("PROMO");
-      setStudioCta("Call: 0755984984");
+      setStudioCta("Call: 0112 984 984");
       showToast("✓ Slide added to website slideshow successfully!");
     } catch (err) {
       console.warn("Failed to publish slide:", err);
@@ -653,6 +661,49 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     await deleteAdminReview(id);
     showToast("Review deleted");
   };
+
+  // Real-time Complaints & Deletions subscription from Firestore (complaints collection)
+  useEffect(() => {
+    const unsubscribe = subscribeAdminComplaints((complaintList) => {
+      setComplaints(complaintList);
+      setLoadingComplaints(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleDeleteComplaint = (id: string, bookingId?: string) => {
+    Alert.alert(
+      "Delete Complaint Record",
+      `Are you sure you want to permanently delete this audit record (${bookingId ? `#${bookingId}` : "Record"})?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            setComplaints((prev) => prev.filter((c) => c.id !== id));
+            await deleteAdminComplaint(id);
+            showToast("Complaint record deleted");
+          },
+        },
+      ]
+    );
+  };
+
+  const filteredComplaints = complaints.filter((c) => {
+    if (!complaintSearch.trim()) return true;
+    const q = complaintSearch.toLowerCase();
+    return (
+      (c.bookingId && c.bookingId.toLowerCase().includes(q)) ||
+      (c.customerName && c.customerName.toLowerCase().includes(q)) ||
+      (c.customerPhone && c.customerPhone.toLowerCase().includes(q)) ||
+      (c.pickupCity && c.pickupCity.toLowerCase().includes(q)) ||
+      (c.deliveryCity && c.deliveryCity.toLowerCase().includes(q)) ||
+      (c.reason && c.reason.toLowerCase().includes(q)) ||
+      (c.vehicleType && c.vehicleType.toLowerCase().includes(q)) ||
+      (c.deletedBy && c.deletedBy.toLowerCase().includes(q))
+    );
+  });
 
   const pendingCount = requests.filter((r) => r.status === "p").length;
 
@@ -1057,6 +1108,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
           </TouchableOpacity>
 
           <TouchableOpacity
+            style={[styles.navItem, activeTab === "complaints" && styles.navItemActive]}
+            onPress={() => setActiveTab("complaints")}
+          >
+            <Text style={[styles.navText, activeTab === "complaints" && styles.navTextActive]}>
+              Complaints & Deletions
+            </Text>
+            {!loadingComplaints && complaints.length > 0 && (
+              <View style={[styles.badgeCount, { backgroundColor: "#DC2626" }]}>
+                <Text style={styles.badgeCountText}>{complaints.length}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+
+          <TouchableOpacity
             style={[styles.navItem, activeTab === "money" && styles.navItemActive]}
             onPress={() => setActiveTab("money")}
           >
@@ -1156,6 +1221,53 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                 <Text style={styles.kpiDelta}>View revenue →</Text>
               </TouchableOpacity>
             </View>
+
+            {/* Complaints & Deletions Summary Alert */}
+            <TouchableOpacity
+              style={[
+                styles.card,
+                {
+                  borderColor: complaints.length > 0 ? "#FECACA" : "#E7E2D0",
+                  backgroundColor: complaints.length > 0 ? "#FFF5F5" : "#FFFFFF",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  paddingVertical: 12,
+                },
+              ]}
+              activeOpacity={0.7}
+              onPress={() => setActiveTab("complaints")}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flex: 1 }}>
+                <View
+                  style={{
+                    width: 38,
+                    height: 38,
+                    borderRadius: 10,
+                    backgroundColor: complaints.length > 0 ? "#FEE2E2" : "#F4F2EA",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <Text style={{ fontSize: 18 }}>⚠️</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 13, fontWeight: "800", color: "#1F1E19" }}>
+                    Complaints & Deletion Audit Log
+                  </Text>
+                  <Text style={{ fontSize: 11, color: complaints.length > 0 ? "#DC2626" : "#6F6A5A", marginTop: 2 }}>
+                    {loadingComplaints
+                      ? "Syncing audit records..."
+                      : complaints.length > 0
+                        ? `${complaints.length} deleted booking records with mandatory reasons`
+                        : "No active complaints or deletions"}
+                  </Text>
+                </View>
+              </View>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                <Text style={{ fontSize: 12, fontWeight: "700", color: "#B45309" }}>View →</Text>
+              </View>
+            </TouchableOpacity>
 
             {/* Revenue this week chart card */}
             <View style={styles.card}>
@@ -1926,7 +2038,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   <View style={styles.studioSlotBox}>
                     <View style={styles.studioSlotHeader}>
                       <Text style={styles.studioSlotTitle}>💻 Desktop View Image</Text>
-                      <Text style={styles.studioSlotHint}>Length වැඩි / Ultra-Wide (1024×168)</Text>
+                      <Text style={styles.studioSlotHint}>Ultra-Wide Ratio (1024×168)</Text>
                     </View>
 
                     {studioDesktopImg ? (
@@ -2013,7 +2125,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                     <Text style={styles.studioInputLabel}>Banner Slide Title (Optional)</Text>
                     <TextInput
                       style={styles.studioFormInput}
-                      placeholder="e.g. Sithumina Express Logistics"
+                      
                       placeholderTextColor="#8C877A"
                       value={studioTitle}
                       onChangeText={setStudioTitle}
@@ -2023,7 +2135,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                     <Text style={styles.studioInputLabel}>Tag</Text>
                     <TextInput
                       style={styles.studioFormInput}
-                      placeholder="PROMO"
+                      
                       placeholderTextColor="#8C877A"
                       value={studioTag}
                       onChangeText={setStudioTag}
@@ -2219,7 +2331,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               </View>
               <View style={styles.settingItemRow}>
                 <Text style={styles.settingLabel}>Customer Care Hotline</Text>
-                <Text style={styles.settingValue}>077 123 4567 / 011 234 5678</Text>
+                <Text style={styles.settingValue}>0112 984 984 / 0755 984 984 (WhatsApp)</Text>
               </View>
               <View style={styles.settingItemRow}>
                 <Text style={styles.settingLabel}>Central Operations Hub</Text>
@@ -2234,6 +2346,159 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
             </View>
           </View>
         )}
+
+        {/* TAB 9: COMPLAINTS & DELETIONS AUDIT LOG */}
+        {activeTab === "complaints" && (
+          <View style={styles.tabSection}>
+            {/* Header KPI Card */}
+            <View style={styles.kpiCard}>
+              <Text style={styles.kpiLabel}>Complaints & Deletions</Text>
+              <Text style={styles.kpiValue}>
+                {complaints.length}{" "}
+                <Text style={{ fontSize: 16, color: "#DC2626" }}>Records</Text>
+              </Text>
+              <Text style={styles.kpiDelta}>
+                Audit log of cancelled and deleted bookings with mandatory reasons
+              </Text>
+            </View>
+
+            {/* Search and Filters Card */}
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>Search Audit Records</Text>
+              <TextInput
+                style={styles.formInput}
+                placeholder="Search..."
+                placeholderTextColor="#8C877A"
+                value={complaintSearch}
+                onChangeText={setComplaintSearch}
+              />
+              <Text style={{ fontSize: 12, color: "#8E8B82", marginTop: 4 }}>
+                Showing {filteredComplaints.length} of {complaints.length} total records
+              </Text>
+            </View>
+
+            {/* List of Complaints */}
+            {loadingComplaints ? (
+              <View style={[styles.card, { alignItems: "center", paddingVertical: 30 }]}>
+                <ActivityIndicator size="large" color="#FFC20E" />
+                <Text style={{ color: "#8E8B82", marginTop: 10, fontSize: 13, fontWeight: "600" }}>
+                  Loading complaints & deletion records...
+                </Text>
+              </View>
+            ) : filteredComplaints.length === 0 ? (
+              <View style={[styles.card, { alignItems: "center", paddingVertical: 30 }]}>
+                <Text style={{ fontSize: 32, marginBottom: 8 }}>📋</Text>
+                <Text style={{ fontSize: 15, fontWeight: "700", color: "#1F1E19" }}>
+                  No complaint records found
+                </Text>
+                <Text style={{ fontSize: 12, color: "#8E8B82", marginTop: 4, textAlign: "center" }}>
+                  {complaintSearch
+                    ? "No records match your search criteria. Try a different keyword."
+                    : "No deleted bookings or customer complaints have been recorded yet."}
+                </Text>
+              </View>
+            ) : (
+              filteredComplaints.map((item) => (
+                <View
+                  key={item.id}
+                  style={[
+                    styles.card,
+                    {
+                      borderLeftWidth: 4,
+                      borderLeftColor: "#DC2626",
+                      marginBottom: 12,
+                    },
+                  ]}
+                >
+                  {/* Top Bar: Booking ID & Date */}
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", flex: 1 }}>
+                      <View style={{ backgroundColor: "#FEE2E2", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                        <Text style={{ fontSize: 11, fontWeight: "800", color: "#991B1B" }}>
+                          #{item.bookingId || item.id}
+                        </Text>
+                      </View>
+                      {item.vehicleType ? (
+                        <View style={{ backgroundColor: "#FEF3C7", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                          <Text style={{ fontSize: 11, fontWeight: "700", color: "#92400E" }}>
+                            {item.vehicleType}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
+                    <Text style={{ fontSize: 11, color: "#8E8B82", fontWeight: "600" }}>
+                      {item.deletedAt ? new Date(item.deletedAt).toLocaleDateString() : item.date}
+                    </Text>
+                  </View>
+
+                  {/* Customer & Route Details */}
+                  <View style={{ backgroundColor: "#FBF9F3", borderRadius: 8, padding: 10, marginVertical: 6 }}>
+                    <Text style={{ fontSize: 14, fontWeight: "800", color: "#1F1E19" }}>
+                      👤 {item.customerName || "Customer"}
+                    </Text>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 12, marginTop: 4, flexWrap: "wrap" }}>
+                      <Text style={{ fontSize: 12, color: "#54524B", fontWeight: "600" }}>
+                        📞 {item.customerPhone || "N/A"}
+                      </Text>
+                      {item.customerIdNumber ? (
+                        <Text style={{ fontSize: 12, color: "#54524B", fontWeight: "600" }}>
+                          🪪 {item.customerIdNumber}
+                        </Text>
+                      ) : null}
+                    </View>
+                    <View style={{ marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: "#E7E2D0" }}>
+                      <Text style={{ fontSize: 12, color: "#1F1E19", fontWeight: "700" }}>
+                        📍 {item.pickupCity || "Pickup"} ➔ {item.deliveryCity || "Delivery"}
+                        {item.distanceKm ? ` (${item.distanceKm} km)` : ""}
+                      </Text>
+                      {item.quotedAmount ? (
+                        <Text style={{ fontSize: 12, color: "#B45309", fontWeight: "800", marginTop: 2 }}>
+                          💵 Amount: LKR {item.quotedAmount.toLocaleString()}
+                        </Text>
+                      ) : null}
+                    </View>
+                  </View>
+
+                  {/* Deletion Reason Alert Callout */}
+                  <View style={{ backgroundColor: "#FEF2F2", borderWidth: 1, borderColor: "#FECACA", borderRadius: 8, padding: 10, marginVertical: 6 }}>
+                    <Text style={{ fontSize: 11, fontWeight: "800", color: "#991B1B", textTransform: "uppercase", letterSpacing: 0.5 }}>
+                      ⚠️ Deletion / Complaint Reason:
+                    </Text>
+                    <Text style={{ fontSize: 13, color: "#7F1D1D", fontWeight: "600", marginTop: 3, lineHeight: 18 }}>
+                      {item.reason}
+                    </Text>
+                    {item.deletedBy ? (
+                      <Text style={{ fontSize: 10.5, color: "#991B1B", marginTop: 4, fontStyle: "italic" }}>
+                        Logged by: {item.deletedBy}
+                      </Text>
+                    ) : null}
+                  </View>
+
+                  {/* Bottom Action: Delete Button */}
+                  <View style={{ flexDirection: "row", justifyContent: "flex-end", marginTop: 8 }}>
+                    <TouchableOpacity
+                      onPress={() => handleDeleteComplaint(item.id, item.bookingId)}
+                      style={{
+                        backgroundColor: "#DC2626",
+                        paddingHorizontal: 12,
+                        paddingVertical: 7,
+                        borderRadius: 8,
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 4,
+                      }}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={{ color: "#FFFFFF", fontSize: 12, fontWeight: "800" }}>
+                        🗑️ Delete Record
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))
+            )}
+          </View>
+        )}
       </ScrollView>
 
       {/* MODAL: ADD RIDER */}
@@ -2246,7 +2511,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Full Name</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="Full name"
+                
                 placeholderTextColor="#8C877A"
                 value={riderName}
                 onChangeText={setRiderName}
@@ -2255,7 +2520,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Phone Number</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="Phone number"
+                
                 placeholderTextColor="#8C877A"
                 keyboardType="phone-pad"
                 value={riderPhone}
@@ -2265,7 +2530,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>NIC Number</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="NIC number"
+                
                 placeholderTextColor="#8C877A"
                 value={riderNic}
                 onChangeText={setRiderNic}
@@ -2274,7 +2539,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Rider ID</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="Rider ID"
+                
                 placeholderTextColor="#8C877A"
                 autoCapitalize="characters"
                 value={riderId}
@@ -2309,7 +2574,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Full Name</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="Full name"
+                
                 placeholderTextColor="#8C877A"
                 value={riderName}
                 onChangeText={setRiderName}
@@ -2318,7 +2583,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Phone Number</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="Phone number"
+                
                 placeholderTextColor="#8C877A"
                 keyboardType="phone-pad"
                 value={riderPhone}
@@ -2352,7 +2617,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Lorry Number / Plate Number *</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="e.g. WP LB-4521"
+                
                 placeholderTextColor="#8C877A"
                 autoCapitalize="characters"
                 value={vehPlate}
@@ -2362,25 +2627,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Vehicle Type *</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="e.g. 14ft Isuzu Canter Box Lorry"
+                
                 placeholderTextColor="#8C877A"
                 value={vehType}
                 onChangeText={setVehType}
               />
 
-              <Text style={styles.inputLabel}>Cargo Dimensions / Size (දිග/පළල/උස)</Text>
+              <Text style={styles.inputLabel}>Cargo Dimensions / Size</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="e.g. 14ft Length × 6.5ft Width × 7ft Height"
+                
                 placeholderTextColor="#8C877A"
                 value={vehCap}
                 onChangeText={setVehCap}
               />
 
-              <Text style={styles.inputLabel}>Max Load Weight (ගත හැකි උපරිම බර) *</Text>
+              <Text style={styles.inputLabel}>Max Load Weight *</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="e.g. 3.5 Tons (3,500 kg)"
+                
                 placeholderTextColor="#8C877A"
                 value={vehMaxWeight}
                 onChangeText={setVehMaxWeight}
@@ -2389,7 +2654,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Vehicle Details & Features</Text>
               <TextInput
                 style={[styles.formInput, { height: 60, paddingVertical: 8 }]}
-                placeholder="e.g. Weatherproof aluminium box, safety locks, cargo belts"
+                
                 placeholderTextColor="#8C877A"
                 multiline
                 value={vehDesc}
@@ -2455,7 +2720,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Lorry Number / Plate Number *</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="e.g. WP LB-4521"
+                
                 placeholderTextColor="#8C877A"
                 autoCapitalize="characters"
                 value={vehPlate}
@@ -2465,25 +2730,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Vehicle Type *</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="e.g. 14ft Isuzu Canter Box Lorry"
+                
                 placeholderTextColor="#8C877A"
                 value={vehType}
                 onChangeText={setVehType}
               />
 
-              <Text style={styles.inputLabel}>Cargo Dimensions / Size (දිග/පළල/උස)</Text>
+              <Text style={styles.inputLabel}>Cargo Dimensions / Size</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="e.g. 14ft Length × 6.5ft Width × 7ft Height"
+                
                 placeholderTextColor="#8C877A"
                 value={vehCap}
                 onChangeText={setVehCap}
               />
 
-              <Text style={styles.inputLabel}>Max Load Weight (ගත හැකි උපරිම බර) *</Text>
+              <Text style={styles.inputLabel}>Max Load Weight *</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="e.g. 3.5 Tons (3,500 kg)"
+                
                 placeholderTextColor="#8C877A"
                 value={vehMaxWeight}
                 onChangeText={setVehMaxWeight}
@@ -2492,7 +2757,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Vehicle Details & Features</Text>
               <TextInput
                 style={[styles.formInput, { height: 60, paddingVertical: 8 }]}
-                placeholder="e.g. Weatherproof aluminium box, safety locks, cargo belts"
+                
                 placeholderTextColor="#8C877A"
                 multiline
                 value={vehDesc}
@@ -2568,7 +2833,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Banner Title *</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="e.g. Special Discount for Kandy Cargo Trips"
+                
                 placeholderTextColor="#8C877A"
                 value={bannerTitle}
                 onChangeText={setBannerTitle}
@@ -2577,7 +2842,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Subtitle / Description</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="e.g. Save 10% on cargo hires this week"
+                
                 placeholderTextColor="#8C877A"
                 value={bannerSub}
                 onChangeText={setBannerSub}
@@ -2586,7 +2851,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Tag / Category</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="PROMO / NOTICE / NEW / HOT DEAL"
+                
                 placeholderTextColor="#8C877A"
                 value={bannerTag}
                 onChangeText={setBannerTag}
@@ -2682,7 +2947,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
                 <TextInput
                   style={[styles.formInput, { flex: 1 }]}
-                  placeholder="/banner-desktop.jpg or https://..."
+                  
                   placeholderTextColor="#8C877A"
                   value={bannerDesktopImg.startsWith("data:") ? "[Image selected from local storage]" : bannerDesktopImg}
                   onChangeText={setBannerDesktopImg}
@@ -2733,7 +2998,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
                 <TextInput
                   style={[styles.formInput, { flex: 1 }]}
-                  placeholder="/banner-mobile.jpg or https://..."
+                  
                   placeholderTextColor="#8C877A"
                   value={bannerMobileImg.startsWith("data:") ? "[Image selected from local storage]" : bannerMobileImg}
                   onChangeText={setBannerMobileImg}
@@ -2783,7 +3048,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Call To Action (CTA Button)</Text>
               <TextInput
                 style={styles.formInput}
-                placeholder="e.g. Book Now / Call 0755984984"
+                
                 placeholderTextColor="#8C877A"
                 value={bannerCtaText}
                 onChangeText={setBannerCtaText}
@@ -2930,7 +3195,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                           <View style={styles.desktopCtaBtn}>
                             <Text style={styles.desktopCtaBtnText}>{bannerCtaText || "Book Vehicle Now"} ➔</Text>
                           </View>
-                          <Text style={styles.desktopHotlineText}>📞 075 598 4984</Text>
+                          <Text style={styles.desktopHotlineText}>📞 0112 984 984 | 💬 0755 984 984</Text>
                         </View>
                       </View>
 
@@ -3104,7 +3369,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                             <View style={styles.desktopCtaBtn}>
                               <Text style={styles.desktopCtaBtnText}>{selectedBannerForInspect.ctaText || "Book Vehicle Now"} ➔</Text>
                             </View>
-                            <Text style={styles.desktopHotlineText}>📞 075 598 4984</Text>
+                            <Text style={styles.desktopHotlineText}>📞 0112 984 984 | 💬 0755 984 984</Text>
                           </View>
                         </View>
 

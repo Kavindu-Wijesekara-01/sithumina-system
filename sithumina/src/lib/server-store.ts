@@ -109,6 +109,7 @@ export interface StoredBooking {
   distanceKm?: number;
   actualDistanceKm?: number;
   waypoints?: Array<{ name: string; lat: number; lng: number }>;
+  travelRoute?: string;
   rideStartedAt?: number;
   rideEndedAt?: number;
   driverTripStatus?: "pending_acceptance" | "accepted" | "declined" | "in_transit" | "completed" | "empty_return";
@@ -293,6 +294,11 @@ const DEFAULT_REVIEWS_SEED: StoredReview[] = [];
 
 export const DEFAULT_LORRIES_SEED: StoredLorry[] = [];
 
+function stripSinhala(str: any): string {
+  if (!str || typeof str !== "string") return "";
+  return str.replace(/[\u0D80-\u0DFF]+/g, "").replace(/\(\s*\)/g, "").replace(/\s{2,}/g, " ").trim();
+}
+
 function normalizeLorry(l: any, index: number): StoredLorry {
   const images = Array.isArray(l.images)
     ? l.images.filter((img: string) => img && typeof img === "string" && !img.startsWith("/img"))
@@ -305,10 +311,10 @@ function normalizeLorry(l: any, index: number): StoredLorry {
   return {
     ...l,
     plate: (l.plate || "").toUpperCase().trim(),
-    vehicleType: l.vehicleType || "Lorry Fleet",
-    capacity: l.capacity || "",
-    maxWeight: l.maxWeight || "",
-    dimensions: l.dimensions || "",
+    vehicleType: stripSinhala(l.vehicleType) || "Lorry Fleet",
+    capacity: stripSinhala(l.capacity) || "",
+    maxWeight: stripSinhala(l.maxWeight) || "",
+    dimensions: stripSinhala(l.dimensions) || "",
     isOutsideLorry: isOutside,
     ownershipType: isOutside ? "outside" : (l.ownershipType || "company"),
     ownerIdNumber: l.ownerIdNumber || "",
@@ -317,7 +323,7 @@ function normalizeLorry(l: any, index: number): StoredLorry {
     startLocation: startLoc,
     imageUrl: images[0] || (l.imageUrl && typeof l.imageUrl === "string" && !l.imageUrl.startsWith("/img") ? l.imageUrl : ""),
     images: images,
-    description: l.description || "",
+    description: stripSinhala(l.description) || "",
     route: l.route || (baseCity ? `${baseCity} – Island-wide` : ""),
     driverName: l.driverName || "",
     driverPhone: l.driverPhone || "",
@@ -1111,6 +1117,12 @@ export function createBookingInStore(input: {
   paymentRejectReason?: string;
   paymentApprovedAt?: number;
   paymentSlipDeletedAt?: number;
+  waypoints?: Array<{ name: string; lat: number; lng: number }>;
+  travelRoute?: string;
+  driverTripStatus?: "pending_acceptance" | "accepted" | "declined" | "in_transit" | "completed" | "empty_return";
+  rideStartedAt?: number;
+  rideEndedAt?: number;
+  actualDistanceKm?: number;
 }): StoredBooking {
   const store = readStore();
   let id = `ST-BK-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -1176,6 +1188,12 @@ export function createBookingInStore(input: {
     paymentRejectReason: input.paymentRejectReason,
     paymentApprovedAt: input.paymentApprovedAt,
     paymentSlipDeletedAt: input.paymentSlipDeletedAt,
+    waypoints: input.waypoints,
+    travelRoute: input.travelRoute,
+    driverTripStatus: input.driverTripStatus,
+    rideStartedAt: input.rideStartedAt,
+    rideEndedAt: input.rideEndedAt,
+    actualDistanceKm: input.actualDistanceKm,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -1459,6 +1477,17 @@ export function recordComplaintInStore(complaint: StoredComplaint): StoredCompla
   return complaint;
 }
 
+export function deleteStoredComplaint(id: string): boolean {
+  const store = readStore();
+  const initLen = store.complaints.length;
+  store.complaints = store.complaints.filter((c) => c.id !== id);
+  if (store.complaints.length !== initLen) {
+    writeStore(store);
+    return true;
+  }
+  return false;
+}
+
 /* ============================================================
  * VEHICLE REGISTRATIONS / PARTNER APPLICATIONS
  * ============================================================ */
@@ -1569,7 +1598,7 @@ export function updateRegistrationStatusInStore(
         amount: reg.initialDepositAmount || 5000,
         balanceBefore: 0,
         balanceAfter: reg.initialDepositAmount || 5000,
-        note: `Approved Initial Registration Deposit (රු. ${(reg.initialDepositAmount || 5000).toLocaleString()})`,
+        note: `Approved Initial Registration Deposit (LKR ${(reg.initialDepositAmount || 5000).toLocaleString()})`,
         slipUrl: reg.depositSlipUrl || "",
         createdAt: Date.now(),
       });

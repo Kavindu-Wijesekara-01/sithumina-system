@@ -11,6 +11,7 @@ import {
   Platform,
   Modal,
   Linking,
+  Vibration,
 } from "react-native";
 import * as Location from "expo-location";
 import {
@@ -49,10 +50,40 @@ interface DriverInterfaceProps {
   onLogout: () => void;
 }
 
+function playIncomingDispatchBell() {
+  try {
+    if (typeof window !== "undefined") {
+      const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtx) {
+        const ctx = new AudioCtx();
+        const now = ctx.currentTime;
+        const playTone = (freq: number, start: number, duration: number) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(freq, start);
+          gain.gain.setValueAtTime(0.35, start);
+          gain.gain.exponentialRampToValueAtTime(0.001, start + duration);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(start);
+          osc.stop(start + duration);
+        };
+        playTone(880, now, 0.35);
+        playTone(1174, now + 0.22, 0.45);
+        playTone(1320, now + 0.45, 0.6);
+      }
+    }
+    Vibration.vibrate([0, 400, 200, 400]);
+  } catch {}
+}
+
 export const DriverInterface: React.FC<DriverInterfaceProps> = ({
   driver,
   onLogout,
 }) => {
+  const alertedDispatchIdsRef = useRef<Set<string>>(new Set());
+  const [dispatchViaInput, setDispatchViaInput] = useState<Record<string, string>>({});
   // GPS State
   const [isTracking, setIsTracking] = useState(false);
   const [currentCoords, setCurrentCoords] = useState<GpsCoordinate | null>(null);
@@ -176,6 +207,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     deliveryCity: string;
     pickupLat?: number;
     pickupLng?: number;
+    deliveryLat?: number;
+    deliveryLng?: number;
     cargo: string;
     vehicleType: string;
     date: string;
@@ -184,7 +217,11 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     hasPaymentSlip?: boolean;
     paymentSlipStatus?: string;
     quotedAmount?: number;
+    pendingAmount?: number;
+    advanceAmount?: number;
     distanceKm?: number;
+    waypoints?: Array<{ name: string; lat: number; lng: number }>;
+    travelRoute?: string;
     createdAt: number;
     updatedAt?: number;
   }
@@ -235,13 +272,6 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
         const bookingId = String(
           data.bookingId || (entry.id.startsWith("dispatch-") ? entry.id.replace(/^dispatch-/, "") : entry.id)
         );
-        // Strictly ignore Individual Vehicle bookings in Driver Mobile App; only live/empty lorry dispatches appear here
-        if (
-          data.bookingType === "individual_vehicle" ||
-          individualBookingIds.has(bookingId)
-        ) {
-          continue;
-        }
         const st = String(data.status || "pending_acceptance").toLowerCase();
         if (
           st !== "pending_acceptance" &&
@@ -282,6 +312,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
           deliveryCity: data.deliveryCity || "",
           pickupLat: typeof data.pickupLat === "number" ? data.pickupLat : undefined,
           pickupLng: typeof data.pickupLng === "number" ? data.pickupLng : undefined,
+          deliveryLat: typeof data.deliveryLat === "number" ? data.deliveryLat : undefined,
+          deliveryLng: typeof data.deliveryLng === "number" ? data.deliveryLng : undefined,
           cargo: data.cargo || "",
           vehicleType: data.vehicleType || "",
           date: data.date || "",
@@ -297,7 +329,11 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
           ),
           paymentSlipStatus: data.paymentSlipStatus || "",
           quotedAmount: typeof data.quotedAmount === "number" ? data.quotedAmount : undefined,
+          pendingAmount: typeof data.pendingAmount === "number" ? data.pendingAmount : undefined,
+          advanceAmount: typeof data.advanceAmount === "number" ? data.advanceAmount : undefined,
           distanceKm: typeof data.distanceKm === "number" ? data.distanceKm : (Number(data.distanceKm) || undefined),
+          waypoints: Array.isArray(data.waypoints) ? data.waypoints : undefined,
+          travelRoute: data.travelRoute || "",
           createdAt: Number(data.createdAt) || Date.now(),
           updatedAt: Number(data.updatedAt) || Number(data.createdAt) || 0,
         };
@@ -320,6 +356,14 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
         return b.createdAt - a.createdAt;
       });
       setPendingDispatches(items);
+
+      // Ring alert bell chime if there is a new pending_acceptance dispatch
+      for (const item of items) {
+        if (item.status === "pending_acceptance" && !alertedDispatchIdsRef.current.has(item.id)) {
+          alertedDispatchIdsRef.current.add(item.id);
+          playIncomingDispatchBell();
+        }
+      }
     };
 
     const unsubFleet = onSnapshot(
@@ -418,29 +462,39 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
       const plateToUse = resolvePlateForDispatch(dispatch);
       const lorryToUse = dispatch.riderId || liveDriver.lorryId || driver.lorryId;
       const identity = resolveDriverIdentity(dispatch);
+      const now = Date.now();
+
+      // Immediately set status to in_transit so Admin moves it to Ongoing Rides
       await setDoc(
         doc(db, "dispatches", dispatch.id),
         {
-          status: "accepted",
+          status: "in_transit",
+          driverTripStatus: "in_transit",
+          rideStartedAt: now,
           driverId: identity.driverId,
           ...(identity.driverName ? { driverName: identity.driverName } : {}),
           ...(identity.driverPhone ? { driverPhone: identity.driverPhone } : {}),
           assignedPlate: plateToUse,
-          updatedAt: Date.now(),
+          updatedAt: now,
         },
         { merge: true }
       );
       if (dispatch.bookingId) {
         await updateBookingDispatch({
           id: dispatch.bookingId,
-          status: "assigned",
+          status: "in_transit",
+          driverTripStatus: "in_transit",
+          rideStartedAt: now,
           assignedLorryId: lorryToUse,
           ...(identity.driverName ? { assignedDriverName: identity.driverName } : {}),
           ...(identity.driverPhone ? { assignedDriverPhone: identity.driverPhone } : {}),
           assignedPlate: plateToUse,
         });
       }
-      Alert.alert("Accepted", "Booking accepted and synced with Head Office & Customer. Navigate to pickup location.");
+      if (lorryToUse) {
+        updateLorryTripStatus(lorryToUse, "on_trip").catch(() => {});
+      }
+      Alert.alert("Ride Accepted", "Booking accepted and started! Status moved to Ongoing in Admin Command Center. You can now select up to 3 intermediate towns along the route.");
     } catch (err) {
       Alert.alert("Error", "Could not accept dispatch. Please retry.");
     }
@@ -454,7 +508,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
       await setDoc(
         doc(db, "dispatches", dispatch.id),
         {
-          status: "goods_collected",
+          status: "in_transit",
+          driverTripStatus: "in_transit",
           driverId: identity.driverId,
           ...(identity.driverName ? { driverName: identity.driverName } : {}),
           ...(identity.driverPhone ? { driverPhone: identity.driverPhone } : {}),
@@ -466,7 +521,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
       if (dispatch.bookingId) {
         await updateBookingDispatch({
           id: dispatch.bookingId,
-          status: "goods_collected",
+          status: "in_transit",
+          driverTripStatus: "in_transit",
           assignedLorryId: lorryToUse,
           ...(identity.driverName ? { assignedDriverName: identity.driverName } : {}),
           ...(identity.driverPhone ? { assignedDriverPhone: identity.driverPhone } : {}),
@@ -474,8 +530,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
         });
       }
       Alert.alert(
-        "භාණ්ඩය භාරගත්තා (Goods Collected)",
-        "භාණ්ඩය පටවාගත් බව ප්‍රධාන කාර්යාලය (Admin) සහ පාරිභෝගිකයා වෙත යාවත්කාලීන විය."
+        "Goods Collected",
+        "Goods collected and verified. Trip is ongoing and live-synced with Admin & Customer."
       );
     } catch (err) {
       Alert.alert("Error", "Could not update status. Please retry.");
@@ -491,6 +547,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
         doc(db, "dispatches", dispatch.id),
         {
           status: "in_transit",
+          driverTripStatus: "in_transit",
           driverId: identity.driverId,
           ...(identity.driverName ? { driverName: identity.driverName } : {}),
           ...(identity.driverPhone ? { driverPhone: identity.driverPhone } : {}),
@@ -503,15 +560,79 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
         await updateBookingDispatch({
           id: dispatch.bookingId,
           status: "in_transit",
+          driverTripStatus: "in_transit",
           assignedLorryId: lorryToUse,
           ...(identity.driverName ? { assignedDriverName: identity.driverName } : {}),
           ...(identity.driverPhone ? { assignedDriverPhone: identity.driverPhone } : {}),
           assignedPlate: plateToUse,
         });
       }
-      Alert.alert("In Transit", "Trip marked as In Transit. Customer can now track progress.");
+      Alert.alert("In Transit", "Trip marked as In Transit. Customer and Admin can now track progress.");
     } catch (err) {
       Alert.alert("Error", "Could not update trip status. Please retry.");
+    }
+  };
+
+  const handleAddDispatchViaTown = async (dispatch: DispatchRecord, city: CityEntry) => {
+    const curWaypoints = dispatch.waypoints || [];
+    if (curWaypoints.length >= 3) {
+      Alert.alert("Limit Reached", "You can select up to 3 intermediate towns only.");
+      return;
+    }
+    if (curWaypoints.some((w) => w.name.toLowerCase() === city.name.toLowerCase())) {
+      return;
+    }
+    const nextWaypoints = [...curWaypoints, { name: city.name, lat: city.lat, lng: city.lng }];
+    const travelRoute = "via " + nextWaypoints.map((w) => w.name).join(" → ");
+    try {
+      await setDoc(
+        doc(db, "dispatches", dispatch.id),
+        {
+          waypoints: nextWaypoints,
+          travelRoute,
+          updatedAt: Date.now(),
+        },
+        { merge: true }
+      );
+      if (dispatch.bookingId) {
+        await updateBookingDispatch({
+          id: dispatch.bookingId,
+          status: (dispatch.status || "in_transit") as any,
+          driverTripStatus: "in_transit",
+          waypoints: nextWaypoints,
+          travelRoute,
+        });
+      }
+    } catch (e) {
+      console.warn("Failed to save waypoint:", e);
+    }
+  };
+
+  const handleRemoveDispatchViaTown = async (dispatch: DispatchRecord, index: number) => {
+    const curWaypoints = dispatch.waypoints || [];
+    const nextWaypoints = curWaypoints.filter((_, idx) => idx !== index);
+    const travelRoute = nextWaypoints.length > 0 ? "via " + nextWaypoints.map((w) => w.name).join(" → ") : "";
+    try {
+      await setDoc(
+        doc(db, "dispatches", dispatch.id),
+        {
+          waypoints: nextWaypoints,
+          travelRoute,
+          updatedAt: Date.now(),
+        },
+        { merge: true }
+      );
+      if (dispatch.bookingId) {
+        await updateBookingDispatch({
+          id: dispatch.bookingId,
+          status: (dispatch.status || "in_transit") as any,
+          driverTripStatus: "in_transit",
+          waypoints: nextWaypoints,
+          travelRoute,
+        });
+      }
+    } catch (e) {
+      console.warn("Failed to remove waypoint:", e);
     }
   };
 
@@ -520,25 +641,49 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
       const plateToUse = resolvePlateForDispatch(dispatch);
       const lorryToUse = dispatch.riderId || liveDriver.lorryId || driver.lorryId;
       const identity = resolveDriverIdentity(dispatch);
+      const now = Date.now();
+
+      // Check payment completion:
+      const isPaid =
+        (typeof dispatch.pendingAmount === "number" && dispatch.pendingAmount <= 0) ||
+        dispatch.paymentSlipStatus === "approved" ||
+        dispatch.paymentSlipStatus === "manual_approved";
+
+      const targetStatus = isPaid ? "completed" : "delivered";
+
       await setDoc(
         doc(db, "dispatches", dispatch.id),
         {
           status: "completed",
-          updatedAt: Date.now(),
+          driverTripStatus: "completed",
+          rideEndedAt: now,
+          updatedAt: now,
         },
         { merge: true }
       );
+
       if (dispatch.bookingId) {
         await updateBookingDispatch({
           id: dispatch.bookingId,
-          status: "delivered",
+          status: targetStatus,
+          driverTripStatus: "completed",
+          rideEndedAt: now,
           assignedLorryId: lorryToUse,
           ...(identity.driverName ? { assignedDriverName: identity.driverName } : {}),
           ...(identity.driverPhone ? { assignedDriverPhone: identity.driverPhone } : {}),
           assignedPlate: plateToUse,
         });
       }
-      Alert.alert("Completed", "Delivery marked as completed.");
+
+      if (lorryToUse) {
+        updateLorryTripStatus(lorryToUse, "empty").catch(() => {});
+      }
+
+      if (isPaid) {
+        Alert.alert("Ride Completed", "Ride completed and payment settled! Record moved to Completed Bookings.");
+      } else {
+        Alert.alert("Ride Ended", "Ride ended. Payment is pending — record moved to Pending Payment in Admin.");
+      }
     } catch (err) {
       Alert.alert("Error", "Could not complete delivery. Please retry.");
     }
@@ -567,29 +712,67 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
   };
 
   const customerMapPins = pendingDispatches
-    .filter((d) => d.status === "pending_acceptance" || d.status === "accepted")
-    .map((d) => {
-      let lat = typeof d.pickupLat === "number" && Number.isFinite(d.pickupLat) ? d.pickupLat : null;
-      let lng = typeof d.pickupLng === "number" && Number.isFinite(d.pickupLng) ? d.pickupLng : null;
-      if (lat === null || lng === null) {
+    .filter((d) => d.status === "pending_acceptance" || d.status === "accepted" || d.status === "in_transit" || d.status === "goods_collected")
+    .flatMap((d) => {
+      const pins: any[] = [];
+      let pLat = typeof d.pickupLat === "number" && Number.isFinite(d.pickupLat) ? d.pickupLat : null;
+      let pLng = typeof d.pickupLng === "number" && Number.isFinite(d.pickupLng) ? d.pickupLng : null;
+      if (pLat === null || pLng === null) {
         const resolved = resolveCityCoordinates(d.pickupCity);
         if (resolved) {
-          lat = resolved[0];
-          lng = resolved[1];
+          pLat = resolved[0];
+          pLng = resolved[1];
         }
       }
-      if (lat === null || lng === null) return null;
-      return {
-        lat,
-        lng,
-        title: d.customerName || "Customer Pickup",
-        subtitle: `${d.pickupCity} → ${d.deliveryCity}`,
-        bookingId: d.bookingId,
-        phone: d.customerPhone,
-        packageDetails: d.cargo || d.vehicleType,
-      };
-    })
-    .filter(Boolean) as any[];
+      if (pLat !== null && pLng !== null) {
+        pins.push({
+          lat: pLat,
+          lng: pLng,
+          title: `🟢 Pickup: ${d.customerName || "Customer"}`,
+          subtitle: `${d.pickupCity} (${d.bookingId})`,
+          bookingId: d.bookingId,
+          phone: d.customerPhone,
+          packageDetails: d.cargo || d.vehicleType,
+        });
+      }
+
+      let dLat = typeof d.deliveryLat === "number" && Number.isFinite(d.deliveryLat) ? d.deliveryLat : null;
+      let dLng = typeof d.deliveryLng === "number" && Number.isFinite(d.deliveryLng) ? d.deliveryLng : null;
+      if (dLat === null || dLng === null) {
+        const resolved = resolveCityCoordinates(d.deliveryCity);
+        if (resolved) {
+          dLat = resolved[0];
+          dLng = resolved[1];
+        }
+      }
+      if (dLat !== null && dLng !== null) {
+        pins.push({
+          lat: dLat,
+          lng: dLng,
+          title: `🔴 Destination: ${d.deliveryCity}`,
+          subtitle: `Deliver to ${d.customerName || "Customer"}`,
+          bookingId: d.bookingId,
+          phone: d.customerPhone,
+          packageDetails: d.cargo || d.vehicleType,
+        });
+      }
+
+      if (Array.isArray(d.waypoints)) {
+        d.waypoints.forEach((wp, idx) => {
+          if (typeof wp.lat === "number" && typeof wp.lng === "number") {
+            pins.push({
+              lat: wp.lat,
+              lng: wp.lng,
+              title: `📍 Via ${idx + 1}: ${wp.name}`,
+              subtitle: `Intermediate waypoint ${idx + 1}`,
+              bookingId: d.bookingId,
+            });
+          }
+        });
+      }
+
+      return pins;
+    });
 
   const chosenPlate =
     activeTrip?.plate ||
@@ -1150,6 +1333,72 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                 ) : null}
               </View>
 
+              {/* INTERMEDIATE TOWNS / ROUTE SELECTOR (UP TO 3 TOWNS) */}
+              {(isAccepted || isInTransit || isCollected) && (
+                <View style={styles.dispatchWaypointsBox}>
+                  <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                    <Text style={styles.dispatchWaypointsTitle}>
+                      🛣️ Intermediate Towns (Up to 3 Towns):
+                    </Text>
+                    <Text style={styles.dispatchWaypointsCount}>
+                      {(dispatch.waypoints?.length || 0)}/3 Selected
+                    </Text>
+                  </View>
+
+                  {/* Waypoint Slots */}
+                  {Array.isArray(dispatch.waypoints) && dispatch.waypoints.length > 0 && (
+                    <View style={{ gap: 6, marginBottom: 8 }}>
+                      {dispatch.waypoints.map((wp, idx) => (
+                        <View key={`${wp.name}-${idx}`} style={styles.dispatchWaypointItem}>
+                          <Text style={styles.dispatchWaypointText}>
+                            {idx === 0 ? "1️⃣" : idx === 1 ? "2️⃣" : "3️⃣"} {wp.name}
+                          </Text>
+                          <TouchableOpacity
+                            onPress={() => handleRemoveDispatchViaTown(dispatch, idx)}
+                            style={styles.dispatchWaypointRemoveBtn}
+                          >
+                            <Text style={styles.dispatchWaypointRemoveText}>✕ Remove</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  {/* Add next sequential waypoint */}
+                  {(!dispatch.waypoints || dispatch.waypoints.length < 3) && (
+                    <View style={{ marginTop: 2 }}>
+                      <Text style={styles.dispatchWaypointInputLabel}>
+                        + Add {(dispatch.waypoints?.length || 0) === 0 ? "1st" : (dispatch.waypoints?.length || 0) === 1 ? "2nd" : "3rd"} Intermediate Town:
+                      </Text>
+                      <CityAutocomplete
+                        value={dispatchViaInput[dispatch.id] || ""}
+                        onChangeText={(text) => setDispatchViaInput((p) => ({ ...p, [dispatch.id]: text }))}
+                        inlineMode={true}
+                        onSelectCity={(city: CityEntry) => {
+                          handleAddDispatchViaTown(dispatch, city);
+                          setDispatchViaInput((p) => ({ ...p, [dispatch.id]: "" }));
+                        }}
+                      />
+                    </View>
+                  )}
+
+                  {/* Route Breadcrumb Preview */}
+                  <View style={styles.dispatchBreadcrumbRow}>
+                    <Text style={styles.dispatchBreadcrumbNode}>🚩 {dispatch.pickupCity}</Text>
+                    {dispatch.waypoints?.map((wp, idx) => (
+                      <React.Fragment key={`bc-${wp.name}-${idx}`}>
+                        <Text style={styles.dispatchBreadcrumbArrow}>➔</Text>
+                        <Text style={styles.dispatchBreadcrumbVia}>
+                          {idx === 0 ? "1️⃣" : idx === 1 ? "2️⃣" : "3️⃣"} {wp.name}
+                        </Text>
+                      </React.Fragment>
+                    ))}
+                    <Text style={styles.dispatchBreadcrumbArrow}>➔</Text>
+                    <Text style={styles.dispatchBreadcrumbNode}>🏁 {dispatch.deliveryCity}</Text>
+                  </View>
+                </View>
+              )}
+
               <View style={styles.dispatchActions}>
                 {dispatch.customerPhone && (dispatch.hasPaymentSlip || isAccepted || isCollected || isInTransit) ? (
                   <TouchableOpacity
@@ -1200,31 +1449,22 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     </TouchableOpacity>
                   </>
                 ) : null}
-                {isAccepted ? (
-                  <TouchableOpacity
-                    style={[styles.dispatchStartBtn, { backgroundColor: "#FFC20E" }]}
-                    onPress={() => handleGoodsCollectedDispatch(dispatch)}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={[styles.dispatchAcceptBtnText, { color: "#26231B" }]}>📦 Mark Goods Collected</Text>
-                  </TouchableOpacity>
-                ) : null}
-                {isCollected ? (
-                  <TouchableOpacity
-                    style={styles.dispatchStartBtn}
-                    onPress={() => handleStartTripDispatch(dispatch)}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={styles.dispatchAcceptBtnText}>🚚 Start Trip / In Transit</Text>
-                  </TouchableOpacity>
-                ) : null}
                 {(isAccepted || isCollected || isInTransit) ? (
                   <TouchableOpacity
-                    style={styles.dispatchCompleteBtn}
-                    onPress={() => handleCompleteDispatch(dispatch)}
+                    style={[styles.dispatchCompleteBtn, { backgroundColor: "#DC2626" }]}
+                    onPress={() => {
+                      Alert.alert(
+                        "Stop / Complete Ride",
+                        "Are you sure you want to end this ride? If payment was completed, it will be moved to Completed Bookings; otherwise to Pending Payment.",
+                        [
+                          { text: "Cancel", style: "cancel" },
+                          { text: "End Ride", style: "destructive", onPress: () => handleCompleteDispatch(dispatch) },
+                        ]
+                      );
+                    }}
                     activeOpacity={0.8}
                   >
-                    <Text style={styles.dispatchAcceptBtnText}>✓ Complete Delivery</Text>
+                    <Text style={styles.dispatchAcceptBtnText}>🛑 Stop / Complete Ride</Text>
                   </TouchableOpacity>
                 ) : null}
               </View>
@@ -2054,6 +2294,89 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "800",
     textAlign: "center",
+  },
+  dispatchWaypointsBox: {
+    backgroundColor: "#F9F8F3",
+    borderWidth: 1,
+    borderColor: "#E7E2D0",
+    borderRadius: 12,
+    padding: 12,
+    marginHorizontal: 14,
+    marginBottom: 10,
+  },
+  dispatchWaypointsTitle: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#26231B",
+  },
+  dispatchWaypointsCount: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#8A7340",
+  },
+  dispatchWaypointItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#E7E2D0",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  dispatchWaypointText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#26231B",
+  },
+  dispatchWaypointRemoveBtn: {
+    backgroundColor: "#FFF0F0",
+    borderWidth: 1,
+    borderColor: "#FCA5A5",
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  dispatchWaypointRemoveText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#DC2626",
+  },
+  dispatchWaypointInputLabel: {
+    fontSize: 11.5,
+    fontWeight: "700",
+    color: "#6F6A5A",
+    marginBottom: 4,
+  },
+  dispatchBreadcrumbRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 4,
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: "#E7E2D0",
+  },
+  dispatchBreadcrumbNode: {
+    fontSize: 11.5,
+    fontWeight: "800",
+    color: "#26231B",
+  },
+  dispatchBreadcrumbVia: {
+    fontSize: 11.5,
+    fontWeight: "700",
+    color: "#0369A1",
+    backgroundColor: "#E0F2FE",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  dispatchBreadcrumbArrow: {
+    fontSize: 11,
+    color: "#9CA3AF",
+    fontWeight: "900",
   },
   container: {
     flex: 1,

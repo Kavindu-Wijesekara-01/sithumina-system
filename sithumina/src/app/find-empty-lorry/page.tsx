@@ -129,7 +129,7 @@ export default function FindEmptyLorryPage() {
             const dialPhone =
               lorry.driverPhone && lorry.driverPhone.length > 5
                 ? lorry.driverPhone
-                : "+94765550123";
+                : "+94755984984";
 
             return (
               <div

@@ -60,7 +60,7 @@ export default function ContactPage() {
       </div>
 
       {/* Phone Links */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {siteConfig.phoneNumbers.map((phone, idx) => (
           <a
             key={idx}
@@ -86,7 +86,7 @@ export default function ContactPage() {
               </span>
             </div>
             <span className="text-base font-extrabold text-[var(--ink)]">
-              {phone.display}
+              {phone.display} {phone.type === "whatsapp" ? "(WhatsApp)" : ""}
             </span>
             <span className="text-xs text-[var(--mut)]">
               {phone.type === "whatsapp"

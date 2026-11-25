@@ -1384,8 +1384,8 @@ export default function CustomerPortalPage() {
                     type="text"
                     placeholder={
                       locale === "en"
-                        ? "e.g. 0771234567 or ST-BK-XXXX"
-                        : "උදා: 0771234567 හෝ ST-BK-XXXX"
+                        ? "e.g. 07XXXXXXXX or ST-BK-XXXX"
+                        : "උදා: 07XXXXXXXX හෝ ST-BK-XXXX"
                     }
                     value={lookupInput}
                     onChange={(e) => setLookupInput(e.target.value)}

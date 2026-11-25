@@ -206,7 +206,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       const adminProfile: UserProfile = {
         uid: fbUser.uid,
-        phone: "0112345678",
+        phone: "0112984984",
         role: "admin",
         name: "Sithumina Dispatch Chief",
         createdAt: Date.now(),

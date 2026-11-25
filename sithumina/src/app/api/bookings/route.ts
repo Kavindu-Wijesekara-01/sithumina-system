@@ -4,7 +4,9 @@ import {
   getBookingsByCustomerPhone,
   createBookingInStore,
   updateBookingStatusInStore,
+  updateBookingInStore,
   upsertBookingInStore,
+  deleteBookingFromStore,
 } from "@/lib/server-store";
 import { normalizePhoneNumber, phonesMatch } from "@/lib/phone-utils";
 import {
@@ -14,7 +16,7 @@ import {
   validateTimeRange,
 } from "@/lib/booking-schedule";
 import { db } from "@/lib/firebase";
-import { collection, getDocs, getDoc, doc, setDoc, updateDoc, query, where } from "firebase/firestore";
+import { collection, getDocs, getDoc, doc, setDoc, updateDoc, deleteDoc, query, where } from "firebase/firestore";
 
 function isRealDriverName(val: unknown): string {
   const s = String(val || "").trim();
@@ -206,6 +208,20 @@ export async function GET(request: Request) {
         paymentRejectReason: data.paymentRejectReason ? String(data.paymentRejectReason) : undefined,
         paymentApprovedAt: Number(data.paymentApprovedAt) || undefined,
         paymentSlipDeletedAt: Number(data.paymentSlipDeletedAt) || undefined,
+        advanceAmount:
+          typeof data.advanceAmount === "number" && !Number.isNaN(data.advanceAmount)
+            ? data.advanceAmount
+            : undefined,
+        pendingAmount:
+          typeof data.pendingAmount === "number" && !Number.isNaN(data.pendingAmount)
+            ? data.pendingAmount
+            : undefined,
+        waypoints: Array.isArray(data.waypoints) ? data.waypoints : undefined,
+        travelRoute: data.travelRoute ? String(data.travelRoute) : undefined,
+        driverTripStatus: data.driverTripStatus || undefined,
+        rideStartedAt: Number(data.rideStartedAt) || undefined,
+        rideEndedAt: Number(data.rideEndedAt) || undefined,
+        actualDistanceKm: Number(data.actualDistanceKm) || undefined,
         createdAt: Number(data.createdAt) || 0,
         updatedAt: Number(data.updatedAt) || Number(data.createdAt) || 0,
       });
@@ -335,6 +351,16 @@ export async function POST(request: Request) {
       cargoWeight: body.cargoWeight || body.weight,
       helpersCount: body.helpersCount,
       status,
+      quotedAmount: typeof body.quotedAmount === "number" ? body.quotedAmount : undefined,
+      advanceAmount: typeof body.advanceAmount === "number" ? body.advanceAmount : undefined,
+      pendingAmount: typeof body.pendingAmount === "number" ? body.pendingAmount : undefined,
+      paymentMethod: body.paymentMethod,
+      paymentSlipStatus: body.paymentSlipStatus,
+      waypoints: Array.isArray(body.waypoints) ? body.waypoints : undefined,
+      travelRoute: body.travelRoute,
+      driverTripStatus: body.driverTripStatus,
+      rideStartedAt: typeof body.rideStartedAt === "number" ? body.rideStartedAt : undefined,
+      rideEndedAt: typeof body.rideEndedAt === "number" ? body.rideEndedAt : undefined,
     });
 
     try {
@@ -383,6 +409,12 @@ export async function PATCH(request: Request) {
       paymentMethod,
       paymentSlipStatus,
       paymentRejectReason,
+      driverTripStatus,
+      rideStartedAt,
+      rideEndedAt,
+      waypoints,
+      travelRoute,
+      actualDistanceKm,
     } = body;
 
     if (!id || !status) {
@@ -516,6 +548,23 @@ export async function PATCH(request: Request) {
     if (cleanDates !== undefined) updateFields.dates = cleanDates;
     if (cleanStartTime !== undefined) updateFields.startTime = cleanStartTime;
     if (cleanEndTime !== undefined) updateFields.endTime = cleanEndTime;
+    if (driverTripStatus !== undefined) updateFields.driverTripStatus = driverTripStatus;
+    if (rideStartedAt !== undefined) updateFields.rideStartedAt = rideStartedAt;
+    if (rideEndedAt !== undefined) updateFields.rideEndedAt = rideEndedAt;
+    if (Array.isArray(waypoints)) updateFields.waypoints = waypoints;
+    if (travelRoute !== undefined) updateFields.travelRoute = travelRoute;
+    if (actualDistanceKm !== undefined) updateFields.actualDistanceKm = actualDistanceKm;
+
+    if (updated) {
+      updateBookingInStore(id, {
+        ...(driverTripStatus !== undefined ? { driverTripStatus } : {}),
+        ...(rideStartedAt !== undefined ? { rideStartedAt } : {}),
+        ...(rideEndedAt !== undefined ? { rideEndedAt } : {}),
+        ...(Array.isArray(waypoints) ? { waypoints } : {}),
+        ...(travelRoute !== undefined ? { travelRoute } : {}),
+        ...(actualDistanceKm !== undefined ? { actualDistanceKm } : {}),
+      });
+    }
 
     try {
       const docRef = doc(db, "bookings", id);
@@ -564,6 +613,35 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ success: true, booking: updated || { id, status } });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Failed to update booking";
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const id = searchParams.get("id");
+    if (!id) {
+      return NextResponse.json({ success: false, error: "Booking ID is required." }, { status: 400 });
+    }
+
+    deleteBookingFromStore(id);
+
+    try {
+      await deleteDoc(doc(db, "bookings", id));
+      const legacySnap = await getDocs(
+        query(collection(db, "bookings"), where("trackingId", "==", id))
+      );
+      for (const d of legacySnap.docs) {
+        await deleteDoc(doc(db, "bookings", d.id));
+      }
+    } catch (e) {
+      console.warn("Firestore delete sync notice:", e);
+    }
+
+    return NextResponse.json({ success: true, deletedId: id });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Failed to delete booking";
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }

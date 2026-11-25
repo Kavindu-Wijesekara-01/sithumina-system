@@ -23,15 +23,15 @@ const DEFAULT_BANNERS: BannerItem[] = [
     id: "sithumina-fleet-banner",
     image: "/banner-desktop.jpg?v=3",
     mobileImage: "/banner-mobile-2.jpg?v=3",
-    alt: "Sithumina Transport – Lorry Fleet & Logistics – Call: 0755984984 / 0112984984",
-    href: "tel:0755984984",
+    alt: "Sithumina Transport – Lorry Fleet & Logistics – Call: 0112 984 984 / WhatsApp: 0755 984 984",
+    href: "tel:0112984984",
   },
   {
     id: "sithumina-travel-banner",
     image: "/banner.jpg?v=3",
     mobileImage: "/banner-mobile.jpg?v=3",
-    alt: "Sithumina Transport – සිතුමිණ ට්‍රාන්ස්පෝර්ට් – Call for Booking 0755984984",
-    href: "tel:0755984984",
+    alt: "Sithumina Transport – සිතුමිණ ට්‍රාන්ස්පෝර්ට් – Call: 0112 984 984 / WhatsApp: 0755 984 984",
+    href: "tel:0112984984",
   },
 ];
 
@@ -53,7 +53,7 @@ export const BannerSlider: React.FC<BannerSliderProps> = ({
           image: b.desktopImage || "/banner-desktop.jpg",
           mobileImage: b.mobileImage || b.desktopImage || "/banner-mobile-2.jpg",
           alt: b.title || "Sithumina Transport Promo",
-          href: "tel:0755984984",
+          href: "tel:0112984984",
         }));
         setActiveBanners(mapped);
       }

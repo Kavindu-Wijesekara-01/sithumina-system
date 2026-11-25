@@ -397,17 +397,35 @@ export function findBookingScheduleConflict(
       existing.endTime,
       existingDates
     );
-    if (!existingCheck.valid) continue;
-
-    // Half-open interval overlap check on absolute timestamps:
-    // Two intervals [A_start, A_end) and [B_start, B_end) overlap iff:
-    // A_start < B_end && B_start < A_end
-    const timesOverlap = candidateCheck.startTs < existingCheck.endTs && existingCheck.startTs < candidateCheck.endTs;
-    if (!timesOverlap) continue;
 
     const lorryClash = sameLorry(candidate, existing);
     const riderClash = sameRider(candidate, existing);
     if (!lorryClash && !riderClash) continue;
+
+    // Check if the existing booking is actively ongoing on the road right now
+    const isExistingOngoing =
+      existing.status === "in_transit" ||
+      (existing as any).driverTripStatus === "in_transit" ||
+      Boolean((existing as any).rideStartedAt && !(existing as any).rideEndedAt && existing.status !== "delivered" && existing.status !== "completed");
+
+    let existingStartTs = existingCheck.valid ? existingCheck.startTs : ((existing as any).rideStartedAt || (Date.now() - 3600000));
+    let existingEndTs = existingCheck.valid ? existingCheck.endTs : 0;
+
+    if (isExistingOngoing) {
+      // If currently in transit, the vehicle/rider is occupied right now through at least current time + buffer
+      const now = Date.now();
+      if (!existingStartTs) existingStartTs = (existing as any).rideStartedAt || (now - 3600000);
+      existingEndTs = Math.max(existingEndTs, now + 30 * 60 * 1000);
+    } else if (!existingCheck.valid) {
+      // Unscheduled or invalid dates on non-ongoing trip
+      continue;
+    }
+
+    // Half-open interval overlap check on absolute timestamps:
+    // Two intervals [A_start, A_end) and [B_start, B_end) overlap iff:
+    // A_start < B_end && B_start < A_end
+    const timesOverlap = candidateCheck.startTs < existingEndTs && existingStartTs < candidateCheck.endTs;
+    if (!timesOverlap) continue;
 
     const conflictType = lorryClash && riderClash ? "both" : lorryClash ? "lorry" : "rider";
     const conflictPlate = String(existing.assignedPlate || existing.selectedVehiclePlate || "").trim();
@@ -422,19 +440,23 @@ export function findBookingScheduleConflict(
       reasonLabel = `Rider (${conflictDriver})`;
     }
 
-    const conflictTimeRange = existingCheck.isMultiDate
-      ? `${existingCheck.startDate} ${formatTime12h(existingCheck.startTime)} → ${existingCheck.endDate} ${formatTime12h(existingCheck.endTime)} (${existingCheck.daysCount} Days)`
-      : `${existingCheck.startDate} · ${formatTimeDurationLabel(existingCheck.startTime, existingCheck.endTime)}`;
+    const conflictTimeRange = existingCheck.valid
+      ? (existingCheck.isMultiDate
+          ? `${existingCheck.startDate} ${formatTime12h(existingCheck.startTime)} → ${existingCheck.endDate} ${formatTime12h(existingCheck.endTime)} (${existingCheck.daysCount} Days)`
+          : `${existingCheck.startDate} · ${formatTimeDurationLabel(existingCheck.startTime, existingCheck.endTime)}`)
+      : "Active In-Transit";
+
+    const ongoingNotice = isExistingOngoing ? " (Currently on active trip)" : "";
 
     return {
       hasConflict: true,
       conflictType,
       conflictingBookingId: existing.id,
-      conflictDate: existingCheck.startDate,
+      conflictDate: existingCheck.valid ? existingCheck.startDate : "Today",
       conflictTimeRange,
       conflictPlate,
       conflictDriver,
-      message: `Schedule conflict: ${reasonLabel} is already allocated to booking ${existing.id || ""} for ${conflictTimeRange}. Overlapping times are not allowed.`,
+      message: `Schedule conflict: ${reasonLabel} is ${isExistingOngoing ? "currently on an active ongoing trip" : "already allocated"} to booking ${existing.id || ""}${ongoingNotice} for ${conflictTimeRange}. Overlapping times are strictly prohibited.`,
     };
   }
 

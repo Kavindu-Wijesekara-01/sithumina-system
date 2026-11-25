@@ -70,8 +70,8 @@ function mapFirestoreBooking(
     Array.isArray(data.dates) && data.dates.length > 0
       ? data.dates
       : resolvedDate
-      ? [resolvedDate]
-      : [];
+        ? [resolvedDate]
+        : [];
 
   return {
     id: resolvedId,
@@ -82,8 +82,8 @@ function mapFirestoreBooking(
       typeof data.distanceKm === "number" && !Number.isNaN(data.distanceKm)
         ? data.distanceKm
         : data.distanceKm !== undefined && !Number.isNaN(Number(data.distanceKm))
-        ? Number(data.distanceKm)
-        : undefined,
+          ? Number(data.distanceKm)
+          : undefined,
     pickupCity: data.pickupCity || data.pickup || "",
     deliveryCity: data.deliveryCity || data.destination || "",
     pickupLat: data.pickupLat,
@@ -248,7 +248,7 @@ async function syncBookingDispatchDoc(
   ).trim();
 
   let targetDispatchStatus = "pending_acceptance";
-  if (status === "delivered") {
+  if (status === "delivered" || status === "completed") {
     targetDispatchStatus = "completed";
   } else if (status === "cancelled") {
     targetDispatchStatus = "cancelled";
@@ -308,6 +308,10 @@ async function syncBookingDispatchDoc(
       paymentSlipStatus: booking.paymentSlipStatus || "",
       paymentSlipId: booking.paymentSlipId || "",
       quotedAmount: booking.quotedAmount ?? null,
+      pendingAmount: booking.pendingAmount ?? null,
+      advanceAmount: booking.advanceAmount ?? null,
+      waypoints: booking.waypoints || [],
+      travelRoute: booking.travelRoute || "",
       updatedAt: Date.now(),
       createdAt: booking.createdAt || Date.now(),
     };
@@ -408,7 +412,7 @@ async function fetchBookingsAuthoritative(): Promise<StoredBooking[]> {
           }
         }
       });
-    } catch {}
+    } catch { }
 
     const items: StoredBooking[] = [];
     const seenIds = new Set<string>();
@@ -911,13 +915,13 @@ export async function getLorryBookedDatesAction(
 
       const plateMatch = Boolean(
         cleanPlateNorm &&
-          b.assignedPlate &&
-          normalizePlate(b.assignedPlate) === cleanPlateNorm
+        b.assignedPlate &&
+        normalizePlate(b.assignedPlate) === cleanPlateNorm
       );
       const idMatch = Boolean(
         clean &&
-          b.assignedLorryId &&
-          b.assignedLorryId.trim().toUpperCase() === clean
+        b.assignedLorryId &&
+        b.assignedLorryId.trim().toUpperCase() === clean
       );
       // Confirmed & Accepted bookings lock the date on the calendar
       const isConfirmed = ["accepted", "assigned", "in_transit", "delivered", "booked"].includes(b.status);
@@ -1012,19 +1016,19 @@ export async function updateBookingStatusAction(
 
     const sanitizedAssignment = assignment
       ? {
-          ...assignment,
-          assignedDriverId: assignment.assignedDriverId?.trim() || undefined,
-          assignedDriverName: isRealDriverName(assignment.assignedDriverName) || undefined,
-          assignedDriverPhone: assignment.assignedDriverPhone?.trim() || undefined,
-          date: assignment.date?.trim() || undefined,
-          dates: Array.isArray(assignment.dates) && assignment.dates.length > 0 ? assignment.dates : undefined,
-          endDate: assignment.endDate?.trim() || undefined,
-          daysNeeded: assignment.daysNeeded !== undefined ? Number(assignment.daysNeeded) || assignment.daysNeeded : undefined,
-          startTime: assignment.startTime?.trim() || undefined,
-          endTime: assignment.endTime?.trim() || undefined,
-          distanceKm: assignment.distanceKm !== undefined && !Number.isNaN(Number(assignment.distanceKm)) ? Number(assignment.distanceKm) : undefined,
-          customerIdNumber: assignment.customerIdNumber?.trim() || undefined,
-        }
+        ...assignment,
+        assignedDriverId: assignment.assignedDriverId?.trim() || undefined,
+        assignedDriverName: isRealDriverName(assignment.assignedDriverName) || undefined,
+        assignedDriverPhone: assignment.assignedDriverPhone?.trim() || undefined,
+        date: assignment.date?.trim() || undefined,
+        dates: Array.isArray(assignment.dates) && assignment.dates.length > 0 ? assignment.dates : undefined,
+        endDate: assignment.endDate?.trim() || undefined,
+        daysNeeded: assignment.daysNeeded !== undefined ? Number(assignment.daysNeeded) || assignment.daysNeeded : undefined,
+        startTime: assignment.startTime?.trim() || undefined,
+        endTime: assignment.endTime?.trim() || undefined,
+        distanceKm: assignment.distanceKm !== undefined && !Number.isNaN(Number(assignment.distanceKm)) ? Number(assignment.distanceKm) : undefined,
+        customerIdNumber: assignment.customerIdNumber?.trim() || undefined,
+      }
       : undefined;
 
     // Fetch existing booking state (local store + Firestore) to validate time-slot & rider constraints before mutating
@@ -1187,20 +1191,20 @@ export async function updateBookingStatusAction(
     const existingValidDriver = isRealDriverName(updatedLocal?.assignedDriverName);
     const effectiveAssignment = shouldEnrichDriver
       ? {
-          ...(sanitizedAssignment || {}),
-          ...(enrichedDriverMeta.resolvedLorryId && !(sanitizedAssignment?.assignedLorryId || updatedLocal?.assignedLorryId)
-            ? { assignedLorryId: enrichedDriverMeta.resolvedLorryId }
-            : {}),
-          ...(enrichedDriverMeta.resolvedPlate && !(sanitizedAssignment?.assignedPlate || updatedLocal?.assignedPlate)
-            ? { assignedPlate: enrichedDriverMeta.resolvedPlate }
-            : {}),
-          ...(enrichedDriverMeta.driverName && !(sanitizedAssignment?.assignedDriverName || existingValidDriver)
-            ? { assignedDriverName: enrichedDriverMeta.driverName }
-            : {}),
-          ...(enrichedDriverMeta.driverPhone && !(sanitizedAssignment?.assignedDriverPhone || updatedLocal?.assignedDriverPhone)
-            ? { assignedDriverPhone: enrichedDriverMeta.driverPhone }
-            : {}),
-        }
+        ...(sanitizedAssignment || {}),
+        ...(enrichedDriverMeta.resolvedLorryId && !(sanitizedAssignment?.assignedLorryId || updatedLocal?.assignedLorryId)
+          ? { assignedLorryId: enrichedDriverMeta.resolvedLorryId }
+          : {}),
+        ...(enrichedDriverMeta.resolvedPlate && !(sanitizedAssignment?.assignedPlate || updatedLocal?.assignedPlate)
+          ? { assignedPlate: enrichedDriverMeta.resolvedPlate }
+          : {}),
+        ...(enrichedDriverMeta.driverName && !(sanitizedAssignment?.assignedDriverName || existingValidDriver)
+          ? { assignedDriverName: enrichedDriverMeta.driverName }
+          : {}),
+        ...(enrichedDriverMeta.driverPhone && !(sanitizedAssignment?.assignedDriverPhone || updatedLocal?.assignedDriverPhone)
+          ? { assignedDriverPhone: enrichedDriverMeta.driverPhone }
+          : {}),
+      }
       : sanitizedAssignment || {};
 
     // Outside Lorry handling: if vehicle is an outside lorry, enforce registered owner as driver
@@ -1509,7 +1513,7 @@ export async function editBookingAction(
       revalidatePath("/admin");
       revalidatePath("/login");
       revalidatePath("/manage");
-    } catch {}
+    } catch { }
 
     return {
       success: true,
@@ -1557,7 +1561,7 @@ export async function startRideAction(bookingId: string): Promise<ActionResult<S
       revalidatePath("/admin");
       revalidatePath("/login");
       revalidatePath("/manage");
-    } catch {}
+    } catch { }
 
     return { success: true, data: updated || ({} as StoredBooking) };
   } catch (err: unknown) {
@@ -1587,8 +1591,16 @@ export async function endRideAction(
       (typeof booking.pendingAmount === "number" && booking.pendingAmount > 0) ||
       booking.paymentSlipStatus === "cash_pending" ||
       booking.paymentSlipStatus === "pending_review" ||
+      booking.status === "payment_submitted" ||
+      booking.status === "awaiting_payment" ||
+      booking.status === "pending" ||
       (booking.paymentMethod === "cash_manual" && (!booking.paymentApprovedAt || booking.paymentApprovedAt <= 0)) ||
-      (!booking.paymentApprovedAt && booking.paymentSlipStatus !== "approved" && (booking.paymentSlipStatus as string) !== "manual_approved");
+      (!booking.paymentApprovedAt &&
+        booking.paymentSlipStatus !== "approved" &&
+        (booking.paymentSlipStatus as string) !== "manual_approved" &&
+        (booking.paymentSlipStatus as string) !== "online_paid" &&
+        (booking as any).paymentStatus !== "paid" &&
+        (booking as any).paymentStatusMode !== "success");
 
     const targetStatus: BookingStatusValue = isPending ? "delivered" : "completed";
     const now = Date.now();
@@ -1598,6 +1610,11 @@ export async function endRideAction(
       rideEndedAt: now,
       driverTripStatus: "completed",
     });
+
+    const targetLorry = updated?.assignedLorryId || updated?.assignedPlate;
+    if (targetLorry) {
+      updateLorryStatusInStore(targetLorry, "empty");
+    }
 
     try {
       await updateDoc(doc(db, "bookings", cleanId), {
@@ -1614,7 +1631,7 @@ export async function endRideAction(
       revalidatePath("/admin");
       revalidatePath("/login");
       revalidatePath("/manage");
-    } catch {}
+    } catch { }
 
     return {
       success: true,
@@ -1653,7 +1670,7 @@ export async function driverAcceptBookingAction(
       revalidatePath("/admin");
       revalidatePath("/login");
       revalidatePath("/manage");
-    } catch {}
+    } catch { }
     return { success: true, data: updated || ({} as StoredBooking) };
   } catch (err: unknown) {
     return { success: false, error: "Failed to update trip status." };
@@ -1688,7 +1705,7 @@ export async function driverUpdateTripRouteAction(
       revalidatePath("/admin");
       revalidatePath("/login");
       revalidatePath("/manage");
-    } catch {}
+    } catch { }
     return { success: true, data: updated || ({} as StoredBooking) };
   } catch (err: unknown) {
     return { success: false, error: "Failed to update route waypoints." };
@@ -1773,7 +1790,7 @@ export async function driverShareLiveGpsAction(
       revalidatePath("/admin");
       revalidatePath("/login");
       revalidatePath("/manage");
-    } catch {}
+    } catch { }
 
     return { success: true, data: updated || ({} as StoredBooking) };
   } catch (err: unknown) {
@@ -1824,7 +1841,7 @@ export async function driverToggleEmptyReturnAction(
       revalidatePath("/login");
       revalidatePath("/manage");
       revalidatePath("/find-empty-lorry");
-    } catch {}
+    } catch { }
 
     return { success: true, data: updated || ({} as StoredBooking) };
   } catch (err: unknown) {
