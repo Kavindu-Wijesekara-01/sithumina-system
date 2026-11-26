@@ -14,6 +14,7 @@ import {
   driverToggleEmptyReturnAction,
   updateBookingStatusAction,
 } from "@/actions";
+import { formatRs, REGISTRATION_DEPOSIT } from "@/lib/commission";
 import {
   StoredOutsideEmployee,
   StoredCommissionTransaction,
@@ -382,7 +383,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
         setEmptyReturnActive(willStart);
         alert(
           willStart
-            ? "🚚 Empty Return ආරම්භ කරන ලදී! ලොරිය දැන් Available Empty Lorry ලෙස පාරිභෝගික සිතියමේ දිස්වේ."
+            ? "Empty Return ආරම්භ කරන ලදී! ලොරිය දැන් Available Empty Lorry ලෙස පාරිභෝගික සිතියමේ දිස්වේ."
             : "✓ Empty Return ගමන අවසන් කරන ලදී."
         );
       }
@@ -670,11 +671,11 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               </p>
             </div>
             <div className="p-3.5 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-1">
-              <span className="font-bold text-[var(--ink)]">2. 20% Commission per Booking</span>
+              <span className="font-bold text-[var(--ink)]">2. 20% Commission per Completed Hire</span>
               <p>
                 {locale === "en"
-                  ? "When a hire is confirmed, 20% commission is deducted automatically from your balance."
-                  : "Hire එකක් Confirm වූ පසු එම මුළු මුදලින් 20%ක කොමිස් මුදලක් ශේෂයෙන් කැපේ."}
+                  ? "When a hire is completed, You collect the fare from the customer. 20% of the hire amount is deducted from your balance. Your balance may go negative and hires are never blocked."
+                  : "Hire එකක් අවසන් වූ පසු එහි මුදලින් 20%ක් ශේෂයෙන් අඩු වේ. ශේෂය ඍණ වුවත් Hires නතර නොවේ."}
               </p>
             </div>
             <div className="p-3.5 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-1">
@@ -694,7 +695,15 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
   // -------------------------------------------------------------
   // VIEW B: LOGGED IN (Employee Dashboard)
   // -------------------------------------------------------------
-  const isBalanceLow = employee.balance < 2000;
+  const isOwing = employee.balance < 0;
+  const isBalanceLow = employee.balance < 1000;
+  // Progress: how much of everything deposited has been used up by commission
+  const totalDeposited =
+    transactions
+      .filter((tx) => tx.type === "initial_deposit" || tx.type === "topup")
+      .reduce((sum, tx) => sum + (Number(tx.amount) || 0), 0) || REGISTRATION_DEPOSIT;
+  const commissionUsed = employee.totalCommissionDeducted || 0;
+  const usedPercent = Math.min(100, Math.round((commissionUsed / totalDeposited) * 100));
 
   return (
     <div className="flex flex-col gap-6">
@@ -714,7 +723,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               </div>
               <div className="mt-1 flex items-center gap-2 flex-wrap">
                 <span className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-950 font-bold text-xs flex items-center gap-1.5 shadow-2xs">
-                  <span>📱 Driver App Login:</span>
+                  <span>Driver App Login:</span>
                   <strong className="font-mono text-xs font-black text-emerald-900">{employee.driverId || employee.id}</strong>
                 </span>
                 <span className="text-[11px] text-[var(--mut)]">
@@ -762,11 +771,11 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                 <span>{locale === "en" ? "Duty Availability Status:" : "සේවයට සූදානම් තත්ත්වය (Duty Status):"}</span>
                 {employee.isAvailable ? (
                   <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-black">
-                    🟢 {locale === "en" ? "Available / සේවයට සූදානම්" : "Available / සේවයට සූදානම්"}
+                    {locale === "en" ? "Available / සේවයට සූදානම්" : "Available / සේවයට සූදානම්"}
                   </span>
                 ) : (
                   <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 text-[10px] font-black">
-                    ⚪ {locale === "en" ? "Unavailable / සේවය අත්හිටුවා ඇත" : "Unavailable / තාවකාලිකව සේවයෙන් බැහැරයි"}
+                    {locale === "en" ? "Unavailable / සේවය අත්හිටුවා ඇත" : "Unavailable / තාවකාලිකව සේවයෙන් බැහැරයි"}
                   </span>
                 )}
               </span>
@@ -799,7 +808,6 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               : "bg-[var(--card)] text-[var(--ink)] hover:bg-[var(--y3)] border border-[var(--line)]"
           }`}
         >
-          <span className="text-base">📱</span>
           <span>{locale === "en" ? "Driver App & Trips" : "ඩ්‍රයිවර් ඇප් සහ ගමන්වාර"}</span>
           {driverBookings.filter(
             (b) =>
@@ -834,7 +842,6 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               : "bg-[var(--card)] text-[var(--ink)] hover:bg-[var(--y3)] border border-[var(--line)]"
           }`}
         >
-          <span className="text-base">💰</span>
           <span>{locale === "en" ? "Wallet & Top-up" : "පසුම්බිය සහ තැන්පතු (Wallet)"}</span>
           {isBalanceLow && (
             <span className="px-2 py-0.5 rounded-full bg-amber-500 text-black font-bold text-[10px]">
@@ -864,7 +871,6 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               <div className="p-6 sm:p-7 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-4">
                 <div className="flex items-center justify-between pb-3 border-b border-[var(--line)] flex-wrap gap-2">
                   <div className="flex items-center gap-2">
-                    <span className="text-xl">🔔</span>
                     <div>
                       <h3 className="text-base font-black text-[var(--ink)]">
                         {locale === "en" ? "New Assigned Booking Requests" : "අලුතින් ලැබුණු ගමන්වාර ඉල්ලීම් (Assigned Requests)"}
@@ -883,7 +889,6 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
 
                 {pendingRequests.length === 0 ? (
                   <div className="p-8 text-center text-xs text-[var(--mut)] bg-[var(--bg)] rounded-2xl border border-[var(--line)] flex flex-col items-center gap-2">
-                    <span className="text-2xl">✨</span>
                     <span className="font-bold text-[var(--ink)]">
                       {locale === "en" ? "No new trip requests pending" : "දැනට අලුත් ගමන්වාර ඉල්ලීම් නොමැත"}
                     </span>
@@ -906,7 +911,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                               Trip #{b.id}
                             </span>
                             <span className="font-bold text-gray-700">
-                              📅 {b.date} ({b.startTime || "08:00"} – {b.endTime || "17:00"})
+                              {b.date} ({b.startTime || "08:00"} – {b.endTime || "17:00"})
                             </span>
                           </div>
                           <span className="px-2.5 py-0.5 rounded bg-blue-100 text-blue-900 font-bold text-[11px]">
@@ -926,14 +931,14 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                           <div>
                             <span className="text-[10px] text-[var(--mut)] font-bold uppercase block">Booked Distance (දුර)</span>
                             <strong className="text-sm text-[var(--ink)] font-mono block mt-0.5">
-                              📏 {b.distanceKm ? `${b.distanceKm} KM` : "To be calculated"}
+                              {b.distanceKm ? `${b.distanceKm} KM` : "To be calculated"}
                             </strong>
                           </div>
 
                           <div>
                             <span className="text-[10px] text-[var(--mut)] font-bold uppercase block">Cargo Goods &amp; Weight</span>
                             <span className="text-xs text-[var(--ink)] block mt-0.5 font-medium">
-                              📦 {b.cargoNature || "General Cargo"}
+                              {b.cargoNature || "General Cargo"}
                               {b.cargoWeight ? ` (${b.cargoWeight})` : ""}
                               {b.helpersCount ? ` · Helpers: ${b.helpersCount}` : ""}
                             </span>
@@ -942,7 +947,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                           <div>
                             <span className="text-[10px] text-[var(--mut)] font-bold uppercase block">Customer Details</span>
                             <span className="text-xs text-[var(--ink)] block mt-0.5 font-medium">
-                              👤 {b.customerName}
+                              {b.customerName}
                               {b.customerPhone && (
                                 <a
                                   href={`tel:${b.customerPhone}`}
@@ -1012,9 +1017,6 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
             <div className="p-6 sm:p-7 rounded-3xl bg-[var(--card)] border-2 border-emerald-500 shadow-md flex flex-col gap-6">
               <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[var(--line)]">
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-black text-lg shadow-sm">
-                    🚚
-                  </div>
                   <div>
                     <div className="flex items-center gap-2">
                       <h3 className="text-base font-black text-[var(--ink)]">
@@ -1026,7 +1028,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                     </div>
                     <p className="text-xs text-[var(--mut)]">
                       {isSharingGps
-                        ? "🟢 Live GPS broadcast active! Trip status set to Ongoing."
+                        ? "Live GPS broadcast active! Trip status set to Ongoing."
                         : "Set intermediate waypoints and start live location broadcast."}
                     </p>
                   </div>
@@ -1038,7 +1040,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                       ? "bg-emerald-600 text-white animate-pulse"
                       : "bg-blue-100 text-blue-900"
                   }`}>
-                    {activeTrip.status === "in_transit" ? "🟢 On Road (Ongoing)" : "🔵 Trip Accepted"}
+                    {activeTrip.status === "in_transit" ? "On Road (Ongoing)" : "Trip Accepted"}
                   </span>
                 </div>
               </div>
@@ -1047,7 +1049,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="p-4 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-1">
                   <span className="text-[10px] font-black uppercase tracking-wider text-emerald-800 flex items-center gap-1">
-                    <span>🟢 Start Location (ආරම්භක ස්ථානය)</span>
+                    <span>Start Location (ආරම්භක ස්ථානය)</span>
                     <span className="bg-emerald-200 text-emerald-900 px-1.5 py-0.2 rounded text-[9px] font-mono">Auto-filled</span>
                   </span>
                   <div className="text-base font-black text-[var(--ink)] mt-1">
@@ -1060,7 +1062,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
 
                 <div className="p-4 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-1">
                   <span className="text-[10px] font-black uppercase tracking-wider text-red-800 flex items-center gap-1">
-                    <span>🔴 End Destination (ගමනාන්තය)</span>
+                    <span>End Destination (ගමනාන්තය)</span>
                     <span className="bg-red-200 text-red-900 px-1.5 py-0.2 rounded text-[9px] font-mono">Auto-filled</span>
                   </span>
                   <div className="text-base font-black text-[var(--ink)] mt-1">
@@ -1077,7 +1079,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <h4 className="font-extrabold text-sm text-[var(--ink)] flex items-center gap-2">
-                      <span>🗺️ Intermediate Waypoints (අතරමැදි නගර 3ක් දක්වා)</span>
+                      <span>Intermediate Waypoints (අතරමැදි නගර 3ක් දක්වා)</span>
                       <span className="text-xs font-mono font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded">
                         {selectedWaypoints.length} / 3 Cities
                       </span>
@@ -1091,7 +1093,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                 {/* Waypoints route corridor representation */}
                 <div className="flex flex-wrap items-center gap-2 p-3 bg-[var(--card)] rounded-xl border border-[var(--line)] text-xs font-semibold">
                   <span className="px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-950 font-bold flex items-center gap-1">
-                    <span>🟢 Start:</span> {activeTrip.pickupCity}
+                    <span>Start:</span> {activeTrip.pickupCity}
                   </span>
 
                   {selectedWaypoints.map((wp, idx) => (
@@ -1113,7 +1115,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
 
                   <span className="text-gray-400 font-bold">➔</span>
                   <span className="px-2.5 py-1 rounded-lg bg-red-100 text-red-950 font-bold flex items-center gap-1">
-                    <span>🔴 End:</span> {activeTrip.deliveryCity}
+                    <span>End:</span> {activeTrip.deliveryCity}
                   </span>
                 </div>
 
@@ -1193,7 +1195,6 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                     onClick={handleSaveRoute}
                     className="px-4 py-2 rounded-xl bg-[#26231B] text-[#FFC20E] text-xs font-black cursor-pointer hover:bg-black transition-all flex items-center gap-1.5 shadow-xs disabled:opacity-50"
                   >
-                    <span>💾</span>
                     <span>{savingRoute ? "Saving..." : "Save Route & Update KM Live (පාර සුරකින්න)"}</span>
                   </button>
                 </div>
@@ -1202,11 +1203,6 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               {/* 3. Live Location Sharing (Location Share කිරීමෙන් ඔටෝ Ongoing වීම) */}
               <div className="p-5 rounded-2xl bg-gradient-to-r from-emerald-950 to-[#26231B] text-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-md">
                 <div className="flex items-center gap-3.5">
-                  <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-xl shrink-0 ${
-                    isSharingGps ? "bg-emerald-500 text-white animate-pulse" : "bg-white/10 text-white"
-                  }`}>
-                    📡
-                  </div>
                   <div>
                     <div className="flex items-center gap-2">
                       <h4 className="font-bold text-sm text-white">
@@ -1246,7 +1242,6 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                       : "bg-[#FFC20E] hover:bg-amber-400 text-black"
                   }`}
                 >
-                  <span>{isSharingGps ? "🛑" : "📡"}</span>
                   <span>
                     {isSharingGps
                       ? "Stop Sharing GPS"
@@ -1273,7 +1268,6 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                   }}
                   className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs cursor-pointer transition-all flex items-center gap-1.5 shadow-xs"
                 >
-                  <span>📦</span>
                   <span>Mark Goods Delivered (බඩු බා අවසන්)</span>
                 </button>
               </div>
@@ -1282,7 +1276,6 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               <div className="p-5 rounded-2xl bg-purple-50/80 border-2 border-purple-300 text-purple-950 flex flex-col gap-4 text-xs">
                 <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-purple-200">
                   <div className="flex items-center gap-2">
-                    <span className="text-xl">🚚</span>
                     <div>
                       <h4 className="font-bold text-sm text-purple-950">
                         Empty Return Journey · ආපසු හිස්ව පැමිණීම (Empty Lorry Tracking)
@@ -1298,7 +1291,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                       ? "bg-purple-700 text-white animate-pulse"
                       : "bg-purple-200 text-purple-900"
                   }`}>
-                    {emptyReturnActive ? "🟢 Empty Return In Transit" : "⚪ Return Idle"}
+                    {emptyReturnActive ? "Empty Return In Transit" : "Return Idle"}
                   </span>
                 </div>
 
@@ -1345,7 +1338,6 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                           : "bg-purple-600 hover:bg-purple-700 text-white"
                       }`}
                     >
-                      <span>🚚</span>
                       <span>
                         {emptyReturnActive
                           ? "Conclude Empty Return"
@@ -1421,22 +1413,24 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
         <div className="flex flex-col gap-6">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Balance Card */}
-        <div className={`p-6 rounded-3xl bg-[var(--card)] border ${isBalanceLow ? "border-amber-400" : "border-[var(--line)]"} shadow-xs flex flex-col justify-between`}>
+        <div className={`p-6 rounded-3xl bg-[var(--card)] border ${isOwing ? "border-rose-500" : isBalanceLow ? "border-amber-400" : "border-[var(--line)]"} shadow-xs flex flex-col justify-between`}>
           <div>
             <span className="text-[10px] font-black uppercase tracking-wider text-[var(--mut)] block">
               {locale === "en" ? "Current Wallet Balance" : "දැනට ඉතිරිව ඇති මුදල් ශේෂය"}
             </span>
             <div className="flex items-baseline gap-1 mt-2">
-              <span className="text-xs font-bold text-[var(--mut)]">LKR</span>
-              <span className="text-3xl font-black text-[var(--ink)]">
-                {employee.balance.toLocaleString()}
-                <span className="text-base font-normal text-[var(--mut)]">.00</span>
+              <span className={`text-3xl font-black ${isOwing ? "text-rose-700" : "text-[var(--ink)]"}`}>
+                {formatRs(employee.balance)}
               </span>
             </div>
             <div className="mt-2">
-              {isBalanceLow ? (
+              {isOwing ? (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-100 text-rose-900 text-xs font-bold">
+                  Commission owed / ගෙවිය යුතු කොමිස් මුදල {formatRs(-employee.balance)}
+                </span>
+              ) : isBalanceLow ? (
                 <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-100 text-amber-900 text-xs font-bold">
-                  ⚠️ Low Balance / ශේෂය ප්‍රමාණවත් නොවේ
+                  Low Balance / අඩු ශේෂයක්
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-900 text-xs font-bold">
@@ -1446,7 +1440,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
             </div>
           </div>
           <p className="text-[11px] text-[var(--mut)] mt-4 pt-3 border-t border-[var(--line)]">
-            Started with initial Rs. 5,000 security deposit.
+            Registration deposit: Rs. 5,000. Top-ups add to this balance.
           </p>
         </div>
 
@@ -1469,7 +1463,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
         <div className="p-6 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col justify-between">
           <div>
             <span className="text-[10px] font-black uppercase tracking-wider text-[var(--mut)] block">
-              {locale === "en" ? "Total 20% Commission Deducted" : "අයවූ මුළු 20% කොමිස් මුදල"}
+              {locale === "en" ? "Total Commission Deducted" : "අයවූ මුළු කොමිස් මුදල"}
             </span>
             <div className="flex items-baseline gap-1 mt-2">
               <span className="text-xs font-bold text-[var(--mut)]">LKR</span>
@@ -1480,41 +1474,53 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
             </div>
           </div>
           <p className="text-[11px] text-[var(--mut)] mt-4 pt-3 border-t border-[var(--line)]">
-            Calculated as 20% on each confirmed hire value.
+            Calculated as 20% of each completed hire.
           </p>
         </div>
       </div>
 
-      {/* Low Balance Warning Banner */}
-      {isBalanceLow && (
-        <div className="p-4 sm:p-5 rounded-2xl bg-amber-50 border border-amber-300 text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs leading-relaxed">
-          <div className="flex items-center gap-2.5">
-            <span className="text-2xl">⚠️</span>
-            <div>
-              <strong className="block text-sm font-bold text-amber-900">
-                {locale === "en" ? "Notice: Wallet Balance Low" : "දැනුම්දීම: මුදල් ශේෂය අවම මට්ටමක පවතී"}
-              </strong>
-              <span>
-                {locale === "en"
-                  ? "When an incoming hire arrives, if your balance cannot cover the 20% commission (e.g. Rs. 2,000 for a Rs. 10,000 hire), new bookings will be paused. Please top up below."
-                  : "අලුතින් එන Hire එකක 20% කොමිස් මුදල කැපීමට තරම් මුදල් ගිණුමේ නොමැති නම් (උදා: රු. 10,000ක Hire එකකට රු. 2,000ක ශේෂයක් නැතිනම්), නව Bookings ලබාගත නොහැක. කරුණාකර පහතින් Top-up කරන්න."}
-              </span>
-            </div>
-          </div>
+      {/* Deposit usage progress */}
+      <div className="p-5 sm:p-6 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-3">
+        <div className="flex items-center justify-between flex-wrap gap-2 text-xs">
+          <strong className="text-sm font-black text-[var(--ink)]">
+            {locale === "en" ? "Deposit Usage" : "තැන්පතු භාවිතය"}
+          </strong>
+          <span className="font-mono font-bold text-[var(--mut)]">
+            {formatRs(commissionUsed)} / {formatRs(totalDeposited)} ({usedPercent}%)
+          </span>
+        </div>
+        <div
+          role="progressbar"
+          aria-label="Deposit used by commission"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={usedPercent}
+          className="h-3 rounded-full bg-[var(--bg)] border border-[var(--line)] overflow-hidden"
+        >
+          <div
+            className={`h-full rounded-full ${isOwing ? "bg-rose-600" : isBalanceLow ? "bg-amber-500" : "bg-emerald-600"}`}
+            style={{ width: `${usedPercent}%` }}
+          />
+        </div>
+        <p className={`text-xs ${isOwing ? "text-rose-700 font-bold" : "text-[var(--mut)]"}`}>
+          {isOwing
+            ? `Your deposit is used up and you owe ${formatRs(-employee.balance)} in commission. You can keep taking hires.`
+            : `${formatRs(employee.balance)} remaining. You can keep taking hires even if this goes below zero.`}
+        </p>
+        {isOwing && (
           <a
             href="#topup-section"
-            className="px-4 py-2 rounded-xl bg-[#26231B] text-[#FFC20E] font-bold text-xs shrink-0 self-start sm:self-center no-underline"
+            className="px-4 py-2 rounded-xl bg-[#26231B] text-[#FFC20E] font-bold text-xs self-start no-underline"
           >
             {locale === "en" ? "Top Up Now ↓" : "මුදල් තැන්පත් කරන්න ↓"}
           </a>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* 3. Top-up Section (නැවත මුදල් තැන්පත් කිරීම) */}
       <div id="topup-section" className="p-6 sm:p-8 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-5">
         <div className="flex items-center justify-between pb-2 border-b border-[var(--line)] flex-wrap gap-2">
           <div className="flex items-center gap-2.5">
-            <span className="text-xl">💳</span>
             <div>
               <h3 className="text-base font-black text-[var(--ink)]">
                 {locale === "en"
@@ -1620,7 +1626,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               </div>
             ) : (
               <label className="p-2.5 rounded-xl border-2 border-dashed border-[var(--line)] hover:border-[#FFC20E] flex items-center justify-center gap-1.5 text-xs text-[var(--ink)] font-bold cursor-pointer bg-white transition-colors">
-                <span>📎 Upload Slip</span>
+                <span>Upload Slip</span>
                 <input
                   type="file"
                   accept="image/*"
@@ -1668,7 +1674,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                       </span>
                     ) : (
                       <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 text-[10px] font-bold">
-                        ⏳ Pending Admin Review
+                        Pending Admin Review
                       </span>
                     )}
                   </div>
@@ -1690,8 +1696,8 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
             </h3>
             <p className="text-xs text-[var(--mut)]">
               {locale === "en"
-                ? "Full log of 20% deductions per confirmed booking and credited top-ups."
-                : "තහවුරු වූ සෑම Booking එකක් සඳහාම 20% කොමිස් අඩු වූ ආකාරය සහ Top-up සටහන්."}
+                ? "Every 20% commission deduction, refund and top-up."
+                : "සෑම 20% කොමිස් අඩු කිරීමක්ම, ආපසු ගෙවීමක්ම සහ Top-up සටහන්."}
             </p>
           </div>
           <span className="text-xs font-mono font-bold text-[var(--mut)]">
@@ -1724,7 +1730,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                     </div>
                     <div className="flex flex-col">
                       <span className="font-bold text-[var(--ink)]">
-                        {tx.note || (isDeduction ? `20% Commission for ${tx.bookingId || "Booking"}` : "Balance Credit")}
+                        {tx.note || (isDeduction ? `Commission for ${tx.bookingId || "Booking"}` : "Balance Credit")}
                       </span>
                       <div className="flex items-center gap-2 text-[10px] text-[var(--mut)] flex-wrap mt-0.5">
                         <span>{formatDate(tx.createdAt)}</span>
@@ -1749,7 +1755,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                       {isDeduction ? "-" : "+"} LKR {Math.abs(tx.amount).toLocaleString()}.00
                     </span>
                     <span className="text-[10px] font-mono text-[var(--mut)]">
-                      Bal After: LKR {tx.balanceAfter?.toLocaleString() || 0}.00
+                      <span className={Number(tx.balanceAfter) < 0 ? "text-rose-700 font-bold" : ""}>Bal After: {formatRs(tx.balanceAfter)}</span>
                     </span>
                   </div>
                 </div>

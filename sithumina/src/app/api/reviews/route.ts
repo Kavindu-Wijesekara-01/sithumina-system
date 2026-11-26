@@ -39,7 +39,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const review = addReviewInStore({
+    const review = await addReviewInStore({
       name,
       rating: Number(rating) || 5,
       comment,
@@ -97,7 +97,7 @@ export async function DELETE(request: Request) {
       );
     }
 
-    deleteReviewFromStore(id);
+    await deleteReviewFromStore(id);
 
     try {
       await deleteDoc(doc(db, "reviews", id));

@@ -1,5 +1,6 @@
 "use client";
 
+import { todayYmd } from "@/lib/ledger";
 import React, { useState } from "react";
 import type { BookedDateDetail } from "@/actions/bookings";
 
@@ -44,7 +45,7 @@ export const BookingCalendar: React.FC<BookingCalendarProps> = ({
   onCancelBooking,
 }) => {
   const today = new Date();
-  const todayStr = today.toISOString().split("T")[0];
+  const todayStr = todayYmd(today.getTime());
   const effectiveMin = minDate || todayStr;
 
   const firstSelected = (selectedDates && selectedDates[0]) || selectedDate;

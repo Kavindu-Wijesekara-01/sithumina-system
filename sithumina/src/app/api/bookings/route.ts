@@ -16,6 +16,12 @@ import {
   validateTimeRange,
 } from "@/lib/booking-schedule";
 import { db } from "@/lib/firebase";
+import { closeDispatchesForBooking } from "@/lib/dispatch-sync";
+import { deleteBookingAction, updateBookingStatusAction } from "@/actions/bookings";
+import { syncHireCommission } from "@/lib/outside-owners";
+import { refreshVehicleTripState } from "@/lib/trip-workflow";
+import { tripFields } from "@/lib/trip-state";
+import { todayYmd } from "@/lib/ledger";
 import { collection, getDocs, getDoc, doc, setDoc, updateDoc, deleteDoc, query, where } from "firebase/firestore";
 
 function isRealDriverName(val: unknown): string {
@@ -25,7 +31,7 @@ function isRealDriverName(val: unknown): string {
 
 async function getCombinedBookingsForSchedule() {
   const byId = new Map<string, any>();
-  for (const b of getAllStoredBookings()) {
+  for (const b of await getAllStoredBookings()) {
     byId.set(b.id, b);
   }
   try {
@@ -94,9 +100,10 @@ export async function GET(request: Request) {
     }
 
     try {
-      const { getAllStoredLorries, getAllStoredOutsideEmployees } = await import("@/lib/server-store");
-      const storeLorries = getAllStoredLorries();
-      const storeOutside = getAllStoredOutsideEmployees();
+      const { getAllStoredLorries } = await import("@/lib/server-store");
+      const { listOutsideOwners } = await import("@/lib/outside-owners");
+      const storeLorries = await getAllStoredLorries();
+      const storeOutside = await listOutsideOwners().catch(() => []);
       storeLorries.forEach((l: any) => {
         if ((l.isOutsideLorry || l.ownershipType === "outside") && l.driverName && l.plate) {
           const pKey = l.plate.toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -130,7 +137,7 @@ export async function GET(request: Request) {
       const resolvedDate =
         data.date ||
         (Array.isArray(data.dates) && data.dates[0]) ||
-        new Date(data.createdAt || Date.now()).toISOString().split("T")[0];
+        todayYmd(data.createdAt || Date.now());
       const resolvedDates =
         Array.isArray(data.dates) && data.dates.length > 0
           ? data.dates
@@ -218,9 +225,7 @@ export async function GET(request: Request) {
             : undefined,
         waypoints: Array.isArray(data.waypoints) ? data.waypoints : undefined,
         travelRoute: data.travelRoute ? String(data.travelRoute) : undefined,
-        driverTripStatus: data.driverTripStatus || undefined,
-        rideStartedAt: Number(data.rideStartedAt) || undefined,
-        rideEndedAt: Number(data.rideEndedAt) || undefined,
+        ...tripFields(data),
         actualDistanceKm: Number(data.actualDistanceKm) || undefined,
         createdAt: Number(data.createdAt) || 0,
         updatedAt: Number(data.updatedAt) || Number(data.createdAt) || 0,
@@ -234,8 +239,8 @@ export async function GET(request: Request) {
   } catch (err) {
     console.warn("Firestore bookings GET fallback to local store:", err);
     const localBookings = phone
-      ? getBookingsByCustomerPhone(phone)
-      : getAllStoredBookings();
+      ? await getBookingsByCustomerPhone(phone)
+      : await getAllStoredBookings();
     return NextResponse.json({ success: true, bookings: localBookings });
   }
 }
@@ -249,7 +254,7 @@ export async function POST(request: Request) {
     const pickupCity = (body.pickupCity || body.pickup || "").toString().trim();
     const deliveryCity = (body.deliveryCity || body.destination || "").toString().trim();
     const dates = Array.isArray(body.dates) && body.dates.length > 0 ? body.dates : undefined;
-    const date = (body.date || (dates && dates[0]) || new Date().toISOString().split("T")[0]).toString().trim();
+    const date = (body.date || (dates && dates[0]) || todayYmd()).toString().trim();
     const vehicleType = (body.vehicleType || "Lorry").toString().trim();
     const packageDetails = (body.packageDetails || body.notes || body.weight || "").toString().trim();
 
@@ -325,7 +330,7 @@ export async function POST(request: Request) {
     }
 
     const resolvedName = customerName || `Customer (${customerPhone.slice(-4)})`;
-    const booking = createBookingInStore({
+    const booking = await createBookingInStore({
       customerName: resolvedName,
       customerPhone,
       pickupCity,
@@ -415,6 +420,7 @@ export async function PATCH(request: Request) {
       waypoints,
       travelRoute,
       actualDistanceKm,
+      cancelReason,
     } = body;
 
     if (!id || !status) {
@@ -422,6 +428,15 @@ export async function PATCH(request: Request) {
         { success: false, error: "Booking ID and status are required." },
         { status: 400 }
       );
+    }
+
+    if (status === "cancelled") {
+      const result = await updateBookingStatusAction(String(id), "cancelled", {
+        cancelReason: String(cancelReason || ""),
+      });
+      return result.success
+        ? NextResponse.json({ success: true, booking: result.data })
+        : NextResponse.json({ success: false, error: result.error }, { status: 400 });
     }
 
     const validDriverId =
@@ -515,7 +530,7 @@ export async function PATCH(request: Request) {
         : {}),
     };
 
-    let updated = updateBookingStatusInStore(
+    let updated = await updateBookingStatusInStore(
       id,
       status,
       {
@@ -556,7 +571,7 @@ export async function PATCH(request: Request) {
     if (actualDistanceKm !== undefined) updateFields.actualDistanceKm = actualDistanceKm;
 
     if (updated) {
-      updateBookingInStore(id, {
+      await updateBookingInStore(id, {
         ...(driverTripStatus !== undefined ? { driverTripStatus } : {}),
         ...(rideStartedAt !== undefined ? { rideStartedAt } : {}),
         ...(rideEndedAt !== undefined ? { rideEndedAt } : {}),
@@ -572,13 +587,13 @@ export async function PATCH(request: Request) {
         const snap = await getDoc(docRef);
         if (snap.exists()) {
           const data = snap.data();
-          updated = upsertBookingInStore({
+          updated = await upsertBookingInStore({
             id,
             customerName: data.customerName || data.name || "Customer",
             customerPhone: String(data.customerPhone || data.phone || "").trim(),
             pickupCity: data.pickupCity || data.pickup || "",
             deliveryCity: data.deliveryCity || data.destination || "",
-            date: data.date || (Array.isArray(data.dates) && data.dates[0]) || new Date().toISOString().split("T")[0],
+            date: data.date || (Array.isArray(data.dates) && data.dates[0]) || todayYmd(),
             dates: Array.isArray(data.dates) && data.dates.length > 0 ? data.dates : undefined,
             vehicleType: data.vehicleType || "Lorry",
             packageDetails: data.packageDetails || data.notes || "",
@@ -606,6 +621,9 @@ export async function PATCH(request: Request) {
           await updateDoc(doc(db, "bookings", d.id), updateFields);
         }
       }
+      await closeDispatchesForBooking(id, status);
+      await syncHireCommission(id);
+      await refreshVehicleTripState(assignedPlate || updated?.assignedPlate || currentBooking?.assignedPlate);
     } catch (e) {
       console.warn("Firestore booking status sync notice:", e);
     }
@@ -618,30 +636,12 @@ export async function PATCH(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const id = searchParams.get("id");
-    if (!id) {
-      return NextResponse.json({ success: false, error: "Booking ID is required." }, { status: 400 });
-    }
-
-    deleteBookingFromStore(id);
-
-    try {
-      await deleteDoc(doc(db, "bookings", id));
-      const legacySnap = await getDocs(
-        query(collection(db, "bookings"), where("trackingId", "==", id))
-      );
-      for (const d of legacySnap.docs) {
-        await deleteDoc(doc(db, "bookings", d.id));
-      }
-    } catch (e) {
-      console.warn("Firestore delete sync notice:", e);
-    }
-
-    return NextResponse.json({ success: true, deletedId: id });
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed to delete booking";
-    return NextResponse.json({ success: false, error: message }, { status: 500 });
-  }
+  const { searchParams } = new URL(request.url);
+  const id = searchParams.get("id") || "";
+  const reason = searchParams.get("reason") || "";
+  // Same path as the dashboard: no reason, no deletion; the reason is kept
+  const result = await deleteBookingAction(id, reason, undefined, "API");
+  return result.success
+    ? NextResponse.json({ success: true, deletedId: id })
+    : NextResponse.json({ success: false, error: result.error }, { status: 400 });
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { todayYmd } from "@/lib/ledger";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
 import { useLanguage } from "@/context/LanguageContext";
@@ -19,6 +20,8 @@ import {
 } from "@/lib/payment-settings";
 import { Lorry } from "@/lib/mock-lorries";
 import EmployeePortal from "@/components/EmployeePortal";
+import TripDetails from "@/components/TripDetails";
+import { isActiveTrip, tripFields } from "@/lib/trip-state";
 
 type BookingFilterTab = "all" | "pending" | "approved" | "completed" | "cancelled";
 
@@ -223,7 +226,7 @@ export default function CustomerPortalPage() {
               const resolvedDate =
                 data.date ||
                 (Array.isArray(data.dates) && data.dates[0]) ||
-                new Date(data.createdAt || Date.now()).toISOString().split("T")[0];
+                todayYmd(data.createdAt || Date.now());
               const resolvedDates =
                 Array.isArray(data.dates) && data.dates.length > 0
                   ? data.dates
@@ -274,6 +277,13 @@ export default function CustomerPortalPage() {
                 paymentApprovedAt: Number(data.paymentApprovedAt) || undefined,
                 paymentSlipDeletedAt: Number(data.paymentSlipDeletedAt) || undefined,
                 customerIdNumber: data.customerIdNumber || data.idNumber || "",
+                ...tripFields(data),
+                advanceAmount: Number(data.advanceAmount) || undefined,
+                pendingAmount: Number(data.pendingAmount) || undefined,
+                finalPaymentMethod: data.finalPaymentMethod || undefined,
+                finalPaymentBankUsed: data.finalPaymentBankUsed ? String(data.finalPaymentBankUsed) : undefined,
+                finalPaymentAt: Number(data.finalPaymentAt) || undefined,
+                actualDistanceKm: Number(data.actualDistanceKm) || undefined,
                 distanceKm: typeof data.distanceKm === "number" ? data.distanceKm : (Number(data.distanceKm) || undefined),
                 createdAt: Number(data.createdAt) || 0,
                 updatedAt: docUpdatedAt,
@@ -562,7 +572,7 @@ export default function CustomerPortalPage() {
           item.id === booking.id
             ? {
               ...item,
-              status: "payment_submitted",
+              status: ["pending", "awaiting_payment"].includes(item.status) ? "payment_submitted" : item.status,
               paymentSlipId: slipId,
               paymentSlipName: prepared.fileName,
               paymentSlipType: prepared.mimeType,
@@ -627,7 +637,7 @@ export default function CustomerPortalPage() {
         return (
           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-extrabold bg-[#E0F2F1] text-[#00695C] border border-[#B2DFDB]">
             <span className="w-2 h-2 rounded-full bg-[#00695C] animate-pulse" />
-            {locale === "en" ? "📦 Goods Collected" : "📦 භාණ්ඩ භාරගත්තා"}
+            {locale === "en" ? "Goods Collected" : "භාණ්ඩ භාරගත්තා"}
           </span>
         );
       case "in_transit":
@@ -718,8 +728,8 @@ export default function CustomerPortalPage() {
           : "ප්‍රවාහනය සිදුවෙමින් පවතී"
         : isGoodsCollected
           ? locale === "en"
-            ? "📦 Goods Collected by Rider"
-            : "📦 භාණ්ඩය රයිඩර් විසින් භාරගෙන ඇත"
+            ? "Goods Collected by Rider"
+            : "භාණ්ඩය රයිඩර් විසින් භාරගෙන ඇත"
           : isDriverAssigned
             ? locale === "en"
               ? "Payment Approved • Rider Assigned"
@@ -1661,6 +1671,13 @@ export default function CustomerPortalPage() {
                           </div>
                         </div>
 
+                        {/* Live trip progress and payment summary */}
+                        {(isActiveTrip(b) || b.status === "delivered" || b.status === "completed" || b.loadedAt) && (
+                          <div className="mt-2.5" onClick={(e) => e.stopPropagation()}>
+                            <TripDetails booking={b} locale={locale} />
+                          </div>
+                        )}
+
                         {!isExpanded && (
                           <div className="mt-2.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-semibold text-[var(--mut)]">
                             {resolvedPlate && (
@@ -1682,7 +1699,7 @@ export default function CustomerPortalPage() {
                             )}
                             {b.distanceKm && (
                               <span className="font-mono text-[11px] text-[#0d47a1] bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-bold">
-                                🛣️ {b.distanceKm} km
+                                {b.distanceKm} km
                               </span>
                             )}
                           </div>
@@ -1835,7 +1852,7 @@ export default function CustomerPortalPage() {
                               <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--mut)]">
                                 {b.distanceKm && (
                                   <span className="px-2.5 py-1 rounded-lg bg-blue-50 border border-blue-200 font-bold text-blue-900 font-mono">
-                                    🛣️ {locale === "en" ? "Distance:" : "දුර:"} {b.distanceKm} km
+                                    {locale === "en" ? "Distance:" : "දුර:"} {b.distanceKm} km
                                   </span>
                                 )}
                                 {b.cargoNature && (
@@ -2150,7 +2167,6 @@ export default function CustomerPortalPage() {
                                     </p>
                                   ) : (
                                     <div className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] text-[#856A15] bg-[#FDFBEF] px-2.5 py-1 rounded-lg border border-[#E2D9BC]">
-                                      <span>🔒</span>
                                       <span className="font-semibold">
                                         {locale === "en"
                                           ? "Rider phone unlocks once payment slip is submitted"

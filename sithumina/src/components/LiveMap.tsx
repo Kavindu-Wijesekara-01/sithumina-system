@@ -36,7 +36,7 @@ export const LiveMap: React.FC<LiveMapProps> = ({ className = "" }) => {
     loading,
     selectedLorryId,
     selectLorry,
-  } = useLiveLorries();
+  } = useLiveLorries({ onlyOngoing: true });
 
   const [userLocation] = useState<[number, number] | null>(null);
 

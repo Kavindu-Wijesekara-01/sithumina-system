@@ -6,6 +6,7 @@ import {
   doc,
   setDoc,
   deleteDoc,
+  runTransaction,
   getDoc,
   getDocs,
   collection,
@@ -314,9 +315,26 @@ export interface RegisterDriverInput {
  * Generate a unique, professional Driver ID
  * Format: ST-DRV-XXXX (e.g. ST-DRV-4921)
  */
-export function generateUniqueDriverId(): string {
-  const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-  return `ST-DRV-${randomSuffix}`;
+/** Reserve the next Driver ID (D-10, D-11 ...) using the same counter as the web. */
+export async function generateUniqueDriverId(): Promise<string> {
+  const existing = await getDocs(collection(db, "drivers"));
+  let highest = 9;
+  existing.forEach((d) => {
+    const match = d.id.match(/^D-(\d+)$/i);
+    if (match) highest = Math.max(highest, Number(match[1]));
+  });
+  const counterRef = doc(db, "counters", "driver_ids");
+  return runTransaction(db, async (tx) => {
+    let next = Math.max(Number((await tx.get(counterRef)).data()?.last) || 0, highest) + 1;
+    while (
+      (await tx.get(doc(db, "drivers", `D-${next}`))).exists() ||
+      (await tx.get(doc(db, "outside_employees", `D-${next}`))).exists()
+    ) {
+      next += 1;
+    }
+    tx.set(counterRef, { last: next, updatedAt: Date.now() }, { merge: true });
+    return `D-${next}`;
+  });
 }
 
 /**
@@ -364,7 +382,7 @@ export function isAdminId(id: string): boolean {
 export async function registerNewDriver(
   input: RegisterDriverInput
 ): Promise<{ driverId: string; lorryId: string }> {
-  const driverId = generateUniqueDriverId();
+  const driverId = await generateUniqueDriverId();
   const cleanPlate = input.plate.trim().toUpperCase();
   const lorryId = `lorry-${cleanPlate.replace(/[^A-Z0-9]/gi, "").toLowerCase() || driverId.toLowerCase()}`;
 
@@ -953,57 +971,19 @@ export async function stopLorryLiveBroadcasting(
   const driverSlug = (driverId || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
   const cleanDriverId = driverSlug ? `lorry-${driverSlug}` : "";
 
-  // 1. Immediately notify central API to delete from in-memory store
-  if (cleanId) {
-    apiFetch(`/api/lorries?id=${encodeURIComponent(cleanId)}`, {
-      method: "DELETE",
-    }).catch(() => {});
-  }
-  if (cleanPlate) {
-    apiFetch(`/api/lorries?id=${encodeURIComponent(cleanPlate)}`, {
-      method: "DELETE",
-    }).catch(() => {});
-  }
-  if (cleanPlateId && cleanPlateId !== cleanId) {
-    apiFetch(`/api/lorries?id=${encodeURIComponent(cleanPlateId)}`, {
-      method: "DELETE",
-    }).catch(() => {});
-  }
-
-  // 2. Immediately delete from Firestore "lorries_live" and "lorries" collections so onSnapshot removes it instantly
   const uniqueIds = Array.from(
     new Set([cleanId, plateSlug, cleanPlate, cleanPlateId, cleanDriverId].filter((v) => Boolean(v && !v.includes("/"))))
   );
   if (uniqueIds.length === 0) return;
 
-  const deleteOps = uniqueIds.flatMap((id) => [
-    deleteDoc(doc(db, "lorries", id)),
-    deleteDoc(doc(db, "lorries_live", id)),
+  // Only take the vehicle off the live map. Fleet records must never be deleted here.
+  // updateDoc fails harmlessly for IDs that have no document.
+  const offline = { isLive: false, isOnline: false, speedKmH: 0, status: "empty", updatedAt: Date.now() };
+  const writes = Promise.allSettled([
+    ...uniqueIds.map((id) => updateDoc(doc(db, "lorries", id), offline)),
+    ...uniqueIds.map((id) => deleteDoc(doc(db, "lorries_live", id))),
   ]);
-
-  try {
-    const deletePromise = Promise.allSettled(deleteOps);
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Timeout")), 4000)
-    );
-    await Promise.race([deletePromise, timeoutPromise]);
-  } catch {
-    const offlineOps = uniqueIds.flatMap((id) => [
-      setDoc(
-        doc(db, "lorries", id),
-        { isLive: false, isOnline: false, status: "offline", updatedAt: Date.now() },
-        { merge: true }
-      ),
-      setDoc(
-        doc(db, "lorries_live", id),
-        { isLive: false, isOnline: false, status: "offline", updatedAt: Date.now() },
-        { merge: true }
-      ),
-    ]);
-    try {
-      await Promise.allSettled(offlineOps);
-    } catch {}
-  }
+  await Promise.race([writes, new Promise((resolve) => setTimeout(resolve, 4000))]);
 }
 
 export interface LiveTripDetails {
@@ -1625,68 +1605,28 @@ export async function getAllRegistrations(): Promise<RegistrationRecord[]> {
 
 export async function updateRegistrationStatus(
   id: string,
-  status: "pending" | "approved" | "rejected",
-  registrationDetails?: Partial<RegistrationRecord>
-): Promise<boolean> {
-  // 1. Direct Firestore update
-  try {
-    const docRef = doc(db, "vehicle_registrations", id);
-    await setDoc(
-      docRef,
-      sanitizeForFirestore({
-        status,
-        updatedAt: Date.now(),
-      }),
-      { merge: true }
-    );
-  } catch (e) {
-    console.warn("Firestore registration status update notice:", e);
-  }
-
-  // 2. Notify API
-  try {
-    await apiFetch("/api/registrations", {
+  status: "pending" | "approved" | "rejected"
+): Promise<{ success: boolean; error?: string }> {
+  // Approval creates the owner wallet, Driver ID and vehicle records. That all
+  // happens in one place, the web API, so it is never half done from the phone.
+  if (status === "approved") {
+    const res = await apiFetch("/api/registrations", {
       method: "PATCH",
       body: JSON.stringify({ id, status }),
     });
-  } catch {}
-
-  // 3. If approved, also register vehicle into the fleet (lorries_registry and lorries)
-  if (status === "approved" && registrationDetails && registrationDetails.vehicleNumber) {
-    try {
-      const cleanPlate = registrationDetails.vehicleNumber.trim().toUpperCase();
-      const lorryId = `lorry-${cleanPlate.replace(/[^A-Z0-9]/gi, "").toLowerCase()}`;
-      const payload = sanitizeForFirestore({
-        id: lorryId,
-        plate: cleanPlate,
-        vehicleType: registrationDetails.vehicleType || "14ft Lorry",
-        capacity: registrationDetails.capacity || "14ft Cargo Space",
-        maxWeight: "3.5 Tons (3,500 kg)",
-        description: `Registered partner vehicle owned by ${registrationDetails.ownerName || "Partner"}.`,
-        images: [],
-        imageUrl: "",
-        driverName: registrationDetails.ownerName || "Unassigned",
-        driverPhone: registrationDetails.phone || "",
-        route: "Island-wide Fleet",
-        status: "empty",
-        lat: 6.9271,
-        lng: 79.8612,
-        heading: 0,
-        speedKmH: 0,
-        isLive: false,
-        isOnline: true,
-        lastUpdated: "Approved Registration",
-        updatedAt: Date.now(),
-        createdAt: Date.now(),
-      });
-      await setDoc(doc(db, "lorries", lorryId), payload, { merge: true });
-      await setDoc(doc(db, "lorries_registry", lorryId), payload, { merge: true });
-    } catch (err) {
-      console.warn("Firestore fleet sync on approval notice:", err);
-    }
+    return { success: res.success, error: res.error };
   }
 
-  return true;
+  try {
+    await setDoc(
+      doc(db, "vehicle_registrations", id),
+      sanitizeForFirestore({ status, updatedAt: Date.now() }),
+      { merge: true }
+    );
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e?.message || "Could not update the registration." };
+  }
 }
 
 export async function getAllInquiries(): Promise<InquiryRecord[]> {
@@ -2260,21 +2200,3 @@ export function subscribeAdminComplaints(
   };
 }
 
-export async function deleteAdminComplaint(id: string): Promise<boolean> {
-  if (!id) return false;
-  try {
-    const docRef = doc(db, "complaints", id);
-    await deleteDoc(docRef);
-  } catch (e) {
-    console.warn("Firestore delete complaint notice:", e);
-  }
-
-  try {
-    await apiFetch("/api/complaints", {
-      method: "DELETE",
-      body: JSON.stringify({ id }),
-    });
-  } catch {}
-
-  return true;
-}

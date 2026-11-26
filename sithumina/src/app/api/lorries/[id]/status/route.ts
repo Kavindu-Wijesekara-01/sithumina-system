@@ -19,7 +19,7 @@ export async function POST(
       );
     }
 
-    const updated = updateLorryStatusInStore(id, status);
+    const updated = await updateLorryStatusInStore(id, status);
     let firestoreOk = false;
     try {
       const rawTarget = (updated?.id || id.trim().toLowerCase()).replace(/\//g, "-");

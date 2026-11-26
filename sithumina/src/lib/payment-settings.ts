@@ -351,16 +351,26 @@ export async function uploadPaymentSlipToDb(params: {
     );
   }
 
+  // A slip must not pull a trip that is scheduled, running or finished back to an
+  // earlier stage, or overwrite how an earlier advance was received
+  const current = (await getDoc(doc(db, "bookings", params.bookingId))).data() || {};
+  const awaitingPayment = ["", "pending", "awaiting_payment", "payment_submitted"].includes(
+    String(current.status || "")
+  );
+  const isBalanceSlip = Number(current.advanceAmount) > 0 && Number(current.pendingAmount) > 0;
+  const method = isBalanceSlip
+    ? { finalPaymentMethod: "bank_slip", finalPaymentBankUsed: params.bankAccountUsed || "" }
+    : { paymentMethod: "bank_slip", paymentBankUsed: params.bankAccountUsed || "" };
+
   const bookingPatch = {
-    status: "payment_submitted",
-    paymentMethod: "bank_slip",
+    ...(awaitingPayment ? { status: "payment_submitted" } : {}),
+    ...method,
     paymentSlipId: slipId,
     paymentSlipName: params.fileName,
     paymentSlipType: params.mimeType,
     paymentSlipSize: params.fileSize,
     paymentSlipUploadedAt: now,
     paymentSlipStatus: "pending_review",
-    paymentBankUsed: params.bankAccountUsed || "",
     paymentRejectReason: "",
     paymentSlipDeletedAt: 0,
     updatedAt: now,

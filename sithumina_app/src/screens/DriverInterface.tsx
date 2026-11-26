@@ -11,7 +11,6 @@ import {
   Platform,
   Modal,
   Linking,
-  Vibration,
 } from "react-native";
 import * as Location from "expo-location";
 import {
@@ -41,6 +40,13 @@ import {
   getCurrentGpsPosition,
   GpsCoordinate,
 } from "../services/location";
+import {
+  startRinging,
+  stopRinging,
+  registerForDispatchPush,
+  unregisterDispatchPush,
+} from "../services/alerts";
+import { apiFetch } from "../config/api";
 import { SriLankaMapViewer, MapLorryItem } from "../components/SriLankaMapViewer";
 import CityAutocomplete from "../components/CityAutocomplete";
 import { CityEntry } from "../data/sri-lanka-cities";
@@ -50,39 +56,12 @@ interface DriverInterfaceProps {
   onLogout: () => void;
 }
 
-function playIncomingDispatchBell() {
-  try {
-    if (typeof window !== "undefined") {
-      const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
-      if (AudioCtx) {
-        const ctx = new AudioCtx();
-        const now = ctx.currentTime;
-        const playTone = (freq: number, start: number, duration: number) => {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = "sine";
-          osc.frequency.setValueAtTime(freq, start);
-          gain.gain.setValueAtTime(0.35, start);
-          gain.gain.exponentialRampToValueAtTime(0.001, start + duration);
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start(start);
-          osc.stop(start + duration);
-        };
-        playTone(880, now, 0.35);
-        playTone(1174, now + 0.22, 0.45);
-        playTone(1320, now + 0.45, 0.6);
-      }
-    }
-    Vibration.vibrate([0, 400, 200, 400]);
-  } catch {}
-}
-
 export const DriverInterface: React.FC<DriverInterfaceProps> = ({
   driver,
   onLogout,
 }) => {
-  const alertedDispatchIdsRef = useRef<Set<string>>(new Set());
+  const [busyDispatchId, setBusyDispatchId] = useState<string | null>(null);
+  const autoTrackingRef = useRef(false);
   const [dispatchViaInput, setDispatchViaInput] = useState<Record<string, string>>({});
   // GPS State
   const [isTracking, setIsTracking] = useState(false);
@@ -214,6 +193,12 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     date: string;
     dates?: string[];
     status: string;
+    tripRole?: "primary" | "return";
+    parentBookingId?: string;
+    loadedAt?: number;
+    pickupFromGps?: boolean;
+    cashDue?: number;
+    externalFare?: boolean;
     hasPaymentSlip?: boolean;
     paymentSlipStatus?: string;
     quotedAmount?: number;
@@ -319,6 +304,12 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
           date: data.date || "",
           dates: Array.isArray(data.dates) ? data.dates : undefined,
           status: st,
+          tripRole: data.tripRole === "return" ? "return" : "primary",
+          parentBookingId: data.parentBookingId || "",
+          pickupFromGps: data.pickupFromGps === true,
+          cashDue: Number(data.cashDue) || 0,
+          externalFare: data.externalFare === true,
+          loadedAt: Number(data.loadedAt) || (st === "goods_collected" ? Number(data.updatedAt) || 1 : 0),
           hasPaymentSlip: Boolean(
             data.hasPaymentSlip ||
             data.paymentSlipStatus === "approved" ||
@@ -353,17 +344,12 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
         const weight = (s: string) => (s === "pending_acceptance" ? 0 : s === "accepted" ? 1 : 2);
         const diff = weight(a.status) - weight(b.status);
         if (diff !== 0) return diff;
+        // Primary trip first, then attached return legs
+        if (a.tripRole !== b.tripRole) return a.tripRole === "return" ? 1 : -1;
         return b.createdAt - a.createdAt;
       });
       setPendingDispatches(items);
 
-      // Ring alert bell chime if there is a new pending_acceptance dispatch
-      for (const item of items) {
-        if (item.status === "pending_acceptance" && !alertedDispatchIdsRef.current.has(item.id)) {
-          alertedDispatchIdsRef.current.add(item.id);
-          playIncomingDispatchBell();
-        }
-      }
     };
 
     const unsubFleet = onSnapshot(
@@ -457,119 +443,50 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     };
   };
 
+  const runTripAction = async (
+    dispatch: DispatchRecord,
+    action: "accept" | "decline" | "loaded" | "collect_cash" | "complete"
+  ): Promise<boolean> => {
+    if (busyDispatchId) return false;
+    setBusyDispatchId(dispatch.id);
+    try {
+      const identity = resolveDriverIdentity(dispatch);
+      const res = await apiFetch(
+        "/api/trips",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dispatchId: dispatch.id,
+            action,
+            driverId: identity.driverId,
+            plate: resolvePlateForDispatch(dispatch),
+          }),
+        },
+        20000
+      );
+      if (!res.success) {
+        Alert.alert("Could not update trip", res.error || "Check your connection and try again.");
+        return false;
+      }
+      return true;
+    } finally {
+      setBusyDispatchId(null);
+    }
+  };
+
   const handleAcceptDispatch = async (dispatch: DispatchRecord) => {
-    try {
-      const plateToUse = resolvePlateForDispatch(dispatch);
-      const lorryToUse = dispatch.riderId || liveDriver.lorryId || driver.lorryId;
-      const identity = resolveDriverIdentity(dispatch);
-      const now = Date.now();
-
-      // Immediately set status to in_transit so Admin moves it to Ongoing Rides
-      await setDoc(
-        doc(db, "dispatches", dispatch.id),
-        {
-          status: "in_transit",
-          driverTripStatus: "in_transit",
-          rideStartedAt: now,
-          driverId: identity.driverId,
-          ...(identity.driverName ? { driverName: identity.driverName } : {}),
-          ...(identity.driverPhone ? { driverPhone: identity.driverPhone } : {}),
-          assignedPlate: plateToUse,
-          updatedAt: now,
-        },
-        { merge: true }
-      );
-      if (dispatch.bookingId) {
-        await updateBookingDispatch({
-          id: dispatch.bookingId,
-          status: "in_transit",
-          driverTripStatus: "in_transit",
-          rideStartedAt: now,
-          assignedLorryId: lorryToUse,
-          ...(identity.driverName ? { assignedDriverName: identity.driverName } : {}),
-          ...(identity.driverPhone ? { assignedDriverPhone: identity.driverPhone } : {}),
-          assignedPlate: plateToUse,
-        });
-      }
-      if (lorryToUse) {
-        updateLorryTripStatus(lorryToUse, "on_trip").catch(() => {});
-      }
-      Alert.alert("Ride Accepted", "Booking accepted and started! Status moved to Ongoing in Admin Command Center. You can now select up to 3 intermediate towns along the route.");
-    } catch (err) {
-      Alert.alert("Error", "Could not accept dispatch. Please retry.");
-    }
-  };
-
-  const handleGoodsCollectedDispatch = async (dispatch: DispatchRecord) => {
-    try {
-      const plateToUse = resolvePlateForDispatch(dispatch);
-      const lorryToUse = dispatch.riderId || liveDriver.lorryId || driver.lorryId;
-      const identity = resolveDriverIdentity(dispatch);
-      await setDoc(
-        doc(db, "dispatches", dispatch.id),
-        {
-          status: "in_transit",
-          driverTripStatus: "in_transit",
-          driverId: identity.driverId,
-          ...(identity.driverName ? { driverName: identity.driverName } : {}),
-          ...(identity.driverPhone ? { driverPhone: identity.driverPhone } : {}),
-          assignedPlate: plateToUse,
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      );
-      if (dispatch.bookingId) {
-        await updateBookingDispatch({
-          id: dispatch.bookingId,
-          status: "in_transit",
-          driverTripStatus: "in_transit",
-          assignedLorryId: lorryToUse,
-          ...(identity.driverName ? { assignedDriverName: identity.driverName } : {}),
-          ...(identity.driverPhone ? { assignedDriverPhone: identity.driverPhone } : {}),
-          assignedPlate: plateToUse,
-        });
-      }
+    if (await runTripAction(dispatch, "accept")) {
+      stopRinging();
       Alert.alert(
-        "Goods Collected",
-        "Goods collected and verified. Trip is ongoing and live-synced with Admin & Customer."
+        dispatch.tripRole === "return" ? "Return Booking Accepted" : "Ride Accepted",
+        "Go to the pickup point. Tap Loaded once the goods are on board."
       );
-    } catch (err) {
-      Alert.alert("Error", "Could not update status. Please retry.");
     }
   };
 
-  const handleStartTripDispatch = async (dispatch: DispatchRecord) => {
-    try {
-      const plateToUse = resolvePlateForDispatch(dispatch);
-      const lorryToUse = dispatch.riderId || liveDriver.lorryId || driver.lorryId;
-      const identity = resolveDriverIdentity(dispatch);
-      await setDoc(
-        doc(db, "dispatches", dispatch.id),
-        {
-          status: "in_transit",
-          driverTripStatus: "in_transit",
-          driverId: identity.driverId,
-          ...(identity.driverName ? { driverName: identity.driverName } : {}),
-          ...(identity.driverPhone ? { driverPhone: identity.driverPhone } : {}),
-          assignedPlate: plateToUse,
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      );
-      if (dispatch.bookingId) {
-        await updateBookingDispatch({
-          id: dispatch.bookingId,
-          status: "in_transit",
-          driverTripStatus: "in_transit",
-          assignedLorryId: lorryToUse,
-          ...(identity.driverName ? { assignedDriverName: identity.driverName } : {}),
-          ...(identity.driverPhone ? { assignedDriverPhone: identity.driverPhone } : {}),
-          assignedPlate: plateToUse,
-        });
-      }
-      Alert.alert("In Transit", "Trip marked as In Transit. Customer and Admin can now track progress.");
-    } catch (err) {
-      Alert.alert("Error", "Could not update trip status. Please retry.");
+  const handleLoadedDispatch = async (dispatch: DispatchRecord) => {
+    if (await runTripAction(dispatch, "loaded")) {
+      Alert.alert("Loaded", "The customer and Admin can now see that the goods are in transit.");
     }
   };
 
@@ -597,8 +514,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
       if (dispatch.bookingId) {
         await updateBookingDispatch({
           id: dispatch.bookingId,
-          status: (dispatch.status || "in_transit") as any,
-          driverTripStatus: "in_transit",
+          status: "in_transit",
           waypoints: nextWaypoints,
           travelRoute,
         });
@@ -625,8 +541,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
       if (dispatch.bookingId) {
         await updateBookingDispatch({
           id: dispatch.bookingId,
-          status: (dispatch.status || "in_transit") as any,
-          driverTripStatus: "in_transit",
+          status: "in_transit",
           waypoints: nextWaypoints,
           travelRoute,
         });
@@ -636,67 +551,42 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     }
   };
 
-  const handleCompleteDispatch = async (dispatch: DispatchRecord) => {
-    try {
-      const plateToUse = resolvePlateForDispatch(dispatch);
-      const lorryToUse = dispatch.riderId || liveDriver.lorryId || driver.lorryId;
-      const identity = resolveDriverIdentity(dispatch);
-      const now = Date.now();
-
-      // Check payment completion:
-      const isPaid =
-        (typeof dispatch.pendingAmount === "number" && dispatch.pendingAmount <= 0) ||
-        dispatch.paymentSlipStatus === "approved" ||
-        dispatch.paymentSlipStatus === "manual_approved";
-
-      const targetStatus = isPaid ? "completed" : "delivered";
-
-      await setDoc(
-        doc(db, "dispatches", dispatch.id),
-        {
-          status: "completed",
-          driverTripStatus: "completed",
-          rideEndedAt: now,
-          updatedAt: now,
+  const handleCashCollected = (dispatch: DispatchRecord) => {
+    const amount = `Rs. ${(dispatch.cashDue || 0).toLocaleString()}`;
+    Alert.alert("Confirm Cash", `Did you receive ${amount} in cash for ${dispatch.bookingId}?`, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Cash Collected",
+        onPress: async () => {
+          if (await runTripAction(dispatch, "collect_cash")) {
+            Alert.alert("Recorded", `${amount} recorded as collected in cash.`);
+          }
         },
-        { merge: true }
-      );
+      },
+    ]);
+  };
 
-      if (dispatch.bookingId) {
-        await updateBookingDispatch({
-          id: dispatch.bookingId,
-          status: targetStatus,
-          driverTripStatus: "completed",
-          rideEndedAt: now,
-          assignedLorryId: lorryToUse,
-          ...(identity.driverName ? { assignedDriverName: identity.driverName } : {}),
-          ...(identity.driverPhone ? { assignedDriverPhone: identity.driverPhone } : {}),
-          assignedPlate: plateToUse,
-        });
-      }
-
-      if (lorryToUse) {
-        updateLorryTripStatus(lorryToUse, "empty").catch(() => {});
-      }
-
-      if (isPaid) {
-        Alert.alert("Ride Completed", "Ride completed and payment settled! Record moved to Completed Bookings.");
-      } else {
-        Alert.alert("Ride Ended", "Ride ended. Payment is pending — record moved to Pending Payment in Admin.");
-      }
-    } catch (err) {
-      Alert.alert("Error", "Could not complete delivery. Please retry.");
+  const handleCompleteDispatch = async (dispatch: DispatchRecord) => {
+    if (await runTripAction(dispatch, "complete")) {
+      Alert.alert("Trip Completed", `Booking ${dispatch.bookingId} has been marked as dropped and completed.`);
     }
   };
 
   const handleDeclineDispatch = async (dispatch: DispatchRecord) => {
-    try {
-      const docRef = doc(db, "dispatches", dispatch.id);
-      await updateDoc(docRef, { status: "declined", updatedAt: Date.now() });
-    } catch (err) {
-      console.warn("Decline dispatch error:", err);
-    }
+    await runTripAction(dispatch, "decline");
   };
+
+  // Ring for as long as any new job is waiting for an answer
+  const hasWaitingJob = pendingDispatches.some((d) => d.status === "pending_acceptance");
+  useEffect(() => {
+    if (hasWaitingJob) startRinging();
+    else stopRinging();
+  }, [hasWaitingJob]);
+  useEffect(() => () => stopRinging(), []);
+
+  useEffect(() => {
+    registerForDispatchPush(String(driver.driverId || driver.id || ""));
+  }, [driver.driverId, driver.id]);
 
   const openGoogleMaps = (city: string, lat?: number, lng?: number) => {
     let url = "";
@@ -715,6 +605,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     .filter((d) => d.status === "pending_acceptance" || d.status === "accepted" || d.status === "in_transit" || d.status === "goods_collected")
     .flatMap((d) => {
       const pins: any[] = [];
+      const legTag = d.tripRole === "return" ? "RETURN " : "";
       let pLat = typeof d.pickupLat === "number" && Number.isFinite(d.pickupLat) ? d.pickupLat : null;
       let pLng = typeof d.pickupLng === "number" && Number.isFinite(d.pickupLng) ? d.pickupLng : null;
       if (pLat === null || pLng === null) {
@@ -728,7 +619,9 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
         pins.push({
           lat: pLat,
           lng: pLng,
-          title: `🟢 Pickup: ${d.customerName || "Customer"}`,
+          kind: "pickup",
+          isNext: !d.loadedAt,
+          title: `${legTag}Pickup: ${d.customerName || "Customer"}`,
           subtitle: `${d.pickupCity} (${d.bookingId})`,
           bookingId: d.bookingId,
           phone: d.customerPhone,
@@ -749,7 +642,9 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
         pins.push({
           lat: dLat,
           lng: dLng,
-          title: `🔴 Destination: ${d.deliveryCity}`,
+          kind: "dropoff",
+          isNext: Boolean(d.loadedAt),
+          title: `${legTag}Drop-off: ${d.deliveryCity}`,
           subtitle: `Deliver to ${d.customerName || "Customer"}`,
           bookingId: d.bookingId,
           phone: d.customerPhone,
@@ -763,7 +658,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
             pins.push({
               lat: wp.lat,
               lng: wp.lng,
-              title: `📍 Via ${idx + 1}: ${wp.name}`,
+              kind: "via",
+              title: `Via ${idx + 1}: ${wp.name}`,
               subtitle: `Intermediate waypoint ${idx + 1}`,
               bookingId: d.bookingId,
             });
@@ -1142,6 +1038,57 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     }
   };
 
+  const activeJob = pendingDispatches.find((d) => d.status !== "pending_acceptance");
+  useEffect(() => {
+    if (!activeJob) {
+      if (autoTrackingRef.current) {
+        autoTrackingRef.current = false;
+        handleStopLive();
+      }
+      return;
+    }
+    if (isTrackingRef.current || autoTrackingRef.current) return;
+    autoTrackingRef.current = true;
+    (async () => {
+      const plate = resolvePlateForDispatch(activeJob);
+      const position = await getCurrentGpsPosition();
+      const trip: LiveTripDetails = {
+        lorryId: resolveSafeLorryDocId(liveDriver.lorryId || driver.lorryId, plate, driver.driverId),
+        driverId: driver.driverId,
+        driverName: driver.name,
+        driverPhone: driver.phone || "",
+        vehicleType: driver.vehicleType || "Lorry Fleet",
+        plate,
+        status: "on_trip",
+        startLocation: activeJob.pickupCity,
+        endLocation: activeJob.deliveryCity,
+        endLat: activeJob.deliveryLat,
+        endLng: activeJob.deliveryLng,
+        isLive: true,
+        isOnline: true,
+        lat: position?.latitude ?? activeJob.pickupLat ?? 6.9271,
+        lng: position?.longitude ?? activeJob.pickupLng ?? 79.8612,
+        speedKmH: position?.speed ?? 0,
+        heading: position?.heading ?? 0,
+        updatedAt: Date.now(),
+      };
+      activeTripRef.current = trip;
+      setActiveTrip(trip);
+      try {
+        await updateLorryLiveTripDetails(trip);
+        if (await startGpsTracking(handleLocationUpdate)) {
+          setIsTracking(true);
+        } else {
+          autoTrackingRef.current = false;
+          Alert.alert("Location Required", "Allow location access so this trip shows on the live map.");
+        }
+      } catch (e) {
+        autoTrackingRef.current = false;
+        console.warn("Automatic trip tracking could not start:", e);
+      }
+    })();
+  }, [activeJob?.id]);
+
   // Safe Logout: Stop broadcasting and remove from live map before logging out
   const handleLogout = async () => {
     const activePlate =
@@ -1160,6 +1107,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     try {
       await stopLorryLiveBroadcasting(activeLorryId, activePlate, driver.driverId);
     } catch {}
+    stopRinging();
+    await unregisterDispatchPush(String(driver.driverId || driver.id || ""));
     onLogout();
   };
 
@@ -1269,8 +1218,12 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
           const isAccepted = dispatch.status === "accepted";
           const isCollected = dispatch.status === "goods_collected";
           const isInTransit = dispatch.status === "in_transit";
+          const isReturn = dispatch.tripRole === "return";
+          const isActiveJob = isAccepted || isCollected || isInTransit;
+          const isLoadedJob = Boolean(dispatch.loadedAt) || isCollected;
+          const isBusy = busyDispatchId === dispatch.id;
           const badgeLabel = isCollected
-            ? "📦 GOODS COLLECTED"
+            ? "LOADED"
             : isInTransit
             ? "TRIP IN TRANSIT"
             : isAccepted
@@ -1298,6 +1251,19 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                   {dispatch.assignedPlate ? `${dispatch.assignedPlate} | ` : ""}
                   {dispatch.bookingId}
                 </Text>
+              </View>
+
+              <View style={[styles.legBanner, isReturn ? styles.legBannerReturn : styles.legBannerPrimary]}>
+                <Text style={styles.legBannerText}>
+                  {isReturn
+                    ? `↩ RETURN BOOKING · attached to trip ${dispatch.parentBookingId}`
+                    : "PRIMARY TRIP"}
+                </Text>
+                {isActiveJob ? (
+                  <Text style={styles.legBannerText}>
+                    {isLoadedJob ? "Next stop: DROP-OFF" : "Next stop: PICKUP"}
+                  </Text>
+                ) : null}
               </View>
 
               <View style={styles.dispatchBody}>
@@ -1338,7 +1304,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                 <View style={styles.dispatchWaypointsBox}>
                   <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
                     <Text style={styles.dispatchWaypointsTitle}>
-                      🛣️ Intermediate Towns (Up to 3 Towns):
+                      Intermediate Towns (Up to 3 Towns):
                     </Text>
                     <Text style={styles.dispatchWaypointsCount}>
                       {(dispatch.waypoints?.length || 0)}/3 Selected
@@ -1351,7 +1317,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                       {dispatch.waypoints.map((wp, idx) => (
                         <View key={`${wp.name}-${idx}`} style={styles.dispatchWaypointItem}>
                           <Text style={styles.dispatchWaypointText}>
-                            {idx === 0 ? "1️⃣" : idx === 1 ? "2️⃣" : "3️⃣"} {wp.name}
+                            {idx === 0 ? "1." : idx === 1 ? "2." : "3."} {wp.name}
                           </Text>
                           <TouchableOpacity
                             onPress={() => handleRemoveDispatchViaTown(dispatch, idx)}
@@ -1384,17 +1350,17 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
 
                   {/* Route Breadcrumb Preview */}
                   <View style={styles.dispatchBreadcrumbRow}>
-                    <Text style={styles.dispatchBreadcrumbNode}>🚩 {dispatch.pickupCity}</Text>
+                    <Text style={styles.dispatchBreadcrumbNode}>{dispatch.pickupCity}</Text>
                     {dispatch.waypoints?.map((wp, idx) => (
                       <React.Fragment key={`bc-${wp.name}-${idx}`}>
                         <Text style={styles.dispatchBreadcrumbArrow}>➔</Text>
                         <Text style={styles.dispatchBreadcrumbVia}>
-                          {idx === 0 ? "1️⃣" : idx === 1 ? "2️⃣" : "3️⃣"} {wp.name}
+                          {idx === 0 ? "1." : idx === 1 ? "2." : "3."} {wp.name}
                         </Text>
                       </React.Fragment>
                     ))}
                     <Text style={styles.dispatchBreadcrumbArrow}>➔</Text>
-                    <Text style={styles.dispatchBreadcrumbNode}>🏁 {dispatch.deliveryCity}</Text>
+                    <Text style={styles.dispatchBreadcrumbNode}>{dispatch.deliveryCity}</Text>
                   </View>
                 </View>
               )}
@@ -1406,26 +1372,44 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     onPress={() => Linking.openURL(`tel:${dispatch.customerPhone}`)}
                     activeOpacity={0.8}
                   >
-                    <Text style={styles.dispatchCallBtnText}>📞 Call Customer</Text>
+                    <Text style={styles.dispatchCallBtnText}>Call Customer</Text>
                   </TouchableOpacity>
                 ) : (
                   <View style={styles.dispatchLockedPill}>
-                    <Text style={styles.dispatchLockedPillText}>🔒 Phone unlocks on slip upload</Text>
+                    <Text style={styles.dispatchLockedPillText}>Phone unlocks on slip upload</Text>
                   </View>
                 )}
                 <TouchableOpacity
                   style={styles.dispatchNavBtn}
-                  onPress={() => openGoogleMaps(dispatch.pickupCity, dispatch.pickupLat, dispatch.pickupLng)}
+                  onPress={() =>
+                    // Search the typed address unless we hold a real GPS point
+                    isLoadedJob
+                      ? openGoogleMaps(dispatch.deliveryCity)
+                      : dispatch.pickupFromGps
+                        ? openGoogleMaps(dispatch.pickupCity, dispatch.pickupLat, dispatch.pickupLng)
+                        : openGoogleMaps(dispatch.pickupCity)
+                  }
                   activeOpacity={0.8}
                 >
                   <Text style={styles.dispatchNavBtnText}>
-                    📍 {typeof dispatch.pickupLat === "number" ? "GPS Navigate" : "Pickup Location"}
+                    Navigate to {isLoadedJob ? "Drop-off" : "Pickup"}
                   </Text>
                 </TouchableOpacity>
+                {isActiveJob && !isLoadedJob ? (
+                  <TouchableOpacity
+                    style={[styles.dispatchCompleteBtn, isBusy && { opacity: 0.6 }]}
+                    disabled={Boolean(busyDispatchId)}
+                    onPress={() => handleLoadedDispatch(dispatch)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.dispatchAcceptBtnText}>Loaded</Text>
+                  </TouchableOpacity>
+                ) : null}
                 {isPending ? (
                   <>
                     <TouchableOpacity
-                      style={styles.dispatchAcceptBtn}
+                      style={[styles.dispatchAcceptBtn, isBusy && { opacity: 0.6 }]}
+                      disabled={Boolean(busyDispatchId)}
                       onPress={() => handleAcceptDispatch(dispatch)}
                       activeOpacity={0.8}
                     >
@@ -1449,22 +1433,37 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     </TouchableOpacity>
                   </>
                 ) : null}
-                {(isAccepted || isCollected || isInTransit) ? (
+                {isActiveJob && isLoadedJob && !dispatch.externalFare && (dispatch.cashDue || 0) > 0 ? (
                   <TouchableOpacity
-                    style={[styles.dispatchCompleteBtn, { backgroundColor: "#DC2626" }]}
+                    style={[styles.dispatchCompleteBtn, isBusy && { opacity: 0.6 }]}
+                    disabled={Boolean(busyDispatchId)}
+                    onPress={() => handleCashCollected(dispatch)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.dispatchAcceptBtnText}>
+                      Cash Collected (Rs. {(dispatch.cashDue || 0).toLocaleString()})
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+                {isActiveJob && isLoadedJob ? (
+                  <TouchableOpacity
+                    style={[styles.dispatchCompleteBtn, { backgroundColor: "#DC2626" }, isBusy && { opacity: 0.6 }]}
+                    disabled={Boolean(busyDispatchId)}
                     onPress={() => {
                       Alert.alert(
-                        "Stop / Complete Ride",
-                        "Are you sure you want to end this ride? If payment was completed, it will be moved to Completed Bookings; otherwise to Pending Payment.",
+                        "Confirm Drop-off",
+                        `Has the load for ${dispatch.bookingId} been dropped at ${dispatch.deliveryCity}?`,
                         [
                           { text: "Cancel", style: "cancel" },
-                          { text: "End Ride", style: "destructive", onPress: () => handleCompleteDispatch(dispatch) },
+                          { text: "Dropped", style: "destructive", onPress: () => handleCompleteDispatch(dispatch) },
                         ]
                       );
                     }}
                     activeOpacity={0.8}
                   >
-                    <Text style={styles.dispatchAcceptBtnText}>🛑 Stop / Complete Ride</Text>
+                    <Text style={styles.dispatchAcceptBtnText}>
+                      {isReturn ? "Dropped (Return Load)" : "Dropped"}
+                    </Text>
                   </TouchableOpacity>
                 ) : null}
               </View>
@@ -1729,7 +1728,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                   <View style={styles.viaSectionCard}>
                     <View style={styles.viaSectionHeader}>
                       <Text style={styles.inputLabel}>
-                        🛣️ Return Route via Towns (අතරමග නගර 2ක් හෝ 3ක්)
+                        Return Route via Towns (අතරමග නගර 2ක් හෝ 3ක්)
                       </Text>
                       <View style={viaWaypoints.length >= 2 ? styles.viaPillSuccess : styles.viaPillWarning}>
                         <Text style={viaWaypoints.length >= 2 ? styles.viaPillSuccessText : styles.viaPillWarningText}>
@@ -1750,8 +1749,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     {viaWaypoints.length > 0 ? (
                       <View style={styles.viaSlotCard}>
                         <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
-                          <Text style={styles.viaSlotNumber}>1️⃣ 1 වන නගරය:</Text>
-                          <Text style={styles.viaSlotName}>📍 {viaWaypoints[0].name}</Text>
+                          <Text style={styles.viaSlotNumber}>1. 1 වන නගරය:</Text>
+                          <Text style={styles.viaSlotName}>{viaWaypoints[0].name}</Text>
                         </View>
                         <TouchableOpacity
                           style={styles.viaRemoveBtn}
@@ -1764,7 +1763,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     ) : (
                       <View style={styles.viaSlotEmpty}>
                         <Text style={styles.viaSlotEmptyText}>
-                          1️⃣ 1 වන නගරය: තෝරා නැත (පහතින් Type කර සොයා Touch කරන්න)
+                          1. 1 වන නගරය: තෝරා නැත (පහතින් Type කර සොයා Touch කරන්න)
                         </Text>
                       </View>
                     )}
@@ -1773,8 +1772,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     {viaWaypoints.length > 1 ? (
                       <View style={styles.viaSlotCard}>
                         <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
-                          <Text style={styles.viaSlotNumber}>2️⃣ 2 වන නගරය:</Text>
-                          <Text style={styles.viaSlotName}>📍 {viaWaypoints[1].name}</Text>
+                          <Text style={styles.viaSlotNumber}>2. 2 වන නගරය:</Text>
+                          <Text style={styles.viaSlotName}>{viaWaypoints[1].name}</Text>
                         </View>
                         <TouchableOpacity
                           style={styles.viaRemoveBtn}
@@ -1787,7 +1786,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     ) : (
                       <View style={styles.viaSlotEmpty}>
                         <Text style={styles.viaSlotEmptyText}>
-                          2️⃣ 2 වන නගරය: {viaWaypoints.length === 1 ? "තෝරා නැත (පහතින් සොයන්න)" : "(පළමුව 1 වන නගරය තෝරන්න)"}
+                          2. 2 වන නගරය: {viaWaypoints.length === 1 ? "තෝරා නැත (පහතින් සොයන්න)" : "(පළමුව 1 වන නගරය තෝරන්න)"}
                         </Text>
                       </View>
                     )}
@@ -1796,8 +1795,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     {viaWaypoints.length > 2 ? (
                       <View style={styles.viaSlotCard}>
                         <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
-                          <Text style={styles.viaSlotNumber}>3️⃣ 3 වන නගරය:</Text>
-                          <Text style={styles.viaSlotName}>📍 {viaWaypoints[2].name}</Text>
+                          <Text style={styles.viaSlotNumber}>3. 3 වන නගරය:</Text>
+                          <Text style={styles.viaSlotName}>{viaWaypoints[2].name}</Text>
                         </View>
                         <TouchableOpacity
                           style={styles.viaRemoveBtn}
@@ -1810,7 +1809,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     ) : (
                       <View style={styles.viaSlotEmpty}>
                         <Text style={styles.viaSlotEmptyText}>
-                          3️⃣ 3 වන නගරය: (විකල්පයි - අවශ්‍ය නම් 3 වන නගරය එක් කරන්න)
+                          3. 3 වන නගරය: (විකල්පයි - අවශ්‍ය නම් 3 වන නගරය එක් කරන්න)
                         </Text>
                       </View>
                     )}
@@ -1864,7 +1863,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                         style={{ alignSelf: "flex-end", marginTop: 4, paddingVertical: 3, paddingHorizontal: 8, backgroundColor: "#E7E2D0", borderRadius: 6 }}
                         onPress={() => setCurrentLocName(currentCity)}
                       >
-                        <Text style={{ fontSize: 11, fontWeight: "700", color: "#26231B" }}>📍 Use GPS: {currentCity}</Text>
+                        <Text style={{ fontSize: 11, fontWeight: "700", color: "#26231B" }}>Use GPS: {currentCity}</Text>
                       </TouchableOpacity>
                     )}
                   </View>
@@ -1881,7 +1880,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                   <View style={styles.viaSectionCard}>
                     <View style={styles.viaSectionHeader}>
                       <Text style={styles.inputLabel}>
-                        🛣️ Traveling route via towns (අතරමග නගර 2ක් හෝ 3ක් පිළිවෙළින්) *
+                        Traveling route via towns (අතරමග නගර 2ක් හෝ 3ක් පිළිවෙළින්) *
                       </Text>
                       <View style={viaWaypoints.length >= 2 ? styles.viaPillSuccess : styles.viaPillWarning}>
                         <Text style={viaWaypoints.length >= 2 ? styles.viaPillSuccessText : styles.viaPillWarningText}>
@@ -1889,7 +1888,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                             ? "✓ නගර 3ම සම්පූර්ණයි (3/3)"
                             : viaWaypoints.length === 2
                             ? "✓ නගර 2ක් (2/3) - තව 1ක් විකල්පයි"
-                            : `⚠️ නගර 2ක් හෝ 3ක් අවශ්‍යයි (${viaWaypoints.length}/3)`}
+                            : `නගර 2ක් හෝ 3ක් අවශ්‍යයි (${viaWaypoints.length}/3)`}
                         </Text>
                       </View>
                     </View>
@@ -1903,8 +1902,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     {viaWaypoints.length > 0 ? (
                       <View style={styles.viaSlotCard}>
                         <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
-                          <Text style={styles.viaSlotNumber}>1️⃣ 1 වන නගරය (1st Town):</Text>
-                          <Text style={styles.viaSlotName}>📍 {viaWaypoints[0].name}</Text>
+                          <Text style={styles.viaSlotNumber}>1. 1 වන නගරය (1st Town):</Text>
+                          <Text style={styles.viaSlotName}>{viaWaypoints[0].name}</Text>
                         </View>
                         <TouchableOpacity
                           style={styles.viaRemoveBtn}
@@ -1917,7 +1916,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     ) : (
                       <View style={styles.viaSlotEmpty}>
                         <Text style={styles.viaSlotEmptyText}>
-                          1️⃣ 1 වන නගරය: තෝරා නැත (පහතින් Type කර සොයා Touch කරන්න)
+                          1. 1 වන නගරය: තෝරා නැත (පහතින් Type කර සොයා Touch කරන්න)
                         </Text>
                       </View>
                     )}
@@ -1926,8 +1925,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     {viaWaypoints.length > 1 ? (
                       <View style={styles.viaSlotCard}>
                         <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
-                          <Text style={styles.viaSlotNumber}>2️⃣ 2 වන නගරය (2nd Town):</Text>
-                          <Text style={styles.viaSlotName}>📍 {viaWaypoints[1].name}</Text>
+                          <Text style={styles.viaSlotNumber}>2. 2 වන නගරය (2nd Town):</Text>
+                          <Text style={styles.viaSlotName}>{viaWaypoints[1].name}</Text>
                         </View>
                         <TouchableOpacity
                           style={styles.viaRemoveBtn}
@@ -1940,7 +1939,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     ) : (
                       <View style={styles.viaSlotEmpty}>
                         <Text style={styles.viaSlotEmptyText}>
-                          2️⃣ 2 වන නගරය: {viaWaypoints.length === 1 ? "තෝරා නැත (අවශ්‍යයි - පහතින් සොයන්න)" : "(පළමුව 1 වන නගරය තෝරන්න)"}
+                          2. 2 වන නගරය: {viaWaypoints.length === 1 ? "තෝරා නැත (අවශ්‍යයි - පහතින් සොයන්න)" : "(පළමුව 1 වන නගරය තෝරන්න)"}
                         </Text>
                       </View>
                     )}
@@ -1949,8 +1948,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     {viaWaypoints.length > 2 ? (
                       <View style={styles.viaSlotCard}>
                         <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
-                          <Text style={styles.viaSlotNumber}>3️⃣ 3 වන නගරය (3rd Town):</Text>
-                          <Text style={styles.viaSlotName}>📍 {viaWaypoints[2].name}</Text>
+                          <Text style={styles.viaSlotNumber}>3. 3 වන නගරය (3rd Town):</Text>
+                          <Text style={styles.viaSlotName}>{viaWaypoints[2].name}</Text>
                         </View>
                         <TouchableOpacity
                           style={styles.viaRemoveBtn}
@@ -1963,7 +1962,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     ) : (
                       <View style={styles.viaSlotEmpty}>
                         <Text style={styles.viaSlotEmptyText}>
-                          3️⃣ 3 වන නගරය: (විකල්පයි - අවශ්‍ය නම් 3 වන නගරය එක් කරන්න)
+                          3. 3 වන නගරය: (විකල්පයි - අවශ්‍ය නම් 3 වන නගරය එක් කරන්න)
                         </Text>
                       </View>
                     )}
@@ -1997,24 +1996,24 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
                     {(currentLocName || emptyEndDest) && (
                       <View style={styles.routeBreadcrumbCard}>
                         <Text style={styles.routeBreadcrumbTitle}>
-                          🗺️ සම්පූර්ණ ගමන් මග (Complete Route Flow):
+                          සම්පූර්ණ ගමන් මග (Complete Route Flow):
                         </Text>
                         <View style={styles.routeBreadcrumbRow}>
-                          <Text style={styles.routeBreadcrumbText}>🚩 {currentLocName || "Start"}</Text>
+                          <Text style={styles.routeBreadcrumbText}>{currentLocName || "Start"}</Text>
                           {viaWaypoints.map((wp, idx) => (
                             <React.Fragment key={`${wp.name}-${idx}`}>
                               <Text style={styles.routeBreadcrumbArrow}>➔</Text>
                               <Text style={styles.routeBreadcrumbText}>
-                                {idx === 0 ? "1️⃣" : idx === 1 ? "2️⃣" : "3️⃣"} {wp.name}
+                                {idx === 0 ? "1." : idx === 1 ? "2." : "3."} {wp.name}
                               </Text>
                             </React.Fragment>
                           ))}
                           <Text style={styles.routeBreadcrumbArrow}>➔</Text>
-                          <Text style={styles.routeBreadcrumbText}>🏁 {emptyEndDest || "Destination"}</Text>
+                          <Text style={styles.routeBreadcrumbText}>{emptyEndDest || "Destination"}</Text>
                         </View>
                         {viaWaypoints.length < 2 && (
                           <Text style={styles.routeBreadcrumbWarning}>
-                            ⚠️ කරුණාකර අවම වශයෙන් අතරමග නගර 2ක් වත් පිළිවෙළින් එක් කරන්න.
+                            කරුණාකර අවම වශයෙන් අතරමග නගර 2ක් වත් පිළිවෙළින් එක් කරන්න.
                           </Text>
                         )}
                       </View>
@@ -2267,6 +2266,25 @@ const styles = StyleSheet.create({
     backgroundColor: "#1A56A8",
     alignItems: "center",
     justifyContent: "center",
+  },
+  legBanner: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    gap: 4,
+  },
+  legBannerPrimary: {
+    backgroundColor: "#26231B",
+  },
+  legBannerReturn: {
+    backgroundColor: "#0369A1",
+  },
+  legBannerText: {
+    color: "#FFFFFF",
+    fontSize: 11,
+    fontWeight: "900",
   },
   dispatchCompleteBtn: {
     width: "100%",

@@ -32,13 +32,21 @@ import {
   subscribeAdminReviews,
   deleteAdminReview,
   subscribeAdminComplaints,
-  deleteAdminComplaint,
   ComplaintRecord,
   addNewLorryToFleet,
   deleteLorryFromFleet,
   updateDriverInDb,
   deleteDriverFromDb,
 } from "../services/database";
+import { AdminAnalytics, useCollection } from "./AdminAnalytics";
+import {
+  periodRange,
+  summarise,
+  withExternalOwners,
+  type LedgerBooking,
+  type Reversal,
+  type WalletEntry,
+} from "../services/ledger";
 import { SriLankaMapViewer } from "../components/SriLankaMapViewer";
 
 interface AdminDashboardProps {
@@ -169,44 +177,6 @@ const INITIAL_REVIEWS: LocalReview[] = [];
 // Lorries appear ONLY when real riders start broadcasting live
 const INITIAL_LORRIES: LiveMapLorry[] = [];
 
-const REVENUE_DATA = {
-  w: [
-    { label: "Mon", val: 0 },
-    { label: "Tue", val: 0 },
-    { label: "Wed", val: 0 },
-    { label: "Thu", val: 0 },
-    { label: "Fri", val: 0 },
-    { label: "Sat", val: 0, max: true },
-    { label: "Sun", val: 0 },
-  ],
-  m: [
-    { label: "W1", val: 0 },
-    { label: "W2", val: 0 },
-    { label: "W3", val: 0 },
-    { label: "W4", val: 0, max: true },
-  ],
-  y: [
-    { label: "J", val: 0 },
-    { label: "F", val: 0 },
-    { label: "M", val: 0 },
-    { label: "A", val: 0 },
-    { label: "M", val: 0 },
-    { label: "J", val: 0 },
-    { label: "J", val: 0 },
-    { label: "A", val: 0 },
-    { label: "S", val: 0 },
-    { label: "O", val: 0, max: true },
-    { label: "N", val: 0 },
-    { label: "D", val: 0 },
-  ],
-};
-
-const TOTALS = {
-  w: "LKR 0",
-  m: "LKR 0",
-  y: "LKR 0",
-};
-
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   const [activeTab, setActiveTab] = useState<TabType>("dash");
   const [riders, setRiders] = useState<LocalRider[]>(INITIAL_RIDERS);
@@ -226,7 +196,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   // Filter and secondary states
   const [reqTab, setReqTab] = useState<"p" | "a" | "r">("p");
   const [revFilterStar, setRevFilterStar] = useState<number>(0);
-  const [revenuePeriod, setRevenuePeriod] = useState<"w" | "m" | "y">("w");
+  const ledgerBookings = useCollection("bookings");
+  const ledgerWallet = useCollection("commission_transactions");
+  const ledgerReversals = useCollection("payment_reversals");
+  const ledgerOwners = useCollection("outside_employees");
+  const todayRevenue = summarise(
+    withExternalOwners(ledgerBookings.rows as unknown as LedgerBooking[], ledgerOwners.rows),
+    ...periodRange("today"),
+    {
+      wallet: ledgerWallet.rows as unknown as WalletEntry[],
+      reversals: ledgerReversals.rows as unknown as Reversal[],
+    }
+  ).received;
   const [mapFilter, setMapFilter] = useState<"all" | "Empty" | "On trip">("all");
   const [selectedLorry, setSelectedLorry] = useState<string>("");
 
@@ -671,25 +652,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     return () => unsubscribe();
   }, []);
 
-  const handleDeleteComplaint = (id: string, bookingId?: string) => {
-    Alert.alert(
-      "Delete Complaint Record",
-      `Are you sure you want to permanently delete this audit record (${bookingId ? `#${bookingId}` : "Record"})?`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            setComplaints((prev) => prev.filter((c) => c.id !== id));
-            await deleteAdminComplaint(id);
-            showToast("Complaint record deleted");
-          },
-        },
-      ]
-    );
-  };
-
   const filteredComplaints = complaints.filter((c) => {
     if (!complaintSearch.trim()) return true;
     const q = complaintSearch.toLowerCase();
@@ -708,22 +670,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   const pendingCount = requests.filter((r) => r.status === "p").length;
 
   const handleApproveReject = async (id: string, newStatus: "a" | "r") => {
-    const currentReq = requests.find((r) => r.id === id);
+    const previous = requests.find((r) => r.id === id)?.status;
     setRequests((prev) =>
       prev.map((r) => (r.id === id ? { ...r, status: newStatus } : r))
     );
-    await updateRegistrationStatus(
+    const result = await updateRegistrationStatus(
       id,
-      newStatus === "a" ? "approved" : "rejected",
-      currentReq
-        ? {
-          ownerName: currentReq.customer.split(" (")[0],
-          vehicleNumber: currentReq.to,
-          vehicleType: currentReq.vehicle,
-          capacity: currentReq.load,
-        }
-        : undefined
+      newStatus === "a" ? "approved" : "rejected"
     );
+    if (!result.success) {
+      if (previous) {
+        setRequests((prev) =>
+          prev.map((r) => (r.id === id ? { ...r, status: previous } : r))
+        );
+      }
+      showToast(result.error || "Could not update the vehicle request");
+      return;
+    }
     showToast(newStatus === "a" ? "Vehicle request approved & registered" : "Vehicle request rejected");
   };
 
@@ -1167,7 +1130,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                 onPress={() => setActiveTab("map")}
               >
                 <View style={styles.kpiHeader}>
-                  <View style={styles.kpiIconBox}><Text style={styles.kpiIcon}>🚛</Text></View>
                   <Text style={styles.kpiLabel}>Live lorries</Text>
                 </View>
                 <Text style={styles.kpiValue}>{loadingLorries ? "..." : lorries.length}</Text>
@@ -1186,7 +1148,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                 onPress={() => setActiveTab("req")}
               >
                 <View style={styles.kpiHeader}>
-                  <View style={styles.kpiIconBox}><Text style={styles.kpiIcon}>📋</Text></View>
                   <Text style={styles.kpiLabel}>Pending requests</Text>
                 </View>
                 <Text style={styles.kpiValue}>{loadingRequests ? "..." : pendingCount}</Text>
@@ -1201,7 +1162,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                 onPress={() => setActiveTab("riders")}
               >
                 <View style={styles.kpiHeader}>
-                  <View style={styles.kpiIconBox}><Text style={styles.kpiIcon}>👥</Text></View>
                   <Text style={styles.kpiLabel}>Active riders</Text>
                 </View>
                 <Text style={styles.kpiValue}>{loadingRiders ? "..." : riders.filter((r) => r.status === 1).length}</Text>
@@ -1214,11 +1174,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                 onPress={() => setActiveTab("money")}
               >
                 <View style={styles.kpiHeader}>
-                  <View style={styles.kpiIconBox}><Text style={styles.kpiIcon}>💰</Text></View>
                   <Text style={styles.kpiLabel}>Revenue today</Text>
                 </View>
-                <Text style={styles.kpiValue}>LKR 0</Text>
-                <Text style={styles.kpiDelta}>View revenue →</Text>
+                <Text style={styles.kpiValue}>
+                  {ledgerBookings.loading || ledgerBookings.error ? "-" : `Rs. ${todayRevenue.toLocaleString("en-US")}`}
+                </Text>
+                <Text style={styles.kpiDelta}>View revenue</Text>
               </TouchableOpacity>
             </View>
 
@@ -1239,18 +1200,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               onPress={() => setActiveTab("complaints")}
             >
               <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flex: 1 }}>
-                <View
-                  style={{
-                    width: 38,
-                    height: 38,
-                    borderRadius: 10,
-                    backgroundColor: complaints.length > 0 ? "#FEE2E2" : "#F4F2EA",
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  <Text style={{ fontSize: 18 }}>⚠️</Text>
-                </View>
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontSize: 13, fontWeight: "800", color: "#1F1E19" }}>
                     Complaints & Deletion Audit Log
@@ -1268,31 +1217,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                 <Text style={{ fontSize: 12, fontWeight: "700", color: "#B45309" }}>View →</Text>
               </View>
             </TouchableOpacity>
-
-            {/* Revenue this week chart card */}
-            <View style={styles.card}>
-              <View style={styles.cardHeaderRow}>
-                <Text style={styles.cardTitle}>Revenue this week</Text>
-                <TouchableOpacity onPress={() => setActiveTab("money")}>
-                  <Text style={styles.viewAllLink}>View all</Text>
-                </TouchableOpacity>
-              </View>
-              <View style={styles.chartContainer}>
-                {REVENUE_DATA.w.map((item, idx) => (
-                  <View key={idx} style={styles.chartBarCol}>
-                    <Text style={styles.chartBarVal}>{item.val}K</Text>
-                    <View
-                      style={[
-                        styles.chartBar,
-                        { height: (item.val / 88) * 110 },
-                        item.max && styles.chartBarMax,
-                      ]}
-                    />
-                    <Text style={styles.chartBarLabel}>{item.label}</Text>
-                  </View>
-                ))}
-              </View>
-            </View>
 
             {/* Mini Live Map Card with Sri Lanka Map */}
             <View style={styles.card}>
@@ -1482,7 +1406,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                       />
                     ) : (
                       <View style={{ width: 50, height: 42, borderRadius: 8, marginRight: 10, backgroundColor: "#EAE7DC", alignItems: "center", justifyContent: "center" }}>
-                        <Text style={{ fontSize: 18 }}>🚛</Text>
                       </View>
                     )}
                     <View style={styles.tableCol}>
@@ -1566,7 +1489,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         {rq.from} → {rq.to}
                       </Text>
                       <Text style={styles.requestMeta}>
-                        📦 {rq.load} · 🚚 {rq.vehicle}
+                        {rq.load} · {rq.vehicle}
                       </Text>
                     </View>
                   </View>
@@ -1687,90 +1610,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
         )}
 
         {/* TAB 6: REVENUE */}
-        {activeTab === "money" && (
-          <View style={styles.tabSection}>
-            <View style={styles.subTabsRow}>
-              {(["w", "m", "y"] as const).map((p) => (
-                <TouchableOpacity
-                  key={p}
-                  style={[styles.subTab, revenuePeriod === p && styles.subTabActive]}
-                  onPress={() => setRevenuePeriod(p)}
-                >
-                  <Text style={[styles.subTabText, revenuePeriod === p && styles.subTabTextActive]}>
-                    {p === "w" ? "Week" : p === "m" ? "Month" : "Year"}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            <View style={styles.kpiGrid}>
-              <View style={styles.kpiCard}>
-                <Text style={styles.kpiLabel}>Total revenue</Text>
-                <Text style={styles.kpiValue}>{TOTALS[revenuePeriod]}</Text>
-                <Text style={styles.kpiDelta}>+8% vs last period</Text>
-              </View>
-
-              <View style={styles.kpiCard}>
-                <Text style={styles.kpiLabel}>Completed trips</Text>
-                <Text style={styles.kpiValue}>
-                  {revenuePeriod === "w" ? "312" : revenuePeriod === "m" ? "1,280" : "14,960"}
-                </Text>
-              </View>
-
-              <View style={styles.kpiCard}>
-                <Text style={styles.kpiLabel}>Avg per trip</Text>
-                <Text style={styles.kpiValue}>LKR 1,420</Text>
-              </View>
-
-              <View style={styles.kpiCard}>
-                <Text style={styles.kpiLabel}>Commission</Text>
-                <Text style={styles.kpiValue}>
-                  {revenuePeriod === "w" ? "LKR 44K" : revenuePeriod === "m" ? "LKR 103K" : "LKR 1.05M"}
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Revenue (LKR thousands)</Text>
-              <View style={styles.chartContainer}>
-                {REVENUE_DATA[revenuePeriod].map((item, idx) => {
-                  const maxVal = Math.max(...REVENUE_DATA[revenuePeriod].map((x) => x.val)) || 1;
-                  return (
-                    <View key={idx} style={styles.chartBarCol}>
-                      <Text style={styles.chartBarVal}>{item.val > 0 ? `${item.val}K` : ""}</Text>
-                      <View
-                        style={[
-                          styles.chartBar,
-                          { height: (item.val / maxVal) * 120 },
-                          item.max && styles.chartBarMax,
-                        ]}
-                      />
-                      <Text style={styles.chartBarLabel}>{item.label}</Text>
-                    </View>
-                  );
-                })}
-              </View>
-            </View>
-
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>By vehicle type</Text>
-              {[
-                { type: "Lorry 20ft", pct: 38 },
-                { type: "Lorry 14ft", pct: 27 },
-                { type: "Lorry 10ft", pct: 22 },
-                { type: "Canter", pct: 13 },
-              ].map((v, i) => (
-                <View key={i} style={styles.vehBreakdownRow}>
-                  <Text style={styles.vehBreakdownLabel}>{v.type}</Text>
-                  <View style={styles.barTrack}>
-                    <View style={[styles.barFill, { width: `${v.pct}%` }]} />
-                  </View>
-                  <Text style={styles.vehBreakdownPct}>{v.pct}%</Text>
-                </View>
-              ))}
-            </View>
-          </View>
-        )}
+        {activeTab === "money" && <AdminAnalytics />}
 
         {/* TAB 7: LIVE SRI LANKA GPS MAP */}
         {activeTab === "map" && (
@@ -1955,7 +1795,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                       <View>
                         <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                           <Text style={styles.lorryPlateText}>{l.plate}</Text>
-                          <Text style={styles.liveTagDot}>🟢</Text>
                         </View>
                         <Text style={styles.lorryRouteText}>{l.route} · {l.driverName}</Text>
                       </View>
@@ -2003,7 +1842,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                     {directUploadingBanner ? (
                       <ActivityIndicator size="small" color="#FFC20E" />
                     ) : (
-                      <Text style={styles.directUploadHeaderBtnText}>📤 Upload Banner</Text>
+                      <Text style={styles.directUploadHeaderBtnText}>Upload Banner</Text>
                     )}
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -2020,7 +1859,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <View style={styles.studioCard}>
                 <View style={styles.studioHeader}>
                   <View style={{ flex: 1, paddingRight: 8 }}>
-                    <Text style={styles.studioTitle}>🖼️ Website Banner Slideshow Studio</Text>
+                    <Text style={styles.studioTitle}>Website Banner Slideshow Studio</Text>
                     <Text style={styles.studioSub}>
                       Select Desktop View and Mobile View images separately from local storage to create a new slide.
                     </Text>
@@ -2037,7 +1876,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   {/* SLOT 1: DESKTOP VIEW */}
                   <View style={styles.studioSlotBox}>
                     <View style={styles.studioSlotHeader}>
-                      <Text style={styles.studioSlotTitle}>💻 Desktop View Image</Text>
+                      <Text style={styles.studioSlotTitle}>Desktop View Image</Text>
                       <Text style={styles.studioSlotHint}>Ultra-Wide Ratio (1024×168)</Text>
                     </View>
 
@@ -2053,7 +1892,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                             style={styles.studioChangeBtn}
                             onPress={handlePickStudioDesktop}
                           >
-                            <Text style={styles.studioChangeBtnText}>🔄 Change</Text>
+                            <Text style={styles.studioChangeBtnText}>Change</Text>
                           </TouchableOpacity>
                           <TouchableOpacity
                             style={styles.studioRemoveBtn}
@@ -2069,7 +1908,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         onPress={handlePickStudioDesktop}
                         activeOpacity={0.8}
                       >
-                        <Text style={styles.studioDropzoneIcon}>💻</Text>
                         <Text style={styles.studioDropzoneText}>Select Desktop Image</Text>
                         <Text style={styles.studioDropzoneSubText}>Tap to pick from device gallery / storage</Text>
                       </TouchableOpacity>
@@ -2079,7 +1917,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   {/* SLOT 2: MOBILE VIEW */}
                   <View style={styles.studioSlotBox}>
                     <View style={styles.studioSlotHeader}>
-                      <Text style={styles.studioSlotTitle}>📱 Mobile View Image</Text>
+                      <Text style={styles.studioSlotTitle}>Mobile View Image</Text>
                       <Text style={styles.studioSlotHint}>Compact / Mobile Ratio (1024×420)</Text>
                     </View>
 
@@ -2095,7 +1933,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                             style={styles.studioChangeBtn}
                             onPress={handlePickStudioMobile}
                           >
-                            <Text style={styles.studioChangeBtnText}>🔄 Change</Text>
+                            <Text style={styles.studioChangeBtnText}>Change</Text>
                           </TouchableOpacity>
                           <TouchableOpacity
                             style={styles.studioRemoveBtn}
@@ -2111,7 +1949,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         onPress={handlePickStudioMobile}
                         activeOpacity={0.8}
                       >
-                        <Text style={styles.studioDropzoneIcon}>📱</Text>
                         <Text style={styles.studioDropzoneText}>Select Mobile Image</Text>
                         <Text style={styles.studioDropzoneSubText}>Tap to pick from device gallery / storage</Text>
                       </TouchableOpacity>
@@ -2161,7 +1998,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                     </View>
                   ) : (
                     <Text style={styles.studioPublishBtnText}>
-                      🚀 Publish Slide to Website Slideshow
+                      Publish Slide to Website Slideshow
                     </Text>
                   )}
                 </TouchableOpacity>
@@ -2169,7 +2006,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
 
               {banners.length === 0 ? (
                 <View style={styles.emptyBannerState}>
-                  <Text style={styles.emptyBannerIcon}>📢</Text>
                   <Text style={styles.emptyBannerTitle}>No Banners Added Yet</Text>
                   <Text style={styles.emptyBannerDesc}>
                     Add promotional banners or urgent notices. They will appear dynamically across mobile & web interfaces.
@@ -2209,10 +2045,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                           >
                             <Text style={styles.bannerTargetText}>
                               {b.target === "all"
-                                ? "👥 All Users"
+                                ? "All Users"
                                 : b.target === "riders"
-                                  ? "🚚 Riders Only"
-                                  : "👤 Customers Only"}
+                                  ? "Riders Only"
+                                  : "Customers Only"}
                             </Text>
                           </View>
                           <View
@@ -2227,10 +2063,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                           >
                             <Text style={styles.bannerViewModeBadgeText}>
                               {b.viewMode === "mobile"
-                                ? "📱 Mobile View"
+                                ? "Mobile View"
                                 : b.viewMode === "desktop"
-                                  ? "💻 Desktop View"
-                                  : "🌐 All Devices"}
+                                  ? "Desktop View"
+                                  : "All Devices"}
                             </Text>
                           </View>
                         </View>
@@ -2261,7 +2097,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                       <View style={styles.bannerDualThumbRow}>
                         <View style={styles.bannerThumbCol}>
                           <View style={styles.bannerThumbHeaderRow}>
-                            <Text style={styles.bannerThumbBadge}>💻 Desktop View (Ultra-Wide)</Text>
+                            <Text style={styles.bannerThumbBadge}>Desktop View (Ultra-Wide)</Text>
                           </View>
                           {b.desktopImage ? (
                             <Image
@@ -2277,7 +2113,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         </View>
                         <View style={styles.bannerThumbCol}>
                           <View style={styles.bannerThumbHeaderRow}>
-                            <Text style={styles.bannerThumbBadge}>📱 Mobile View (Compact)</Text>
+                            <Text style={styles.bannerThumbBadge}>Mobile View (Compact)</Text>
                           </View>
                           {b.mobileImage ? (
                             <Image
@@ -2306,13 +2142,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                               setInspectBannerModal(true);
                             }}
                           >
-                            <Text style={styles.previewInspectBtnText}>👁️ Preview</Text>
+                            <Text style={styles.previewInspectBtnText}>Preview</Text>
                           </TouchableOpacity>
                           <TouchableOpacity
                             style={styles.deleteBannerBtn}
                             onPress={() => handleDeleteBanner(b.id)}
                           >
-                            <Text style={styles.deleteBannerBtnText}>🗑 Delete</Text>
+                            <Text style={styles.deleteBannerBtnText}>Delete</Text>
                           </TouchableOpacity>
                         </View>
                       </View>
@@ -2340,7 +2176,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <View style={styles.settingItemRow}>
                 <Text style={styles.settingLabel}>GPS Telemetry Sync</Text>
                 <Text style={[styles.settingValue, { color: "#1E9E5A", fontWeight: "800" }]}>
-                  🟢 Real-Time Streaming Active
+                  Real-Time Streaming Active
                 </Text>
               </View>
             </View>
@@ -2387,7 +2223,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               </View>
             ) : filteredComplaints.length === 0 ? (
               <View style={[styles.card, { alignItems: "center", paddingVertical: 30 }]}>
-                <Text style={{ fontSize: 32, marginBottom: 8 }}>📋</Text>
                 <Text style={{ fontSize: 15, fontWeight: "700", color: "#1F1E19" }}>
                   No complaint records found
                 </Text>
@@ -2434,26 +2269,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   {/* Customer & Route Details */}
                   <View style={{ backgroundColor: "#FBF9F3", borderRadius: 8, padding: 10, marginVertical: 6 }}>
                     <Text style={{ fontSize: 14, fontWeight: "800", color: "#1F1E19" }}>
-                      👤 {item.customerName || "Customer"}
+                      {item.customerName || "Customer"}
                     </Text>
                     <View style={{ flexDirection: "row", alignItems: "center", gap: 12, marginTop: 4, flexWrap: "wrap" }}>
                       <Text style={{ fontSize: 12, color: "#54524B", fontWeight: "600" }}>
-                        📞 {item.customerPhone || "N/A"}
+                        {item.customerPhone || "N/A"}
                       </Text>
                       {item.customerIdNumber ? (
                         <Text style={{ fontSize: 12, color: "#54524B", fontWeight: "600" }}>
-                          🪪 {item.customerIdNumber}
+                          {item.customerIdNumber}
                         </Text>
                       ) : null}
                     </View>
                     <View style={{ marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: "#E7E2D0" }}>
                       <Text style={{ fontSize: 12, color: "#1F1E19", fontWeight: "700" }}>
-                        📍 {item.pickupCity || "Pickup"} ➔ {item.deliveryCity || "Delivery"}
+                        {item.pickupCity || "Pickup"} ➔ {item.deliveryCity || "Delivery"}
                         {item.distanceKm ? ` (${item.distanceKm} km)` : ""}
                       </Text>
                       {item.quotedAmount ? (
                         <Text style={{ fontSize: 12, color: "#B45309", fontWeight: "800", marginTop: 2 }}>
-                          💵 Amount: LKR {item.quotedAmount.toLocaleString()}
+                          Amount: LKR {item.quotedAmount.toLocaleString()}
                         </Text>
                       ) : null}
                     </View>
@@ -2462,7 +2297,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   {/* Deletion Reason Alert Callout */}
                   <View style={{ backgroundColor: "#FEF2F2", borderWidth: 1, borderColor: "#FECACA", borderRadius: 8, padding: 10, marginVertical: 6 }}>
                     <Text style={{ fontSize: 11, fontWeight: "800", color: "#991B1B", textTransform: "uppercase", letterSpacing: 0.5 }}>
-                      ⚠️ Deletion / Complaint Reason:
+                      Deletion / Complaint Reason:
                     </Text>
                     <Text style={{ fontSize: 13, color: "#7F1D1D", fontWeight: "600", marginTop: 3, lineHeight: 18 }}>
                       {item.reason}
@@ -2474,26 +2309,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                     ) : null}
                   </View>
 
-                  {/* Bottom Action: Delete Button */}
-                  <View style={{ flexDirection: "row", justifyContent: "flex-end", marginTop: 8 }}>
-                    <TouchableOpacity
-                      onPress={() => handleDeleteComplaint(item.id, item.bookingId)}
-                      style={{
-                        backgroundColor: "#DC2626",
-                        paddingHorizontal: 12,
-                        paddingVertical: 7,
-                        borderRadius: 8,
-                        flexDirection: "row",
-                        alignItems: "center",
-                        gap: 4,
-                      }}
-                      activeOpacity={0.8}
-                    >
-                      <Text style={{ color: "#FFFFFF", fontSize: 12, fontWeight: "800" }}>
-                        🗑️ Delete Record
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
                 </View>
               ))
             )}
@@ -2679,7 +2494,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         />
                       ) : (
                         <View style={[styles.photoSlotPreview, { alignItems: "center", justifyContent: "center", backgroundColor: "#F4F2EA" }]}>
-                          <Text style={{ fontSize: 22 }}>📷</Text>
                           <Text style={{ fontSize: 9.5, color: "#8C877A", fontWeight: "700", marginTop: 2 }}>Tap to Add</Text>
                         </View>
                       )}
@@ -2782,7 +2596,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         />
                       ) : (
                         <View style={[styles.photoSlotPreview, { alignItems: "center", justifyContent: "center", backgroundColor: "#F4F2EA" }]}>
-                          <Text style={{ fontSize: 22 }}>📷</Text>
                           <Text style={{ fontSize: 9.5, color: "#8C877A", fontWeight: "700", marginTop: 2 }}>Tap to Add</Text>
                         </View>
                       )}
@@ -2875,7 +2688,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         bannerTarget === aud && styles.audiencePillTextActive,
                       ]}
                     >
-                      {aud === "all" ? "👥 All" : aud === "riders" ? "🚚 Riders" : "👤 Customers"}
+                      {aud === "all" ? "All" : aud === "riders" ? "Riders" : "Customers"}
                     </Text>
                   </TouchableOpacity>
                 ))}
@@ -2897,7 +2710,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                       bannerViewMode === "all" && styles.deviceModePillTextActive,
                     ]}
                   >
-                    🌐 All Devices
+                    All Devices
                   </Text>
                 </TouchableOpacity>
 
@@ -2917,7 +2730,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                       bannerViewMode === "mobile" && styles.deviceModePillTextActive,
                     ]}
                   >
-                    📱 Mobile View
+                    Mobile View
                   </Text>
                 </TouchableOpacity>
 
@@ -2937,7 +2750,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                       bannerViewMode === "desktop" && styles.deviceModePillTextActive,
                     ]}
                   >
-                    💻 Desktop View
+                    Desktop View
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -2961,7 +2774,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   {isPickingBannerImg === "desktop" ? (
                     <ActivityIndicator size="small" color="#26231B" />
                   ) : (
-                    <Text style={styles.uploadPickBtnText}>📁 Upload</Text>
+                    <Text style={styles.uploadPickBtnText}>Upload</Text>
                   )}
                 </TouchableOpacity>
               </View>
@@ -2984,13 +2797,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   style={styles.presetBtn}
                   onPress={() => setBannerDesktopImg("/banner-desktop.jpg")}
                 >
-                  <Text style={styles.presetBtnText}>⚡ /banner-desktop.jpg</Text>
+                  <Text style={styles.presetBtnText}>/banner-desktop.jpg</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.presetBtn}
                   onPress={() => setBannerDesktopImg("/banner.jpg")}
                 >
-                  <Text style={styles.presetBtnText}>⚡ /banner.jpg</Text>
+                  <Text style={styles.presetBtnText}>/banner.jpg</Text>
                 </TouchableOpacity>
               </View>
 
@@ -3012,7 +2825,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   {isPickingBannerImg === "mobile" ? (
                     <ActivityIndicator size="small" color="#26231B" />
                   ) : (
-                    <Text style={styles.uploadPickBtnText}>📁 Upload</Text>
+                    <Text style={styles.uploadPickBtnText}>Upload</Text>
                   )}
                 </TouchableOpacity>
               </View>
@@ -3035,13 +2848,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   style={styles.presetBtn}
                   onPress={() => setBannerMobileImg("/banner-mobile.jpg")}
                 >
-                  <Text style={styles.presetBtnText}>⚡ /banner-mobile.jpg</Text>
+                  <Text style={styles.presetBtnText}>/banner-mobile.jpg</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.presetBtn}
                   onPress={() => setBannerMobileImg("/banner-mobile-2.jpg")}
                 >
-                  <Text style={styles.presetBtnText}>⚡ /banner-mobile-2.jpg</Text>
+                  <Text style={styles.presetBtnText}>/banner-mobile-2.jpg</Text>
                 </TouchableOpacity>
               </View>
 
@@ -3071,7 +2884,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         bannerPreviewDevice === "mobile" && styles.switcherTabTextActive,
                       ]}
                     >
-                      📱 Mobile View
+                      Mobile View
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -3087,7 +2900,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         bannerPreviewDevice === "desktop" && styles.switcherTabTextActive,
                       ]}
                     >
-                      💻 Desktop View
+                      Desktop View
                     </Text>
                   </TouchableOpacity>
                 </View>
@@ -3095,7 +2908,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
 
               {/* RENDER CHOSEN DEVICE PREVIEW */}
               {bannerPreviewDevice === "mobile" ? (
-                /* 📱 MOBILE VIEW MOCKUP FRAME */
+                /* MOBILE VIEW MOCKUP FRAME */
                 <View style={styles.phoneMockupFrame}>
                   {/* Phone Status Bar & Notch */}
                   <View style={styles.phoneTopBar}>
@@ -3106,7 +2919,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
 
                   {/* App Header Inside Phone */}
                   <View style={styles.phoneAppHeader}>
-                    <Text style={styles.phoneAppTitle}>Sithumina Transport 🚚</Text>
+                    <Text style={styles.phoneAppTitle}>Sithumina Transport</Text>
                     <View style={styles.phoneBadgeLive}>
                       <Text style={styles.phoneBadgeLiveText}>LIVE</Text>
                     </View>
@@ -3137,7 +2950,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         <View style={styles.previewTagBadge}>
                           <Text style={styles.previewTagText}>{bannerTag || "PROMO"}</Text>
                         </View>
-                        <Text style={styles.phoneBannerFormatLabel}>📱 Mobile Header Banner</Text>
+                        <Text style={styles.phoneBannerFormatLabel}>Mobile Header Banner</Text>
                       </View>
                       <Text style={styles.phoneBannerTitle}>
                         {bannerTitle || "Special Cargo Promotion"}
@@ -3155,7 +2968,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   <View style={styles.phoneHomeBar} />
                 </View>
               ) : (
-                /* 💻 DESKTOP VIEW MOCKUP FRAME */
+                /* DESKTOP VIEW MOCKUP FRAME */
                 <View style={styles.desktopMockupFrame}>
                   {/* Browser Chrome Header */}
                   <View style={styles.browserTopBar}>
@@ -3165,7 +2978,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                       <View style={[styles.browserDot, { backgroundColor: "#27C93F" }]} />
                     </View>
                     <View style={styles.browserAddressPill}>
-                      <Text style={styles.browserAddressText}>🔒 sithumina.lk/transport</Text>
+                      <Text style={styles.browserAddressText}>sithumina.lk/transport</Text>
                     </View>
                     <Text style={{ fontSize: 9, color: "#8C877A", fontWeight: "700" }}>DESKTOP</Text>
                   </View>
@@ -3195,12 +3008,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                           <View style={styles.desktopCtaBtn}>
                             <Text style={styles.desktopCtaBtnText}>{bannerCtaText || "Book Vehicle Now"} ➔</Text>
                           </View>
-                          <Text style={styles.desktopHotlineText}>📞 0112 984 984 | 💬 0755 984 984</Text>
+                          <Text style={styles.desktopHotlineText}>0112 984 984 | 0755 984 984</Text>
                         </View>
                       </View>
 
                       <View style={styles.desktopFleetBadgeBox}>
-                        <Text style={{ fontSize: 24, textAlign: "center" }}>🚚</Text>
                         <Text style={styles.desktopFleetBadgeTitle}>10ft • 14ft • 20ft</Text>
                         <Text style={styles.desktopFleetBadgeSub}>Available 24/7</Text>
                       </View>
@@ -3257,7 +3069,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         inspectPreviewDevice === "mobile" && styles.switcherTabTextActive,
                       ]}
                     >
-                      📱 Mobile View
+                      Mobile View
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -3273,13 +3085,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         inspectPreviewDevice === "desktop" && styles.switcherTabTextActive,
                       ]}
                     >
-                      💻 Desktop View
+                      Desktop View
                     </Text>
                   </TouchableOpacity>
                 </View>
 
                 {inspectPreviewDevice === "mobile" ? (
-                  /* 📱 MOBILE VIEW */
+                  /* MOBILE VIEW */
                   <View style={styles.phoneMockupFrame}>
                     <View style={styles.phoneTopBar}>
                       <Text style={styles.phoneTimeText}>9:41</Text>
@@ -3288,7 +3100,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                     </View>
 
                     <View style={styles.phoneAppHeader}>
-                      <Text style={styles.phoneAppTitle}>Sithumina Transport 🚚</Text>
+                      <Text style={styles.phoneAppTitle}>Sithumina Transport</Text>
                       <View style={styles.phoneBadgeLive}>
                         <Text style={styles.phoneBadgeLiveText}>LIVE</Text>
                       </View>
@@ -3318,7 +3130,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                           <View style={styles.previewTagBadge}>
                             <Text style={styles.previewTagText}>{selectedBannerForInspect.tag}</Text>
                           </View>
-                          <Text style={styles.phoneBannerFormatLabel}>📱 Mobile App Banner</Text>
+                          <Text style={styles.phoneBannerFormatLabel}>Mobile App Banner</Text>
                         </View>
                         <Text style={styles.phoneBannerTitle}>{selectedBannerForInspect.title}</Text>
                         {selectedBannerForInspect.subtitle ? (
@@ -3333,7 +3145,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                     <View style={styles.phoneHomeBar} />
                   </View>
                 ) : (
-                  /* 💻 DESKTOP VIEW */
+                  /* DESKTOP VIEW */
                   <View style={styles.desktopMockupFrame}>
                     <View style={styles.browserTopBar}>
                       <View style={styles.browserDotsRow}>
@@ -3342,7 +3154,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                         <View style={[styles.browserDot, { backgroundColor: "#27C93F" }]} />
                       </View>
                       <View style={styles.browserAddressPill}>
-                        <Text style={styles.browserAddressText}>🔒 sithumina.lk/transport</Text>
+                        <Text style={styles.browserAddressText}>sithumina.lk/transport</Text>
                       </View>
                       <Text style={{ fontSize: 9, color: "#8C877A", fontWeight: "700" }}>DESKTOP</Text>
                     </View>
@@ -3369,12 +3181,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                             <View style={styles.desktopCtaBtn}>
                               <Text style={styles.desktopCtaBtnText}>{selectedBannerForInspect.ctaText || "Book Vehicle Now"} ➔</Text>
                             </View>
-                            <Text style={styles.desktopHotlineText}>📞 0112 984 984 | 💬 0755 984 984</Text>
+                            <Text style={styles.desktopHotlineText}>0112 984 984 | 0755 984 984</Text>
                           </View>
                         </View>
 
                         <View style={styles.desktopFleetBadgeBox}>
-                          <Text style={{ fontSize: 24, textAlign: "center" }}>🚚</Text>
                           <Text style={styles.desktopFleetBadgeTitle}>10ft • 14ft • 20ft</Text>
                           <Text style={styles.desktopFleetBadgeSub}>Available 24/7</Text>
                         </View>
@@ -5346,7 +5157,7 @@ const styles = StyleSheet.create({
     fontWeight: "900",
   },
 
-  /* 📱 Smartphone Mockup Frame */
+  /* Smartphone Mockup Frame */
   phoneMockupFrame: {
     backgroundColor: "#161512",
     borderRadius: 22,
@@ -5470,7 +5281,7 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
 
-  /* 💻 Desktop Browser Mockup Frame */
+  /* Desktop Browser Mockup Frame */
   desktopMockupFrame: {
     backgroundColor: "#161512",
     borderRadius: 14,

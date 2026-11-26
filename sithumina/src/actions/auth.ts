@@ -3,7 +3,7 @@
 import {
   upsertCustomerInStore,
   deleteCustomerFromStore,
-  archiveOrDeleteCustomerBookingsInStore,
+  archiveCustomerBookingsInStore,
   getAllStoredCustomers,
   getAllStoredDrivers,
   StoredCustomer,
@@ -43,7 +43,7 @@ export async function loginCustomerAction(
     };
 
     let matchedExistingName = "";
-    const existingCustomers = getAllStoredCustomers();
+    const existingCustomers = await getAllStoredCustomers();
     const existingLocalCust = existingCustomers.find(
       (c) => phonesMatch(c.phone, canonicalPhone) && isRealName(c.name)
     );
@@ -83,7 +83,7 @@ export async function loginCustomerAction(
       ? cleanInputName
       : matchedExistingName || "Valued Customer";
 
-    const customer = upsertCustomerInStore({
+    const customer = await upsertCustomerInStore({
       phone: canonicalPhone,
       name: resolvedName,
       idNumber: cleanIdNumber,
@@ -142,7 +142,7 @@ async function fetchDriversAuthoritative(): Promise<StoredDriver[]> {
     list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     return list;
   } catch {
-    return getAllStoredDrivers();
+    return await getAllStoredDrivers();
   }
 }
 
@@ -211,7 +211,7 @@ export async function registerCustomerAction(input: {
       return { success: false, error: "Please enter the customer's full name to register." };
     }
 
-    const customer = upsertCustomerInStore({
+    const customer = await upsertCustomerInStore({
       phone: canonicalPhone,
       name: cleanName,
       idNumber: input.idNumber?.trim(),
@@ -269,11 +269,11 @@ export async function deleteCustomerAction(input: {
       return { success: false, error: "Customer ID or phone number is required." };
     }
 
-    // 1. Remove from local fleet-store.json immediately
-    const removedLocal = deleteCustomerFromStore(cleanId, cleanPhone);
+    // 1. Remove the customer record
+    const removedLocal = await deleteCustomerFromStore(cleanId, cleanPhone);
     let deletedUserDocs = removedLocal ? 1 : 0;
     let affectedBookings = cleanPhone
-      ? archiveOrDeleteCustomerBookingsInStore(cleanPhone, deleteBookings)
+      ? await archiveCustomerBookingsInStore(cleanPhone)
       : 0;
 
     // 2. Remove matching customer document(s) from Firestore "users" collection
@@ -324,14 +324,10 @@ export async function deleteCustomerAction(input: {
           const bPhone = String(bData.customerPhone || bData.phone || "").trim();
           if (!bPhone || !phonesMatch(bPhone, cleanPhone)) continue;
 
-          if (deleteBookings) {
-            await deleteDoc(doc(db, "bookings", bDoc.id));
-          } else {
-            await updateDoc(doc(db, "bookings", bDoc.id), {
-              customerArchived: true,
-              updatedAt: nowTs,
-            });
-          }
+          await updateDoc(doc(db, "bookings", bDoc.id), {
+            customerArchived: true,
+            updatedAt: nowTs,
+          });
           affectedBookings += 1;
         }
       }
@@ -360,7 +356,7 @@ export async function deleteCustomerAction(input: {
  */
 export async function getCustomersAction(): Promise<ActionResult<StoredCustomer[]>> {
   try {
-    const localCustomers = getAllStoredCustomers();
+    const localCustomers = await getAllStoredCustomers();
     const byKey = new Map<string, StoredCustomer>();
 
     const isGeneric = (val?: string) => {

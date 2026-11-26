@@ -154,11 +154,11 @@ export function recommendBestLorriesForBooking(
     // Compose human-readable reason
     let reason = `${distanceKm} km from ${pickupCity}`;
     if (isAvailable && distanceKm <= 15) {
-      reason = `🟢 Nearest Available (${distanceKm} km away)`;
+      reason = `Nearest Available (${distanceKm} km away)`;
     } else if (isAvailable) {
-      reason = `🟡 Available in Corridor (${distanceKm} km away)`;
+      reason = `Available in Corridor (${distanceKm} km away)`;
     } else {
-      reason = `🟠 On Trip (${distanceKm} km away)`;
+      reason = `On Trip (${distanceKm} km away)`;
     }
 
     return {

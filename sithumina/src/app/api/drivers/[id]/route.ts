@@ -61,7 +61,7 @@ export async function GET(
     driver = matchDriver(fsDrivers, cleanId);
   } catch (err) {
     console.warn("Firestore driver lookup fallback:", err);
-    const drivers = getAllStoredDrivers();
+    const drivers = await getAllStoredDrivers();
     driver = matchDriver(drivers, cleanId);
   }
 

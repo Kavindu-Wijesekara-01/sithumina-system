@@ -19,7 +19,7 @@ export async function POST(
       );
     }
 
-    const updated = updateLorryGpsInStore(
+    const updated = await updateLorryGpsInStore(
       id,
       Number(lat),
       Number(lng),

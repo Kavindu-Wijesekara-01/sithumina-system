@@ -31,7 +31,7 @@ export async function submitReviewAction(
       return { success: false, error: "Review feedback comment is required." };
     }
 
-    const review = addReviewInStore({
+    const review = await addReviewInStore({
       name,
       rating,
       comment,
@@ -127,7 +127,7 @@ export async function deleteReviewAction(id: string): Promise<ActionResult<boole
       return { success: false, error: "Review ID is required." };
     }
 
-    deleteReviewFromStore(id);
+    await deleteReviewFromStore(id);
 
     try {
       await deleteDoc(doc(db, "reviews", id));

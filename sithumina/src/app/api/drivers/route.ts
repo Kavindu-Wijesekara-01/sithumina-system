@@ -5,6 +5,7 @@ import {
   deleteDriverFromStore,
 } from "@/lib/server-store";
 import { db } from "@/lib/firebase";
+import { allocateDriverId } from "@/lib/driver-ids";
 import { collection, getDocs, doc, setDoc, deleteDoc } from "firebase/firestore";
 
 function resolveDriverLorryId(rawLorryId: unknown, plate: unknown, driverId: unknown): string {
@@ -43,7 +44,7 @@ export async function GET() {
     return NextResponse.json({ success: true, drivers });
   } catch (err) {
     console.warn("Firestore drivers GET fallback to local store:", err);
-    const drivers = getAllStoredDrivers();
+    const drivers = await getAllStoredDrivers();
     return NextResponse.json({ success: true, drivers });
   }
 }
@@ -61,13 +62,13 @@ export async function POST(request: Request) {
       );
     }
 
-    const result = registerDriverInStore({
+    const result = await registerDriverInStore({
       name,
       phone,
       plate: finalPlate,
       vehicleType: vehicleType || "Lorry Fleet",
       route: route || "Island-wide Fleet",
-      driverId,
+      driverId: driverId || (await allocateDriverId()),
     });
 
     const cleanId = result.driver.driverId.trim().toUpperCase();
@@ -126,7 +127,7 @@ export async function DELETE(request: Request) {
     }
 
     const cleanUpper = id.trim().toUpperCase();
-    deleteDriverFromStore(id);
+    await deleteDriverFromStore(id);
 
     try {
       await deleteDoc(doc(db, "drivers", cleanUpper));

@@ -105,7 +105,7 @@ export default function ContactPage() {
       <div className="p-6 rounded-2xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-4">
         <div className="flex flex-col gap-1">
           <h2 className="text-base font-extrabold text-[var(--ink)]">
-            ✉️ {locale === "en" ? "Send an Online Inquiry / Freight Rate Quote" : "ඔබගේ පණිවිඩය එවන්න"}
+            {locale === "en" ? "Send an Online Inquiry / Freight Rate Quote" : "ඔබගේ පණිවිඩය එවන්න"}
           </h2>
           <p className="text-xs text-[var(--mut)]">
             {locale === "en"

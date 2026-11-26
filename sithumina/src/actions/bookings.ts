@@ -3,17 +3,14 @@
 import { revalidatePath } from "next/cache";
 import {
   createBookingInStore,
+  getStoredBooking,
   getAllStoredBookings,
   updateBookingStatusInStore,
   upsertBookingInStore,
   deleteBookingFromStore,
   getAllStoredComplaints,
   recordComplaintInStore,
-  checkOutsideLorryBookingEligibility,
-  deductCommissionForBookingInStore,
-  getStoredOutsideEmployeeByPlate,
   getAllStoredLorries,
-  getAllStoredOutsideEmployees,
   updateBookingInStore,
   updateLorryGpsInStore,
   updateLorryStatusInStore,
@@ -25,6 +22,14 @@ import {
   PaymentSlipStatus,
   BookingPaymentMethod,
 } from "@/lib/server-store";
+import { findOutsideOwnerByPlate, listOutsideOwners, syncHireCommission } from "@/lib/outside-owners";
+import { closeDispatchesForBooking } from "@/lib/dispatch-sync";
+import { performTripAction, planTrip, refreshVehicleTripState, TripError } from "@/lib/trip-workflow";
+import { isActiveTrip, tripFields } from "@/lib/trip-state";
+import { sendDispatchPush } from "@/lib/push";
+import { recordReversal, voidReversals } from "@/lib/reversals";
+import { outstandingAmount, todayYmd } from "@/lib/ledger";
+import { resolveLocationCoordinates } from "@/lib/sri-lanka-routes";
 import {
   normalizePhoneNumber,
   phonesMatch,
@@ -65,7 +70,7 @@ function mapFirestoreBooking(
   const resolvedDate =
     data.date ||
     (Array.isArray(data.dates) && data.dates[0]) ||
-    new Date(Number(data.createdAt) || Date.now()).toISOString().split("T")[0];
+    todayYmd(Number(data.createdAt) || Date.now());
   const resolvedDates =
     Array.isArray(data.dates) && data.dates.length > 0
       ? data.dates
@@ -78,12 +83,6 @@ function mapFirestoreBooking(
     customerName: data.customerName || data.name || "Customer",
     customerPhone: String(data.customerPhone || data.phone || "").trim(),
     customerIdNumber: data.customerIdNumber ? String(data.customerIdNumber).trim() : undefined,
-    distanceKm:
-      typeof data.distanceKm === "number" && !Number.isNaN(data.distanceKm)
-        ? data.distanceKm
-        : data.distanceKm !== undefined && !Number.isNaN(Number(data.distanceKm))
-          ? Number(data.distanceKm)
-          : undefined,
     pickupCity: data.pickupCity || data.pickup || "",
     deliveryCity: data.deliveryCity || data.destination || "",
     pickupLat: data.pickupLat,
@@ -103,6 +102,10 @@ function mapFirestoreBooking(
     assignedDriverPhone: String(data.assignedDriverPhone || "").trim(),
     assignedPlate: data.assignedPlate || data.selectedVehiclePlate || "",
     bookingType: data.bookingType || "individual_vehicle",
+    ...tripFields(data),
+    distanceKm:
+      Number(data.distanceKm) > 0 ? Number(data.distanceKm) : undefined,
+    actualDistanceKm: Number(data.actualDistanceKm) || undefined,
     cargoNature: data.cargoNature || "",
     daysNeeded: data.daysNeeded || resolvedDates.length || 1,
     cargoWeight: data.cargoWeight || data.weight || "",
@@ -216,26 +219,18 @@ async function syncBookingDispatchDoc(
 ): Promise<void> {
   const dispatchDocId = `dispatch-${booking.id}`;
 
-  // Individual Vehicle bookings NEVER dispatch to the Driver Mobile App; only live_lorry bookings do.
-  if (booking.bookingType !== "live_lorry") {
-    try {
-      await deleteDoc(doc(db, "dispatches", dispatchDocId));
-      const snap = await getDocs(
-        query(collection(db, "dispatches"), where("bookingId", "==", booking.id))
-      );
-      for (const d of snap.docs) {
-        await deleteDoc(doc(db, "dispatches", d.id));
-      }
-    } catch {
-      // non-blocking cleanup
-    }
-    return;
-  }
+  const isLive = booking.bookingType === "live_lorry";
+  const isDispatchable = [
+    ...(isLive ? ["accepted"] : []),
+    "assigned",
+    "booked",
+    "goods_collected",
+    "in_transit",
+  ].includes(status);
 
-  const isTerminal = status === "delivered" || status === "cancelled";
-  const isDispatchable = ["accepted", "assigned", "goods_collected", "in_transit", "booked"].includes(status);
-
-  if (!isDispatchable && !isTerminal) {
+  if (!isDispatchable) {
+    // Finished, cancelled or pulled back: update every dispatch, including the primary one
+    await closeDispatchesForBooking(booking.id, status);
     return;
   }
 
@@ -247,24 +242,38 @@ async function syncBookingDispatchDoc(
     (plateNorm ? `lorry-${plateNorm.toLowerCase()}` : "")
   ).trim();
 
+  const existing = (await getDoc(doc(db, "dispatches", dispatchDocId))).data();
+  // Map pins live on the cloud record; the legacy local copy may not have them
+  const cloud = (await getDoc(doc(db, "bookings", booking.id))).data() || {};
+  const newDriverId = String(extra?.driverId || booking.assignedDriverId || "").toUpperCase();
+  // A different driver or vehicle means a fresh job that has to be accepted again
+  const reassigned = Boolean(
+    existing &&
+      ((newDriverId && existing.driverId && String(existing.driverId).toUpperCase() !== newDriverId) ||
+        (plate && existing.assignedPlate && normalizePlate(existing.assignedPlate) !== plateNorm))
+  );
   let targetDispatchStatus = "pending_acceptance";
-  if (status === "delivered" || status === "completed") {
-    targetDispatchStatus = "completed";
-  } else if (status === "cancelled") {
-    targetDispatchStatus = "cancelled";
-  } else if (status === "goods_collected") {
+  if (status === "goods_collected") {
     targetDispatchStatus = "goods_collected";
   } else if (status === "in_transit") {
-    targetDispatchStatus = "in_transit";
-  } else {
+    targetDispatchStatus = existing?.status === "goods_collected" ? "goods_collected" : "in_transit";
+  } else if (!reassigned && ["accepted", "goods_collected", "in_transit"].includes(existing?.status)) {
+    targetDispatchStatus = existing!.status;
+  }
+
+  // Tell the driver up front whether this attaches to a running trip
+  let tripRole: "primary" | "return" = booking.tripRole || "primary";
+  let parentBookingId = booking.parentBookingId || "";
+  if (targetDispatchStatus === "pending_acceptance") {
     try {
-      const existingSnap = await getDoc(doc(db, "dispatches", dispatchDocId));
-      const curSt = existingSnap.data()?.status;
-      if (existingSnap.exists() && ["accepted", "goods_collected", "in_transit"].includes(curSt)) {
-        targetDispatchStatus = curSt;
-      }
-    } catch {
-      // keep pending_acceptance
+      const planned = await planTrip({ ...booking, assignedPlate: plate, assignedDriverId: newDriverId });
+      tripRole = planned.role;
+      parentBookingId = planned.parentBookingId;
+    } catch (e) {
+      if (!(e instanceof TripError)) throw e;
+      // A second primary may be queued; accepting it is blocked until the current trip ends
+      tripRole = "primary";
+      parentBookingId = "";
     }
   }
 
@@ -273,7 +282,10 @@ async function syncBookingDispatchDoc(
   const resolvedDriverPhone =
     String(extra?.driverPhone || booking.assignedDriverPhone || "").trim();
 
-  if (isDispatchable && effectiveLorryId) {
+  const hasDriver = Boolean(newDriverId || extra?.driverName || booking.assignedDriverName);
+  if (effectiveLorryId && (isLive || hasDriver)) {
+    const pickupGuess = resolveLocationCoordinates(booking.pickupCity);
+    const dropGuess = resolveLocationCoordinates(booking.deliveryCity);
     const hasSlip = Boolean(
       booking.paymentSlipId ||
       booking.paymentSlipStatus === "approved" ||
@@ -290,11 +302,19 @@ async function syncBookingDispatchDoc(
       customerPhone: booking.customerPhone,
       customerWhatsapp: booking.customerWhatsapp || "",
       pickupCity: booking.pickupCity,
-      pickupLat: booking.pickupLat ?? null,
-      pickupLng: booking.pickupLng ?? null,
+      pickupLat: cloud.pickupLat ?? booking.pickupLat ?? pickupGuess?.[0] ?? null,
+      pickupLng: cloud.pickupLng ?? booking.pickupLng ?? pickupGuess?.[1] ?? null,
+      // Only a customer pin or GPS fix is exact; other coordinates are town centres
+      pickupFromGps: Boolean(cloud.pickupPinned),
+      externalFare: Boolean(await findOutsideOwnerByPlate(plate)),
+      cashDue: outstandingAmount({ ...booking, ...cloud, id: booking.id, externalOwnerId: "" }),
+      dropoffPinned: Boolean(cloud.dropoffPinned),
+      tripRole,
+      parentBookingId,
+      distanceKm: booking.distanceKm ?? null,
       deliveryCity: booking.deliveryCity,
-      deliveryLat: booking.deliveryLat ?? null,
-      deliveryLng: booking.deliveryLng ?? null,
+      deliveryLat: cloud.deliveryLat ?? booking.deliveryLat ?? dropGuess?.[0] ?? null,
+      deliveryLng: cloud.deliveryLng ?? booking.deliveryLng ?? dropGuess?.[1] ?? null,
       cargo: booking.packageDetails || booking.cargoNature || "",
       cargoNature: booking.cargoNature || "",
       vehicleType: booking.vehicleType,
@@ -303,7 +323,7 @@ async function syncBookingDispatchDoc(
       daysNeeded: booking.daysNeeded || 1,
       helpersCount: booking.helpersCount ?? "0",
       status: targetDispatchStatus,
-      bookingType: booking.bookingType || "live_lorry",
+      bookingType: booking.bookingType || "individual_vehicle",
       hasPaymentSlip: hasSlip,
       paymentSlipStatus: booking.paymentSlipStatus || "",
       paymentSlipId: booking.paymentSlipId || "",
@@ -320,6 +340,24 @@ async function syncBookingDispatchDoc(
     if (resolvedDriverPhone) dispatchPayload.driverPhone = resolvedDriverPhone;
 
     await setDoc(doc(db, "dispatches", dispatchDocId), dispatchPayload, { merge: true });
+
+    const isNewJob =
+      targetDispatchStatus === "pending_acceptance" &&
+      (reassigned || existing?.status !== "pending_acceptance");
+    if (isNewJob) {
+      try {
+        await sendDispatchPush({
+          id: dispatchDocId,
+          driverId: newDriverId,
+          assignedPlate: plate,
+          pickupCity: booking.pickupCity,
+          deliveryCity: booking.deliveryCity,
+          tripRole,
+        });
+      } catch (e) {
+        console.warn("Dispatch push notification failed:", e);
+      }
+    }
   }
 
   // Sync any pre-existing dispatch docs referencing this bookingId (e.g. legacy auto-ID dispatches)
@@ -394,8 +432,8 @@ async function fetchBookingsAuthoritative(): Promise<StoredBooking[]> {
     }
 
     try {
-      const storeLorries = getAllStoredLorries();
-      const storeOutside = getAllStoredOutsideEmployees();
+      const storeLorries = await getAllStoredLorries();
+      const storeOutside = await listOutsideOwners().catch(() => []);
       storeLorries.forEach((l: StoredLorry) => {
         if ((l.isOutsideLorry || l.ownershipType === "outside") && l.driverName && l.plate) {
           const pKey = normalizePlate(l.plate);
@@ -454,7 +492,7 @@ async function fetchBookingsAuthoritative(): Promise<StoredBooking[]> {
     items.sort((a, b) => (b.createdAt || b.updatedAt || 0) - (a.createdAt || a.updatedAt || 0));
     return items;
   } catch {
-    return getAllStoredBookings();
+    return await getAllStoredBookings();
   }
 }
 
@@ -474,7 +512,7 @@ export async function createBookingAction(
     const rawPhone = input.phone?.trim() || "";
     const phone = normalizePhoneNumber(rawPhone) || rawPhone;
     const digitsOnly = phone.replace(/[^0-9]/g, "");
-    const date = input.date?.trim() || new Date().toISOString().split("T")[0];
+    const date = input.date?.trim() || todayYmd();
     const vehicleType = input.vehicleType?.trim() || "14ft Lorry";
     const customerName = input.customerName?.trim() || (phone ? `Customer (${phone.slice(-4)})` : "Valued Customer");
     const packageDetails = (input.notes || input.weight || "").trim();
@@ -540,7 +578,7 @@ export async function createBookingAction(
 
       const [cloudBookings, storeBookings] = await Promise.all([
         fetchBookingsAuthoritative().catch(() => [] as StoredBooking[]),
-        Promise.resolve(getAllStoredBookings()),
+        Promise.resolve([] as StoredBooking[]),
       ]);
       const combinedMap = new Map<string, StoredBooking>();
       cloudBookings.forEach((b) => combinedMap.set(b.id, b));
@@ -571,7 +609,7 @@ export async function createBookingAction(
     }
 
     const effectivePlateInput = (input.assignedPlate || "").trim().toUpperCase();
-    const outsideOwnerForCreate = effectivePlateInput ? getStoredOutsideEmployeeByPlate(effectivePlateInput) : null;
+    const outsideOwnerForCreate = effectivePlateInput ? await findOutsideOwnerByPlate(effectivePlateInput) : null;
     let finalAssignedDriverId = resolvedInputDriverId;
     let finalAssignedDriverName = resolvedInputDriverName;
     let finalAssignedDriverPhone = resolvedInputDriverPhone;
@@ -581,7 +619,7 @@ export async function createBookingAction(
       finalAssignedDriverName = outsideOwnerForCreate.name;
       finalAssignedDriverPhone = outsideOwnerForCreate.phone;
     } else if (effectivePlateInput) {
-      const storeLorries = getAllStoredLorries();
+      const storeLorries = await getAllStoredLorries();
       const matchedL = storeLorries.find((l: StoredLorry) => normalizePlate(l.plate) === normalizePlate(effectivePlateInput));
       if (matchedL && (matchedL.isOutsideLorry || matchedL.ownershipType === "outside")) {
         finalAssignedDriverId = matchedL.driverId || "";
@@ -591,7 +629,7 @@ export async function createBookingAction(
     }
 
     // 2. Atomic store creation in server memory + file persistence
-    const booking = createBookingInStore({
+    const booking = await createBookingInStore({
       customerName,
       customerPhone: phone,
       pickupCity: pickup,
@@ -667,6 +705,8 @@ export async function createBookingAction(
         pickupLng: input.pickupLng ?? null,
         deliveryLat: input.deliveryLat ?? null,
         deliveryLng: input.deliveryLng ?? null,
+        pickupPinned: Boolean(input.pickupPinned),
+        dropoffPinned: Boolean(input.dropoffPinned),
         date: booking.date,
         dates: booking.dates || (input.dates && input.dates.length > 0 ? input.dates : [date]),
         startTime: cleanStartTime || "",
@@ -705,7 +745,7 @@ export async function createBookingAction(
       if (resolvedDriverMeta.driverName || resolvedDriverMeta.driverPhone) {
         booking.assignedDriverName = resolvedDriverMeta.driverName || booking.assignedDriverName;
         booking.assignedDriverPhone = resolvedDriverMeta.driverPhone || booking.assignedDriverPhone;
-        upsertBookingInStore(booking);
+        await upsertBookingInStore(booking);
       }
       await setDoc(doc(db, "bookings", booking.id), bookingPayload);
 
@@ -733,9 +773,8 @@ export async function createBookingAction(
         );
       }
 
-      // Notify rider dispatch deterministically ONLY when live_lorry booking is confirmed/accepted/assigned
+      // Notify the rider when a booking is created already confirmed and assigned
       if (
-        booking.bookingType === "live_lorry" &&
         (booking.assignedLorryId || booking.assignedPlate || resolvedDriverMeta.resolvedLorryId) &&
         ["accepted", "assigned", "booked"].includes(booking.status)
       ) {
@@ -986,6 +1025,7 @@ export async function updateBookingStatusAction(
     endTime?: string;
     distanceKm?: number;
     customerIdNumber?: string;
+    cancelReason?: string;
   },
   paymentMeta?: {
     quotedAmount?: number;
@@ -1034,11 +1074,11 @@ export async function updateBookingStatusAction(
     // Fetch existing booking state (local store + Firestore) to validate time-slot & rider constraints before mutating
     const [cloudBookings, storeBookings] = await Promise.all([
       fetchBookingsAuthoritative().catch(() => [] as StoredBooking[]),
-      Promise.resolve(getAllStoredBookings()),
+      Promise.resolve([] as StoredBooking[]),
     ]);
     const combinedMap = new Map<string, StoredBooking>();
-    cloudBookings.forEach((b) => combinedMap.set(b.id, b));
     storeBookings.forEach((b) => combinedMap.set(b.id, b));
+    cloudBookings.forEach((b) => combinedMap.set(b.id, b));
 
     const existingBooking = combinedMap.get(id);
     const isIndividual = (existingBooking?.bookingType || "individual_vehicle") !== "live_lorry";
@@ -1129,7 +1169,49 @@ export async function updateBookingStatusAction(
       }
     }
 
-    let updatedLocal = updateBookingStatusInStore(id, status, sanitizedAssignment, paymentMeta);
+    const cancelReason = (assignment?.cancelReason || "").trim();
+    const isNewCancellation = status === "cancelled" && existingBooking?.status !== "cancelled";
+    if (isNewCancellation && cancelReason.length < 3) {
+      return { success: false, error: "A cancellation reason is required." };
+    }
+
+    // An owner who marked themselves unavailable cannot be newly assigned.
+    // Checked before any write. Wallet balance never blocks a hire.
+    const newPlate = (sanitizedAssignment?.assignedPlate || "").trim();
+    const isNewAssignment =
+      newPlate && normalizePlate(newPlate) !== normalizePlate(existingBooking?.assignedPlate);
+    if (isNewAssignment && ["accepted", "assigned", "booked"].includes(status)) {
+      const target = await findOutsideOwnerByPlate(newPlate);
+      if (target && target.isAvailable === false) {
+        return {
+          success: false,
+          error: `Vehicle ${target.plateNumber} is currently marked Unavailable by the owner.`,
+        };
+      }
+    }
+
+    // Starting a trip by hand follows the same one-primary rule as the Driver App
+    let startPlan: { role: "primary" | "return"; parentBookingId: string } | null = null;
+    if (status === "in_transit" && existingBooking && !isActiveTrip(existingBooking)) {
+      try {
+        startPlan = await planTrip({
+          ...existingBooking,
+          assignedPlate: newPlate || existingBooking.assignedPlate,
+          assignedDriverId: sanitizedAssignment?.assignedDriverId || existingBooking.assignedDriverId,
+        });
+      } catch (e) {
+        if (e instanceof TripError) return { success: false, error: e.message };
+        throw e;
+      }
+    }
+
+    if (isNewCancellation && existingBooking) {
+      await recordReversal(existingBooking, cancelReason);
+    } else if (existingBooking?.status === "cancelled" && status !== "cancelled") {
+      await voidReversals(id);
+    }
+
+    let updatedLocal = await updateBookingStatusInStore(id, status, sanitizedAssignment, paymentMeta);
 
     // Backfill from Firestore if the booking existed in Firestore only and not yet in local store
     if (!updatedLocal) {
@@ -1161,7 +1243,7 @@ export async function updateBookingStatusAction(
             ...(paymentMeta || {}),
             updatedAt: Date.now(),
           });
-          updatedLocal = upsertBookingInStore(mapped);
+          updatedLocal = await upsertBookingInStore(mapped);
         }
       } catch {
         // fallback handled below
@@ -1214,14 +1296,14 @@ export async function updateBookingStatusAction(
       updatedLocal?.assignedPlate ||
       ""
     ).trim().toUpperCase();
-    const outsideOwner = effectivePlate ? getStoredOutsideEmployeeByPlate(effectivePlate) : null;
+    const outsideOwner = effectivePlate ? await findOutsideOwnerByPlate(effectivePlate) : null;
     if (outsideOwner) {
       effectiveAssignment.assignedDriverId = outsideOwner.driverId || outsideOwner.id;
       effectiveAssignment.assignedDriverName = outsideOwner.name;
       effectiveAssignment.assignedDriverPhone = outsideOwner.phone;
       effectiveAssignment.assignedPlate = outsideOwner.plateNumber;
     } else if (effectivePlate) {
-      const storeLorries = getAllStoredLorries();
+      const storeLorries = await getAllStoredLorries();
       const matchedL = storeLorries.find((l: StoredLorry) => normalizePlate(l.plate) === normalizePlate(effectivePlate));
       if (matchedL && (matchedL.isOutsideLorry || matchedL.ownershipType === "outside")) {
         effectiveAssignment.assignedDriverId = matchedL.driverId || "";
@@ -1231,61 +1313,9 @@ export async function updateBookingStatusAction(
       }
     }
 
-    // Outside Lorry 20% commission check & deduction on booking confirmation
-    const isConfirmedStatus =
-      ["accepted", "assigned", "booked"].includes(status) ||
-      Boolean(paymentMeta?.paymentApprovedAt) ||
-      paymentMeta?.paymentSlipStatus === "approved" ||
-      paymentMeta?.paymentSlipStatus === "manual_approved";
-
-    if (isConfirmedStatus && effectivePlate && outsideOwner) {
-      const hireAmount = Number(
-        paymentMeta?.quotedAmount ??
-        updatedLocal?.quotedAmount ??
-        0
-      );
-      if (hireAmount > 0) {
-        const commissionCheck = checkOutsideLorryBookingEligibility(effectivePlate, hireAmount);
-        if (commissionCheck.isOutside && !commissionCheck.allowed) {
-          return {
-            success: false,
-            error: commissionCheck.reason || "Outside vehicle owner has insufficient balance for 20% commission. Top-up required.",
-          };
-        }
-        // Deduct 20% commission
-        const deductResult = deductCommissionForBookingInStore(id, hireAmount, effectivePlate);
-        if (deductResult.success && deductResult.isOutside && deductResult.deductedAmount) {
-          try {
-            const txId = `TX-${Date.now()}-${id}`;
-            await setDoc(doc(db, "commission_transactions", txId), {
-              id: txId,
-              employeeId: outsideOwner.id,
-              idNumber: outsideOwner.idNumber,
-              bookingId: id,
-              type: "commission_deduction",
-              hireAmount,
-              commissionRate: 20,
-              amount: -deductResult.deductedAmount,
-              balanceAfter: deductResult.newBalance,
-              note: `20% Commission for Booking ${id} (Hire: LKR ${hireAmount.toLocaleString()})`,
-              createdAt: Date.now(),
-            });
-            await updateDoc(doc(db, "outside_employees", outsideOwner.id), {
-              balance: deductResult.newBalance,
-              totalCommissionDeducted: (outsideOwner.totalCommissionDeducted || 0) + deductResult.deductedAmount,
-              totalHiresCompleted: (outsideOwner.totalHiresCompleted || 0) + 1,
-              updatedAt: Date.now(),
-            });
-          } catch (e) {
-            console.warn("Firestore commission deduction sync notice:", e);
-          }
-        }
-      }
-    }
-
     if (updatedLocal && (Object.keys(effectiveAssignment).length > 0 || paymentMeta)) {
       updatedLocal =
-        updateBookingStatusInStore(id, status, effectiveAssignment, paymentMeta) || updatedLocal;
+        await updateBookingStatusInStore(id, status, effectiveAssignment, paymentMeta) || updatedLocal;
     }
 
     // Authoritative awaited Firestore update (merge by doc ID + normalize any legacy trackingId doc)
@@ -1361,6 +1391,22 @@ export async function updateBookingStatusAction(
         if (paymentMeta.paymentSlipDeletedAt !== undefined) updateFields.paymentSlipDeletedAt = paymentMeta.paymentSlipDeletedAt;
       }
 
+      if (effectivePlate) updateFields.externalOwnerId = outsideOwner?.id || "";
+
+      if (startPlan) {
+        updateFields.tripRole = startPlan.role;
+        updateFields.parentBookingId = startPlan.parentBookingId;
+        updateFields.rideStartedAt = Date.now();
+        updateFields.rideEndedAt = 0;
+      }
+      if (["delivered", "completed"].includes(status) && !existingBooking?.rideEndedAt) {
+        updateFields.rideEndedAt = Date.now();
+      }
+      // A new assignment must be accepted afresh, so clear an old "declined" mark
+      if (status === "assigned" && existingBooking?.driverTripStatus === "declined") {
+        updateFields.driverTripStatus = "pending_acceptance";
+      }
+
       const docRef = doc(db, "bookings", id);
       await setDoc(docRef, updateFields, { merge: true });
       firestoreOk = true;
@@ -1410,13 +1456,39 @@ export async function updateBookingStatusAction(
       return { success: false, error: "Booking record not found." };
     }
 
+    if (isNewCancellation) {
+      const record: StoredComplaint = {
+        id: `complaint-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+        bookingId: id,
+        customerName: existingBooking?.customerName || "Customer",
+        customerPhone: existingBooking?.customerPhone || "",
+        customerIdNumber: existingBooking?.customerIdNumber || "",
+        pickupCity: existingBooking?.pickupCity || "",
+        deliveryCity: existingBooking?.deliveryCity || "",
+        date: existingBooking?.date || "",
+        vehicleType: existingBooking?.vehicleType || "",
+        quotedAmount: existingBooking?.quotedAmount ?? 0,
+        distanceKm: existingBooking?.distanceKm ?? 0,
+        reason: `Cancelled: ${cancelReason}`,
+        deletedAt: Date.now(),
+        deletedBy: "Admin",
+      };
+      await recordComplaintInStore(record);
+      await setDoc(doc(db, "complaints", record.id), JSON.parse(JSON.stringify(record)));
+    }
+
+    if (firestoreOk) {
+      await settleCommissionSafely(id);
+      await refreshTripsSafely(existingBooking?.assignedPlate, effectiveAssignment.assignedPlate);
+    }
+
     const resultBooking: StoredBooking = updatedLocal || {
       id,
       customerName: "Customer",
       customerPhone: "",
       pickupCity: "",
       deliveryCity: "",
-      date: new Date().toISOString().split("T")[0],
+      date: todayYmd(),
       vehicleType: "Lorry",
       status,
       ...effectiveAssignment,
@@ -1481,13 +1553,13 @@ export async function editBookingAction(
     // Resolve outside vehicle driver lock
     const targetPlate = (updates.assignedPlate || "").trim().toUpperCase();
     if (targetPlate) {
-      const outsideEmp = getStoredOutsideEmployeeByPlate(targetPlate);
+      const outsideEmp = await findOutsideOwnerByPlate(targetPlate);
       if (outsideEmp) {
         updates.assignedDriverId = outsideEmp.driverId || outsideEmp.id;
         updates.assignedDriverName = outsideEmp.name;
         updates.assignedDriverPhone = outsideEmp.phone;
       } else {
-        const storeLorries = getAllStoredLorries();
+        const storeLorries = await getAllStoredLorries();
         const matchedL = storeLorries.find((l) => normalizePlate(l.plate) === normalizePlate(targetPlate));
         if (matchedL && (matchedL.isOutsideLorry || matchedL.ownershipType === "outside")) {
           updates.assignedDriverId = matchedL.driverId || "";
@@ -1497,7 +1569,7 @@ export async function editBookingAction(
       }
     }
 
-    const updated = updateBookingInStore(cleanId, updates);
+    const updated = await updateBookingInStore(cleanId, updates);
 
     // Sync to Firestore
     try {
@@ -1508,6 +1580,9 @@ export async function editBookingAction(
     } catch (e) {
       console.warn("Firestore editBookingAction updateDoc notice:", e);
     }
+
+    // A changed fare or vehicle posts the commission difference
+    await settleCommissionSafely(cleanId);
 
     try {
       revalidatePath("/admin");
@@ -1534,16 +1609,24 @@ export async function startRideAction(bookingId: string): Promise<ActionResult<S
     const cleanId = (bookingId || "").trim();
     if (!cleanId) return { success: false, error: "Booking ID required." };
 
+    const snap = await getDoc(doc(db, "bookings", cleanId));
+    if (!snap.exists()) return { success: false, error: "Booking not found." };
+    const current = mapFirestoreBooking(snap.id, snap.data());
+    const plan = await planTrip(current).catch((e) => (e instanceof TripError ? e : Promise.reject(e)));
+    if (plan instanceof TripError) return { success: false, error: plan.message };
+
     const now = Date.now();
-    const updated = updateBookingInStore(cleanId, {
+    const updated = await updateBookingInStore(cleanId, {
       status: "in_transit",
       rideStartedAt: now,
       driverTripStatus: "in_transit",
+      tripRole: plan.role,
+      parentBookingId: plan.parentBookingId,
     });
 
     const targetLorry = updated?.assignedLorryId || updated?.assignedPlate;
     if (targetLorry) {
-      updateLorryStatusInStore(targetLorry, "on_trip");
+      await updateLorryStatusInStore(targetLorry, "on_trip");
     }
 
     try {
@@ -1551,8 +1634,12 @@ export async function startRideAction(bookingId: string): Promise<ActionResult<S
         status: "in_transit",
         rideStartedAt: now,
         driverTripStatus: "in_transit",
+        tripRole: plan.role,
+        parentBookingId: plan.parentBookingId,
+        rideEndedAt: 0,
         updatedAt: now,
       });
+      await refreshTripsSafely(current.assignedPlate);
     } catch (e) {
       console.warn("Firestore startRideAction notice:", e);
     }
@@ -1583,8 +1670,11 @@ export async function endRideAction(
     const cleanId = (bookingId || "").trim();
     if (!cleanId) return { success: false, error: "Booking ID required." };
 
-    const store = getAllStoredBookings();
-    const booking = store.find((b) => b.id === cleanId);
+    let booking = (await getStoredBooking(cleanId)) || undefined;
+    if (!booking) {
+      const snap = await getDoc(doc(db, "bookings", cleanId));
+      if (snap.exists()) booking = mapFirestoreBooking(snap.id, snap.data());
+    }
     if (!booking) return { success: false, error: "Booking not found." };
 
     const isPending =
@@ -1602,10 +1692,11 @@ export async function endRideAction(
         (booking as any).paymentStatus !== "paid" &&
         (booking as any).paymentStatusMode !== "success");
 
-    const targetStatus: BookingStatusValue = isPending ? "delivered" : "completed";
+    const ownerCollects = Boolean(await findOutsideOwnerByPlate(booking.assignedPlate || ""));
+    const targetStatus: BookingStatusValue = isPending && !ownerCollects ? "delivered" : "completed";
     const now = Date.now();
 
-    const updated = updateBookingInStore(cleanId, {
+    const updated = await updateBookingInStore(cleanId, {
       status: targetStatus,
       rideEndedAt: now,
       driverTripStatus: "completed",
@@ -1613,7 +1704,7 @@ export async function endRideAction(
 
     const targetLorry = updated?.assignedLorryId || updated?.assignedPlate;
     if (targetLorry) {
-      updateLorryStatusInStore(targetLorry, "empty");
+      await updateLorryStatusInStore(targetLorry, "empty");
     }
 
     try {
@@ -1623,6 +1714,9 @@ export async function endRideAction(
         driverTripStatus: "completed",
         updatedAt: now,
       });
+      await closeDispatchesForBooking(cleanId, targetStatus);
+      await settleCommissionSafely(cleanId);
+      await refreshTripsSafely(booking.assignedPlate);
     } catch (e) {
       console.warn("Firestore endRideAction notice:", e);
     }
@@ -1655,17 +1749,15 @@ export async function driverAcceptBookingAction(
 ): Promise<ActionResult<StoredBooking>> {
   try {
     const cleanId = (bookingId || "").trim();
-    const updated = updateBookingInStore(cleanId, {
-      driverTripStatus: accept ? "accepted" : "declined",
-    });
-    try {
-      await updateDoc(doc(db, "bookings", cleanId), {
-        driverTripStatus: accept ? "accepted" : "declined",
-        updatedAt: Date.now(),
-      });
-    } catch (e) {
-      console.warn("Firestore driverAcceptBookingAction notice:", e);
+    const dispatchId = `dispatch-${cleanId}`;
+    const dispatch = (await getDoc(doc(db, "dispatches", dispatchId))).data();
+    if (!dispatch?.driverId) {
+      return { success: false, error: "No job has been dispatched to a driver for this booking yet." };
     }
+    const result = await performTripAction(dispatchId, accept ? "accept" : "decline", {
+      driverId: String(dispatch.driverId),
+    });
+    const updated = await updateBookingInStore(cleanId, result.bookingPatch);
     try {
       revalidatePath("/admin");
       revalidatePath("/login");
@@ -1673,7 +1765,7 @@ export async function driverAcceptBookingAction(
     } catch { }
     return { success: true, data: updated || ({} as StoredBooking) };
   } catch (err: unknown) {
-    return { success: false, error: "Failed to update trip status." };
+    return { success: false, error: err instanceof TripError ? err.message : "Failed to update trip status." };
   }
 }
 
@@ -1688,7 +1780,7 @@ export async function driverUpdateTripRouteAction(
 ): Promise<ActionResult<StoredBooking>> {
   try {
     const cleanId = (bookingId || "").trim();
-    const updated = updateBookingInStore(cleanId, {
+    const updated = await updateBookingInStore(cleanId, {
       waypoints,
       actualDistanceKm: Number(actualDistanceKm),
     });
@@ -1730,35 +1822,35 @@ export async function driverShareLiveGpsAction(
 
     // 1. Update lorry live GPS
     if (lorryId) {
-      updateLorryGpsInStore(lorryId, lat, lng, heading, speedKmH);
+      await updateLorryGpsInStore(lorryId, lat, lng, heading, speedKmH);
     }
 
     // 2. Automatically make ride Ongoing if not already ongoing
-    const store = getAllStoredBookings();
+    const store = await getAllStoredBookings();
     const current = store.find((b) => b.id === cleanId);
-    const needStart =
+    let needStart = Boolean(
       current &&
       current.status !== "in_transit" &&
       current.status !== "delivered" &&
-      current.status !== "completed";
+      current.status !== "completed");
+    if (needStart && current) {
+      needStart = await planTrip(current).then(() => true, () => false);
+    }
 
-    const partialUpdates: Partial<StoredBooking> = {
-      pickupLat: lat,
-      pickupLng: lng,
-    };
+    const partialUpdates: Partial<StoredBooking> = {};
     if (needStart) {
       partialUpdates.status = "in_transit";
       partialUpdates.rideStartedAt = now;
       partialUpdates.driverTripStatus = "in_transit";
     }
 
-    const updated = updateBookingInStore(cleanId, partialUpdates);
+    const updated = await updateBookingInStore(cleanId, partialUpdates);
 
     // 3. Sync to Firestore
     try {
       const fsPayload: Record<string, any> = {
-        lat,
-        lng,
+        driverLat: lat,
+        driverLng: lng,
         updatedAt: now,
       };
       if (needStart) {
@@ -1767,6 +1859,7 @@ export async function driverShareLiveGpsAction(
         fsPayload.driverTripStatus = "in_transit";
       }
       await updateDoc(doc(db, "bookings", cleanId), fsPayload);
+      if (needStart) await refreshTripsSafely(current?.assignedPlate);
 
       // Also update lorry live record
       if (lorryId) {
@@ -1813,7 +1906,7 @@ export async function driverToggleEmptyReturnAction(
     const cleanId = (bookingId || "").trim();
     const now = Date.now();
 
-    const updated = updateBookingInStore(cleanId, {
+    const updated = await updateBookingInStore(cleanId, {
       isEmptyReturnActive: startEmptyReturn,
       emptyReturnDistanceKm: returnDistanceKm,
       emptyReturnRoute: returnRoute,
@@ -1821,7 +1914,7 @@ export async function driverToggleEmptyReturnAction(
     });
 
     if (lorryId) {
-      updateLorryStatusInStore(lorryId, startEmptyReturn ? "empty" : "on_trip");
+      await updateLorryStatusInStore(lorryId, startEmptyReturn ? "empty" : "on_trip");
     }
 
     try {
@@ -1860,7 +1953,7 @@ export async function getDriverAssignedBookingsAction(
     const cleanPlateNorm = normalizePlate(clean);
     if (!clean) return { success: true, data: [] };
 
-    const store = getAllStoredBookings();
+    const store = await getAllStoredBookings();
     const matched = store.filter((b) => {
       const bDriverId = (b.assignedDriverId || "").trim().toLowerCase();
       const bPlateNorm = normalizePlate(b.assignedPlate || b.selectedVehiclePlate);
@@ -1903,7 +1996,7 @@ export async function deleteBookingAction(
     }
 
     // 1. Fetch booking details to record in complaints before deleting
-    let targetBooking = getAllStoredBookings().find((b) => b.id === cleanId);
+    let targetBooking = (await getStoredBooking(cleanId)) || undefined;
     if (!targetBooking) {
       try {
         const snap = await getDoc(doc(db, "bookings", cleanId));
@@ -1925,7 +2018,7 @@ export async function deleteBookingAction(
       customerIdNumber: targetBooking?.customerIdNumber || "",
       pickupCity: targetBooking?.pickupCity || "",
       deliveryCity: targetBooking?.deliveryCity || "",
-      date: targetBooking?.date || new Date().toISOString().split("T")[0],
+      date: targetBooking?.date || todayYmd(),
       vehicleType: targetBooking?.vehicleType || "",
       quotedAmount: targetBooking?.quotedAmount,
       distanceKm: targetBooking?.distanceKm,
@@ -1934,16 +2027,22 @@ export async function deleteBookingAction(
       deletedBy: deletedBy || "Admin",
     };
 
-    recordComplaintInStore(complaint);
+    await recordComplaintInStore(complaint);
 
-    try {
-      await setDoc(doc(db, "complaints", complaintId), complaint);
-    } catch (compErr) {
-      console.warn("Firestore save complaint notice:", compErr);
+    // If the audit record cannot be saved, the booking is not deleted
+    await setDoc(
+      doc(db, "complaints", complaintId),
+      JSON.parse(JSON.stringify(complaint))
+    );
+
+    if (targetBooking) {
+      // Money already received and commission already charged are reversed on record
+      await recordReversal(targetBooking, cleanReason);
+      await syncHireCommission(cleanId, "cancelled");
     }
 
     // 3. Delete from local server file store
-    deleteBookingFromStore(cleanId);
+    await deleteBookingFromStore(cleanId);
 
     // 4. Delete from Firestore bookings collection
     try {
@@ -1976,6 +2075,8 @@ export async function deleteBookingAction(
       console.warn("Firestore delete dispatch warning:", dispErr);
     }
 
+    await refreshTripsSafely(targetBooking?.assignedPlate);
+
     // 6. Revalidate pages
     try {
       revalidatePath("/admin");
@@ -2005,7 +2106,7 @@ export async function deleteBookingAction(
  */
 export async function getAllComplaintsAction(): Promise<ActionResult<StoredComplaint[]>> {
   try {
-    const localComplaints = getAllStoredComplaints();
+    const localComplaints = await getAllStoredComplaints();
     const map = new Map<string, StoredComplaint>();
     localComplaints.forEach((c) => map.set(c.id, c));
 
@@ -2031,5 +2132,24 @@ export async function getAllComplaintsAction(): Promise<ActionResult<StoredCompl
       success: false,
       error: "Failed to fetch complaints.",
     };
+  }
+}
+
+/** Commission problems are logged, never allowed to undo a saved booking change. */
+async function settleCommissionSafely(bookingId: string, statusOverride?: "cancelled"): Promise<void> {
+  try {
+    await syncHireCommission(bookingId, statusOverride);
+  } catch (e) {
+    console.error(`Commission sync failed for booking ${bookingId}:`, e);
+  }
+}
+
+async function refreshTripsSafely(...plates: Array<string | undefined>): Promise<void> {
+  for (const plate of new Set(plates.filter(Boolean))) {
+    try {
+      await refreshVehicleTripState(plate);
+    } catch (e) {
+      console.error(`Live trip state refresh failed for ${plate}:`, e);
+    }
   }
 }

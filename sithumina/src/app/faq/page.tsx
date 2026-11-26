@@ -45,7 +45,6 @@ export default function FAQPage() {
     <main className="p-4 lg:p-[24px_32px] flex flex-col gap-6 max-w-3xl">
       <div className="flex flex-col gap-2">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[var(--y3)] text-[#5B4300] text-xs font-bold w-fit border border-[var(--y2)]">
-          <span>❓</span>
           <span>{locale === "en" ? "Common Questions" : "ප්‍රශ්න සහ පිළිතුරු"}</span>
         </div>
         <h1 className="text-2xl lg:text-3xl font-extrabold text-[var(--ink)]">

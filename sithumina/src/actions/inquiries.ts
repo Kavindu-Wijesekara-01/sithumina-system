@@ -34,7 +34,7 @@ export async function submitInquiryAction(
       return { success: false, error: "Please enter your message or cargo details." };
     }
 
-    const inquiry = addInquiryInStore({
+    const inquiry = await addInquiryInStore({
       name,
       phone,
       email,
@@ -110,7 +110,7 @@ export async function getAllInquiriesAction(): Promise<ActionResult<StoredInquir
         .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
       return { success: true, data: inquiries };
     } catch {
-      const inquiries = getAllStoredInquiries();
+      const inquiries = await getAllStoredInquiries();
       return { success: true, data: inquiries };
     }
   } catch (err: unknown) {
@@ -134,7 +134,7 @@ export async function updateInquiryStatusAction(
       return { success: false, error: "Inquiry ID is required." };
     }
 
-    const updatedLocal = updateInquiryStatusInStore(id, status);
+    const updatedLocal = await updateInquiryStatusInStore(id, status);
     let firestoreOk = false;
     try {
       await setDoc(

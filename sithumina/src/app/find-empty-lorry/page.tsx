@@ -11,15 +11,13 @@ import { Lorry } from "@/lib/mock-lorries";
 
 export default function FindEmptyLorryPage() {
   const { locale } = useLanguage();
-  const { lorries: liveLorries, loading } = useLiveLorries();
+  const { lorries: liveLorries, loading } = useLiveLorries({ onlyOngoing: true });
   const [searchTerm, setSearchTerm] = useState("");
   const [activeModalLorry, setActiveModalLorry] = useState<Lorry | null>(null);
   const [bookingLorry, setBookingLorry] = useState<Lorry | null>(null);
 
-  // Strictly filter only lorries that are actively LIVE from the driver app with status === "empty"
-  const emptyLorries = liveLorries.filter(
-    (l) => l.status === "empty" && l.isLive === true
-  );
+  // Only vehicles on an ongoing trip with live GPS can take a return booking
+  const emptyLorries = liveLorries.filter((l) => l.isLive === true);
 
   const filtered = emptyLorries.filter(
     (l) =>
@@ -38,20 +36,20 @@ export default function FindEmptyLorryPage() {
           <span>
             {loading
               ? locale === "en"
-                ? "Checking live empty lorries..."
+                ? "Checking lorries on the road..."
                 : "සජීවී හිස් ලොරි පරීක්ෂා කරමින්..."
               : `${emptyLorries.length} ${
-                  locale === "en" ? "Empty Lorries Available Now" : "හිස් ලොරි සූදානම්"
+                  locale === "en" ? "Lorries On Trip Now" : "ගමන් කරන ලොරි"
                 }`}
           </span>
         </div>
         <h1 className="text-2xl lg:text-3xl font-extrabold text-[var(--ink)] tracking-tight">
-          {locale === "en" ? "Available Empty Return Lorries" : "ආපසු පැමිණෙන හිස් ලොරි"}
+          {locale === "en" ? "Book a Return Trip" : "ආපසු ගමනක් වෙන්කරන්න"}
         </h1>
         <p className="text-[var(--mut)] text-sm leading-relaxed max-w-2xl">
           {locale === "en"
-            ? "Book empty return lorries at discounted rates across Sri Lanka. Instant direct contact with drivers and live GPS route tracking."
-            : "දිවයින පුරා ආපසු පැමිණෙන හිස් ලොරි අඩු ගාස්තු යටතේ වෙන්කරවා ගන්න. සෘජුවම රියදුරු සම්බන්ධ කරගැනීමේ සහ සජීවී මාර්ග සිතියම් පහසුකම."}
+            ? "These lorries are on a trip right now with live GPS. Book one for a return or on-the-way load."
+            : "මෙම ලොරි දැන් ගමනක යෙදී සිටී. ආපසු හෝ මගදී බඩු ප්‍රවාහනයකට වෙන්කරන්න."}
         </p>
       </div>
 
@@ -108,13 +106,13 @@ export default function FindEmptyLorryPage() {
           </div>
           <span className="font-extrabold text-base text-[var(--ink)]">
             {searchTerm
-              ? (locale === "en" ? "No Live Empty Lorries Match Your Search" : "ගැලපෙන සජීවී හිස් ලොරි රථ හමු නොවීය")
-              : (locale === "en" ? "No Empty Return Lorries Live Right Now" : "දැනට සජීවීව ධාවනය වන හිස් ලොරි රථ නොමැත")}
+              ? (locale === "en" ? "No Lorries On Trip Match Your Search" : "ගැලපෙන ලොරි රථ හමු නොවීය")
+              : (locale === "en" ? "No Lorries On Trip Right Now" : "දැනට ගමනක යෙදෙන ලොරි රථ නොමැත")}
           </span>
           <span className="text-xs text-[var(--mut)] max-w-md leading-relaxed">
             {locale === "en"
-              ? "Drivers broadcast their empty return runs live from the Sithumina Driver App. You can also view all registered vehicles to reserve a lorry in advance."
-              : "රියදුරන් තම හිස් ලොරි ධාවනය සජීවීව Driver App එක හරහා විකාශනය කරයි. ලියාපදිංචි වාහනයක් කල්තියා වෙන්කර ගැනීමට වාහන ලැයිස්තුවට පිවිසෙන්න."}
+              ? "Lorries appear here only while they are on an ongoing trip. You can also reserve a registered vehicle in advance."
+              : "ලොරි රථ මෙහි දිස්වන්නේ ගමනක යෙදී සිටින විට පමණි. ලියාපදිංචි වාහනයක් කල්තියා වෙන්කළ හැක."}
           </span>
           <Link
             href="/book-vehicle"

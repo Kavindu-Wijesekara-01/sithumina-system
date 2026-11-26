@@ -26,7 +26,7 @@ export async function GET() {
     return NextResponse.json({ success: true, customers });
   } catch (err) {
     console.warn("Firestore customers GET fallback to local store:", err);
-    const customers = getAllStoredCustomers();
+    const customers = await getAllStoredCustomers();
     return NextResponse.json({ success: true, customers });
   }
 }
@@ -43,7 +43,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const customer = upsertCustomerInStore({
+    const customer = await upsertCustomerInStore({
       name: name || "Customer",
       phone,
       email,

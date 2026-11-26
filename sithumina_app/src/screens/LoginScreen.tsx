@@ -103,7 +103,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
           <View style={styles.formContainer}>
             {/* Input Field */}
             <View style={styles.inputContainer}>
-              <Text style={styles.inputIcon}>🪪</Text>
               <TextInput
                 style={styles.textInput}
                 placeholder="Enter ID (e.g. D-10, R-10)"
@@ -122,7 +121,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
             {/* Error Message */}
             {errorMessage && (
               <View style={styles.errorContainer}>
-                <Text style={styles.errorText}>⚠️ {errorMessage}</Text>
+                <Text style={styles.errorText}>{errorMessage}</Text>
               </View>
             )}
 

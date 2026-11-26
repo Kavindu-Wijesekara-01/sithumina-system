@@ -32,6 +32,8 @@ export interface BookingActionInput {
   pickupLng?: number;
   deliveryLat?: number;
   deliveryLng?: number;
+  pickupPinned?: boolean;
+  dropoffPinned?: boolean;
   bookingType?: "individual_vehicle" | "live_lorry";
   cargoNature?: string;
   daysNeeded?: number | string;
@@ -65,6 +67,7 @@ export interface VehicleRegistrationActionInput {
   dimensions?: string;
   images?: string[];
   depositSlipUrl?: string;
+  depositBank?: string;
   initialDepositAmount?: number;
 }
 

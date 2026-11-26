@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAllStoredComplaints, deleteStoredComplaint } from "@/lib/server-store";
+import { getAllStoredComplaints } from "@/lib/server-store";
 import { db } from "@/lib/firebase";
 import { collection, getDocs, doc, deleteDoc } from "firebase/firestore";
 
@@ -30,45 +30,17 @@ export async function GET() {
 
       return NextResponse.json({ success: true, complaints });
     }
-    const local = getAllStoredComplaints();
+    const local = await getAllStoredComplaints();
     return NextResponse.json({ success: true, complaints: local });
   } catch {
-    const local = getAllStoredComplaints();
+    const local = await getAllStoredComplaints();
     return NextResponse.json({ success: true, complaints: local });
   }
 }
 
-export async function DELETE(request: Request) {
-  try {
-    const { searchParams } = new URL(request.url);
-    let id = searchParams.get("id");
-
-    if (!id) {
-      try {
-        const body = await request.json();
-        id = body?.id;
-      } catch {}
-    }
-
-    if (!id) {
-      return NextResponse.json(
-        { success: false, error: "Complaint ID is required." },
-        { status: 400 }
-      );
-    }
-
-    deleteStoredComplaint(id);
-
-    try {
-      await deleteDoc(doc(db, "complaints", id));
-    } catch (e) {
-      console.warn("Firestore delete complaint notice:", e);
-    }
-
-    return NextResponse.json({ success: true, message: "Complaint record deleted successfully." });
-  } catch (error: unknown) {
-    const errMessage =
-      error instanceof Error ? error.message : "Failed to delete complaint record";
-    return NextResponse.json({ success: false, error: errMessage }, { status: 500 });
-  }
+export async function DELETE() {
+  return NextResponse.json(
+    { success: false, error: "Cancellation and deletion records are permanent." },
+    { status: 405 }
+  );
 }

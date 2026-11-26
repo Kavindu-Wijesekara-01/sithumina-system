@@ -5,6 +5,7 @@ import {
   updateRegistrationStatusInStore,
 } from "@/lib/server-store";
 import { db } from "@/lib/firebase";
+import { OwnerError, approveOwnerRegistration } from "@/lib/outside-owners";
 import { collection, getDocs, doc, setDoc } from "firebase/firestore";
 
 export async function GET() {
@@ -33,7 +34,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const registration = addRegistrationInStore({
+    const registration = await addRegistrationInStore({
       ownerName,
       phone,
       vehicleNumber,
@@ -86,7 +87,24 @@ export async function PATCH(request: Request) {
       );
     }
 
-    const updated = updateRegistrationStatusInStore(id, status);
+    if (status === "approved") {
+      try {
+        const { employee } = await approveOwnerRegistration(id);
+        await updateRegistrationStatusInStore(id, status);
+        return NextResponse.json({
+          success: true,
+          registration: { id, status, outsideEmployeeId: employee.id },
+        });
+      } catch (e) {
+        console.error("Registration approval failed:", e);
+        return NextResponse.json(
+          { success: false, error: e instanceof OwnerError ? e.message : "Failed to approve registration." },
+          { status: e instanceof OwnerError ? 409 : 500 }
+        );
+      }
+    }
+
+    const updated = await updateRegistrationStatusInStore(id, status);
 
     // Sync status to Firestore
     try {

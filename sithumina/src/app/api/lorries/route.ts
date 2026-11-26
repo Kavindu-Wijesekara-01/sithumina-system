@@ -90,7 +90,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ success: true, lorries: Array.from(byPlate.values()) });
     } catch (err) {
       console.warn("Firestore fleet GET fallback to local store:", err);
-      const lorries = getAllFleetVehicles();
+      const lorries = await getAllFleetVehicles();
       return NextResponse.json({ success: true, lorries });
     }
   }
@@ -130,7 +130,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ success: true, lorries: Array.from(merged.values()) });
   } catch (err) {
     console.warn("Firestore live lorries GET fallback to local store:", err);
-    const lorries = getAllStoredLorries();
+    const lorries = await getAllStoredLorries();
     return NextResponse.json({ success: true, lorries });
   }
 }
@@ -179,7 +179,7 @@ export async function POST(request: Request) {
         ? rawResolvedDriver
         : "";
 
-    const lorry = upsertLorryInStore({
+    const lorry = await upsertLorryInStore({
       id: docId,
       lorryId: docId,
       plate: cleanPlate,
@@ -250,7 +250,7 @@ export async function DELETE(request: Request) {
       );
     }
 
-    const deleted = deleteLorryFromStore(id);
+    const deleted = await deleteLorryFromStore(id);
 
     const rawTrim = id.trim();
     const cleanAlnum = rawTrim.replace(/^lorry-/i, "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();

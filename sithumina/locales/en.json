@@ -44,19 +44,19 @@
     {
       "title": "Lorries you can see, live",
       "subtitle": "Follow your load from pickup to delivery.",
-      "emoji": "🚚",
+      "emoji": "",
       "bg": "#FFC20E"
     },
     {
       "title": "Empty lorry nearby?",
       "subtitle": "Find one on the map in seconds.",
-      "emoji": "📍",
+      "emoji": "",
       "bg": "#FFD54A"
     },
     {
       "title": "Own a lorry?",
       "subtitle": "Register your vehicle and get more trips.",
-      "emoji": "🚛",
+      "emoji": "",
       "bg": "#FFE08A"
     }
   ],

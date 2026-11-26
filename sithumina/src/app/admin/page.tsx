@@ -147,6 +147,7 @@ import {
   deleteCustomerAction,
 
   getAllOutsideEmployeesAction,
+  registerOutsideEmployeeManuallyAction,
 
   getAllTopupSlipsAction,
 
@@ -167,6 +168,17 @@ import { SRI_LANKA_CITIES } from "@/lib/sri-lanka-routes";
 import { getDistanceFromLatLonInKm } from "@/lib/geo-utils";
 
 
+
+import { formatRs } from "@/lib/commission";
+import TripDetails from "@/components/TripDetails";
+import { groupTrips, isActiveTrip, tripFields } from "@/lib/trip-state";
+import { isTripFinished, outstandingAmount, paymentEntries, periodRange, revenueLines, summarise, todayYmd, withExternalOwners } from "@/lib/ledger";
+import { useLedger } from "@/components/admin/useLedger";
+import DeclineAlerts from "@/components/admin/DeclineAlerts";
+import { PaidIntoSelect } from "@/components/admin/WalletPayments";
+import TripGroupList from "@/components/admin/TripGroupList";
+import RevenuePanel from "@/components/admin/RevenuePanel";
+import PerformancePanel from "@/components/admin/PerformancePanel";
 
 const ADMIN_PIN = process.env.NEXT_PUBLIC_ADMIN_PIN || "ST@2024";
 
@@ -904,7 +916,7 @@ export default function MasterAdminDashboard() {
 
   // ---- Section Data States ----
 
-  const [bookings, setBookings] = useState<StoredBooking[]>([]);
+  const [storedBookings, setBookings] = useState<StoredBooking[]>([]);
 
   const [loadingBookings, setLoadingBookings] = useState(true);
 
@@ -993,10 +1005,24 @@ export default function MasterAdminDashboard() {
   // ---- Outside Employees State ----
 
   const [outsideEmployees, setOutsideEmployees] = useState<OutsideEmployeeRecord[]>([]);
+  const bookings = useMemo(() => withExternalOwners(storedBookings, outsideEmployees), [storedBookings, outsideEmployees]);
 
   const [loadingOutsideEmployees, setLoadingOutsideEmployees] = useState(true);
 
   const [outsideSearch, setOutsideSearch] = useState("");
+
+  // ---- Manual Outside Employee Registration ----
+  const emptyOutsideForm = {
+    name: "", idNumber: "", phone: "", plateNumber: "", vehicleType: "14ft Lorry",
+    baseCity: "", initialBalance: "5000", status: "active" as "active" | "inactive" | "suspended",
+    isAvailable: true,
+    paidInto: "",
+  };
+  const [showOutsideRegModal, setShowOutsideRegModal] = useState(false);
+  const [outsideForm, setOutsideForm] = useState(emptyOutsideForm);
+  const [outsideFormErrors, setOutsideFormErrors] = useState<Record<string, string>>({});
+  const [outsideFormServerError, setOutsideFormServerError] = useState("");
+  const [submittingOutside, setSubmittingOutside] = useState(false);
 
   const [outsideFilter, setOutsideFilter] = useState<"all" | "available" | "unavailable" | "low_balance">("all");
 
@@ -1248,7 +1274,7 @@ export default function MasterAdminDashboard() {
 
     distanceKm: "",
 
-    date: new Date().toISOString().split("T")[0],
+    date: todayYmd(),
 
     startTime: "08:00",
 
@@ -1974,7 +2000,7 @@ export default function MasterAdminDashboard() {
 
       distanceKm: "",
 
-      date: new Date().toISOString().split("T")[0],
+      date: todayYmd(),
 
       startTime: "08:00",
 
@@ -2018,6 +2044,53 @@ export default function MasterAdminDashboard() {
 
     setTimeout(() => setToast(null), 3500);
 
+  };
+
+  const handleRegisterOutsideEmployee = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const f = outsideForm;
+    const errs: Record<string, string> = {};
+    if (f.name.trim().length < 2) errs.name = "Full name is required.";
+    if (!/^(\d{9}[vVxX]|\d{12})$/.test(f.idNumber.trim())) errs.idNumber = "Valid NIC required (e.g. 912345678V or 199112345678).";
+    if (!/^(\+94|0)?7\d{8}$/.test(f.phone.replace(/[\s-]/g, ""))) errs.phone = "Valid mobile number required (e.g. 0771234567).";
+    if (f.plateNumber.trim().length < 4) errs.plateNumber = "Vehicle number is required.";
+    const bal = Number(f.initialBalance);
+    if (!Number.isFinite(bal) || bal < 0) errs.initialBalance = "Must be 0 or more.";
+    if (bal > 0 && !f.paidInto) errs.paidInto = "Choose how the deposit was paid.";
+    setOutsideFormErrors(errs);
+    setOutsideFormServerError("");
+    if (Object.keys(errs).length) return;
+
+    setSubmittingOutside(true);
+    try {
+      const res = await registerOutsideEmployeeManuallyAction({
+        adminPin: ADMIN_PIN,
+        name: f.name,
+        idNumber: f.idNumber,
+        phone: f.phone,
+        plateNumber: f.plateNumber,
+        vehicleType: f.vehicleType,
+        baseCity: f.baseCity,
+        initialBalance: bal,
+        depositMethod: f.paidInto === "cash" ? "cash" : "bank",
+        depositBank: f.paidInto === "cash" ? "" : f.paidInto,
+        isAvailable: f.isAvailable,
+        status: f.status,
+      });
+      if (res.success) {
+        const created = res.data as unknown as OutsideEmployeeRecord;
+        setOutsideEmployees((prev) => [created, ...prev.filter((x) => x.id !== created.id)]);
+        showToast(res.message || "Outside employee registered.", "success");
+        setShowOutsideRegModal(false);
+        setOutsideForm(emptyOutsideForm);
+      } else {
+        setOutsideFormServerError(res.error);
+      }
+    } catch {
+      setOutsideFormServerError("Network error. Please try again.");
+    } finally {
+      setSubmittingOutside(false);
+    }
   };
 
 
@@ -2614,7 +2687,7 @@ export default function MasterAdminDashboard() {
 
             (Array.isArray(data.dates) && data.dates[0]) ||
 
-            new Date(data.createdAt || Date.now()).toISOString().split("T")[0];
+            todayYmd(data.createdAt || Date.now());
 
           const resolvedDates =
 
@@ -2794,11 +2867,9 @@ export default function MasterAdminDashboard() {
 
             waypoints: Array.isArray(data.waypoints) ? data.waypoints : undefined,
 
-            rideStartedAt: Number(data.rideStartedAt) || undefined,
 
-            rideEndedAt: Number(data.rideEndedAt) || undefined,
 
-            driverTripStatus: data.driverTripStatus,
+            ...tripFields(data),
 
             isEmptyReturnActive: Boolean(data.isEmptyReturnActive),
 
@@ -2918,7 +2989,7 @@ export default function MasterAdminDashboard() {
 
       const bDates = Array.isArray(b.dates) && b.dates.length > 0 ? b.dates : (b.date ? [b.date] : []);
 
-      const startDate = b.date || bDates[0] || new Date().toISOString().split("T")[0];
+      const startDate = b.date || bDates[0] || todayYmd();
 
       const endDate = bDates.length > 1 ? bDates[bDates.length - 1] : startDate;
 
@@ -3213,6 +3284,7 @@ export default function MasterAdminDashboard() {
         endTime?: string;
 
         distanceKm?: number;
+        cancelReason?: string;
 
       },
 
@@ -3249,6 +3321,15 @@ export default function MasterAdminDashboard() {
       }
 
     ): Promise<boolean> => {
+      if (status === "cancelled") {
+        const reason = window.prompt("Reason for cancelling this booking (required):")?.trim() || "";
+        if (reason.length < 3) {
+          showToast("The booking was not cancelled. A reason is required.", "error");
+          return false;
+        }
+        assignment = { ...(assignment || {}), cancelReason: reason };
+      }
+
 
       setActionLoading(id);
 
@@ -3773,46 +3854,39 @@ export default function MasterAdminDashboard() {
 
 
   const handleApproveSlipPayment = async (booking: StoredBooking) => {
+    // Paying for a trip that is already scheduled, running or finished only records the money
+    const awaitingPayment = ["pending", "awaiting_payment", "payment_submitted"].includes(booking.status);
+    const isBalance = Number(booking.advanceAmount) > 0 && Number(booking.pendingAmount) > 0;
 
     let scheduleAssignment: Parameters<typeof updateBookingStatusAction>[2] | undefined;
-
-    if (booking.bookingType !== "live_lorry") {
-
+    if (awaitingPayment && booking.bookingType !== "live_lorry") {
       const draft = getScheduleDraft(booking);
-
       const check = validateIndividualScheduleOrToast(booking.id, draft);
-
       if (!check.valid) return;
-
       scheduleAssignment = check.assignment;
-
     }
-
-    const targetStatus: BookingStatus =
-
-      booking.bookingType !== "live_lorry" ? "assigned" : "accepted";
-
+    const targetStatus = (
+      !awaitingPayment ? booking.status : booking.bookingType !== "live_lorry" ? "assigned" : "accepted"
+    ) as BookingStatus;
     const ok = await updateBooking(booking.id, targetStatus, scheduleAssignment, {
-
-      paymentMethod: "bank_slip",
-
+      ...(isBalance
+        ? {
+          finalPaymentMethod: "bank_slip" as const,
+          finalPaymentBankUsed: booking.finalPaymentBankUsed,
+          finalPaymentAt: Date.now(),
+          paymentApprovedAt: booking.paymentApprovedAt || Date.now(),
+        }
+        : { paymentMethod: "bank_slip" as const, paymentApprovedAt: Date.now() }),
+      pendingAmount: 0,
       paymentSlipStatus: "approved",
-
-      paymentApprovedAt: Date.now(),
-
       paymentRejectReason: "",
-
     });
-
     if (ok) {
-
       setManualStageDraft((prev) => ({ ...prev, [booking.id]: targetStatus }));
-
       closeReviewModal();
-
     }
-
   };
+
 
 
 
@@ -4208,7 +4282,7 @@ export default function MasterAdminDashboard() {
 
       quotedAmount: amt,
 
-      advanceAmount: amt,
+      advanceAmount: Number(booking.advanceAmount) > 0 && Number(booking.advanceAmount) < amt ? booking.advanceAmount : amt,
 
       pendingAmount: 0,
 
@@ -4356,7 +4430,7 @@ export default function MasterAdminDashboard() {
 
         const hasSlip = Boolean(booking.paymentSlipId && booking.paymentSlipStatus !== "deleted");
 
-        const shouldAutoApprove = !booking.paymentApprovedAt && booking.paymentSlipStatus !== "cash_pending";
+        const shouldAutoApprove = !booking.paymentApprovedAt && booking.paymentSlipStatus !== "cash_pending" && Boolean(booking.paymentSlipId) && booking.paymentSlipStatus !== "deleted";
 
         const ok = await updateBooking(
 
@@ -4410,7 +4484,7 @@ export default function MasterAdminDashboard() {
 
       const hasSlip = Boolean(booking.paymentSlipId && booking.paymentSlipStatus !== "deleted");
 
-      const shouldAutoApprove = !booking.paymentApprovedAt && booking.paymentSlipStatus !== "cash_pending";
+      const shouldAutoApprove = !booking.paymentApprovedAt && booking.paymentSlipStatus !== "cash_pending" && Boolean(booking.paymentSlipId) && booking.paymentSlipStatus !== "deleted";
 
       const ok = await updateBooking(
 
@@ -4478,7 +4552,7 @@ export default function MasterAdminDashboard() {
 
       const hasSlip = Boolean(booking.paymentSlipId && booking.paymentSlipStatus !== "deleted");
 
-      const shouldAutoApprove = !booking.paymentApprovedAt && booking.paymentSlipStatus !== "cash_pending";
+      const shouldAutoApprove = !booking.paymentApprovedAt && booking.paymentSlipStatus !== "cash_pending" && Boolean(booking.paymentSlipId) && booking.paymentSlipStatus !== "deleted";
 
       const ok = await updateBooking(
 
@@ -4776,7 +4850,7 @@ export default function MasterAdminDashboard() {
 
     const bDates = Array.isArray(booking.dates) && booking.dates.length > 0 ? booking.dates : (booking.date ? [booking.date] : []);
 
-    const bStartDate = draft.date || booking.date || bDates[0] || new Date().toISOString().split("T")[0];
+    const bStartDate = draft.date || booking.date || bDates[0] || todayYmd();
 
     const bEndDate = draft.endDate || (bDates.length > 1 ? bDates[bDates.length - 1] : bStartDate);
 
@@ -4858,7 +4932,7 @@ export default function MasterAdminDashboard() {
 
       const hasSlip = Boolean(b.paymentSlipId && b.paymentSlipStatus !== "deleted");
 
-      const shouldAutoApprove = !b.paymentApprovedAt && b.paymentSlipStatus !== "cash_pending";
+      const shouldAutoApprove = !b.paymentApprovedAt && b.paymentSlipStatus !== "cash_pending" && Boolean(b.paymentSlipId) && b.paymentSlipStatus !== "deleted";
 
       const ok = await updateBooking(
 
@@ -4932,7 +5006,7 @@ export default function MasterAdminDashboard() {
 
     const hasSlip = Boolean(b.paymentSlipId && b.paymentSlipStatus !== "deleted");
 
-    const shouldAutoApprove = !b.paymentApprovedAt && b.paymentSlipStatus !== "cash_pending";
+    const shouldAutoApprove = !b.paymentApprovedAt && b.paymentSlipStatus !== "cash_pending" && Boolean(b.paymentSlipId) && b.paymentSlipStatus !== "deleted";
 
     const ok = await updateBooking(
 
@@ -5756,7 +5830,7 @@ export default function MasterAdminDashboard() {
 
         manualAutoFilledNameRef.current = "";
 
-        const todayStr = new Date().toISOString().split("T")[0];
+        const todayStr = todayYmd();
 
         setManualForm({
 
@@ -6822,371 +6896,25 @@ export default function MasterAdminDashboard() {
 
 
 
+  const ledger = useLedger();
   const revenueData = useMemo(() => {
-
-    const isPaid = (b: StoredBooking): boolean => {
-
-      if (b.status === "cancelled") return false;
-
-      const amt = Number(b.quotedAmount || 0);
-
-      if (amt <= 0) return false;
-
-      if (typeof b.advanceAmount === "number" && b.advanceAmount > 0) return true;
-
-      if (b.paymentSlipStatus === "cash_pending" && (!b.advanceAmount || b.advanceAmount <= 0)) return false;
-
-      if (b.paymentMethod === "cash_manual" && (!b.paymentApprovedAt || b.paymentApprovedAt <= 0) && (!b.advanceAmount || b.advanceAmount <= 0)) return false;
-
-      if (b.paymentApprovedAt && b.paymentApprovedAt > 0) return true;
-
-      if (b.paymentSlipStatus === "approved" || (b.paymentSlipStatus as string) === "manual_approved") return true;
-
-      if (["accepted", "booked", "assigned", "goods_collected", "in_transit", "delivered"].includes(b.status)) {
-
-        return true;
-
-      }
-
-      return false;
-
-    };
-
-
-
-    const getBookingPaidAmount = (b: StoredBooking): number => {
-
-      if (typeof b.pendingAmount === "number" && b.pendingAmount > 0) {
-
-        return Number(b.advanceAmount || 0);
-
-      }
-
-      return Number(b.quotedAmount || 0);
-
-    };
-
-
-
-    const getPayTs = (b: StoredBooking): number => {
-
-      if (b.finalPaymentAt && b.finalPaymentAt > 0) return b.finalPaymentAt;
-
-      if (b.paymentApprovedAt && b.paymentApprovedAt > 0) return b.paymentApprovedAt;
-
-      if (b.paymentSlipUploadedAt && b.paymentSlipUploadedAt > 0) return b.paymentSlipUploadedAt;
-
-      return b.updatedAt || b.createdAt || clockTick;
-
-    };
-
-
-
-    const allPaid = bookings
-
-      .filter(isPaid)
-
-      .sort((a, b) => getPayTs(b) - getPayTs(a));
-
-
-
-    const todayStart = getSriLankaMidnightTimestamp(clockTick);
-
-    const todayEnd = todayStart + 86400000;
-
-    const yesterdayStart = todayStart - 86400000;
-
-    const yesterdayEnd = todayStart;
-
-
-
-    const slNow = new Date(clockTick + SRI_LANKA_OFFSET_MS);
-
-    const thisMonthStart = Date.UTC(slNow.getUTCFullYear(), slNow.getUTCMonth(), 1) - SRI_LANKA_OFFSET_MS;
-
-    const thisMonthEnd = Date.UTC(slNow.getUTCFullYear(), slNow.getUTCMonth() + 1, 1) - SRI_LANKA_OFFSET_MS;
-
-    const lastMonthStart = Date.UTC(slNow.getUTCFullYear(), slNow.getUTCMonth() - 1, 1) - SRI_LANKA_OFFSET_MS;
-
-    const lastMonthEnd = thisMonthStart;
-
-
-
-    const computeBookingRevenueForRange = (b: StoredBooking, start: number, end: number): number => {
-
-      let revenue = 0;
-
-      const initialPaidTs = b.paymentApprovedAt || b.paymentSlipUploadedAt || b.updatedAt || b.createdAt;
-
-      const finalPaidTs = b.finalPaymentAt;
-
-      const totalQuoted = Number(b.quotedAmount || 0);
-
-      const adv = typeof b.advanceAmount === "number" ? b.advanceAmount : (b.pendingAmount === 0 ? totalQuoted : 0);
-
-      const rem = Math.max(0, totalQuoted - adv);
-
-
-
-      if (adv > 0 && initialPaidTs && initialPaidTs >= start && initialPaidTs < end) {
-
-        revenue += adv;
-
-      }
-
-      if (rem > 0 && finalPaidTs && finalPaidTs >= start && finalPaidTs < end) {
-
-        revenue += rem;
-
-      }
-
-      if (revenue === 0 && (!b.pendingAmount || b.pendingAmount <= 0)) {
-
-        const payTs = getPayTs(b);
-
-        if (payTs >= start && payTs < end) {
-
-          revenue = totalQuoted;
-
-        }
-
-      }
-
-      return revenue;
-
-    };
-
-
-
-    const todayBookings = allPaid.filter((b) => computeBookingRevenueForRange(b, todayStart, todayEnd) > 0);
-
-    const todayRevenue = allPaid.reduce((sum, b) => sum + computeBookingRevenueForRange(b, todayStart, todayEnd), 0);
-
-
-
-    const thisMonthBookings = allPaid.filter((b) => computeBookingRevenueForRange(b, thisMonthStart, thisMonthEnd) > 0);
-
-    const thisMonthRevenue = allPaid.reduce((sum, b) => sum + computeBookingRevenueForRange(b, thisMonthStart, thisMonthEnd), 0);
-
-
-
-    const allTimeRevenue = allPaid.reduce((sum, b) => sum + getBookingPaidAmount(b), 0);
-
-
-
-    let rangeStart = 0;
-
-    let rangeEnd = Infinity;
-
-    if (revenueFilter === "today") {
-
-      rangeStart = todayStart;
-
-      rangeEnd = todayEnd;
-
-    } else if (revenueFilter === "yesterday") {
-
-      rangeStart = yesterdayStart;
-
-      rangeEnd = yesterdayEnd;
-
-    } else if (revenueFilter === "pick_date") {
-
-      if (revenueSelectedDate) {
-
-        const parts = revenueSelectedDate.split("-").map(Number);
-
-        if (parts.length === 3 && !parts.some(isNaN)) {
-
-          rangeStart = Date.UTC(parts[0], parts[1] - 1, parts[2]) - SRI_LANKA_OFFSET_MS;
-
-          rangeEnd = rangeStart + 86400000;
-
-        }
-
-      }
-
-    } else if (revenueFilter === "days_count") {
-
-      const safeDays = Math.max(1, Math.min(3650, Number(revenueDaysCount) || 1));
-
-      rangeStart = todayStart - (safeDays - 1) * 86400000;
-
-      rangeEnd = todayEnd;
-
-    } else if (revenueFilter === "this_month") {
-
-      rangeStart = thisMonthStart;
-
-      rangeEnd = thisMonthEnd;
-
-    } else if (revenueFilter === "last_month") {
-
-      rangeStart = lastMonthStart;
-
-      rangeEnd = lastMonthEnd;
-
-    } else if (revenueFilter === "custom") {
-
-      if (revenueCustomStart) {
-
-        const parts = revenueCustomStart.split("-").map(Number);
-
-        if (parts.length === 3 && !parts.some(isNaN)) {
-
-          rangeStart = Date.UTC(parts[0], parts[1] - 1, parts[2]) - SRI_LANKA_OFFSET_MS;
-
-        }
-
-      }
-
-      if (revenueCustomEnd) {
-
-        const parts = revenueCustomEnd.split("-").map(Number);
-
-        if (parts.length === 3 && !parts.some(isNaN)) {
-
-          rangeEnd = Date.UTC(parts[0], parts[1] - 1, parts[2] + 1) - SRI_LANKA_OFFSET_MS;
-
-        }
-
-      }
-
-    }
-
-
-
-    const customRangeDaysCount =
-
-      revenueFilter === "custom" && revenueCustomStart && revenueCustomEnd && rangeEnd > rangeStart
-
-        ? Math.round((rangeEnd - rangeStart) / 86400000)
-
-        : 0;
-
-
-
-    const periodBookings = allPaid.filter((b) => {
-
-      const t = getPayTs(b);
-
-      if (t < rangeStart || t >= rangeEnd) return false;
-
-      if (revenueTypeFilter === "individual" && b.bookingType !== "individual_vehicle") return false;
-
-      if (revenueTypeFilter === "live_lorry" && b.bookingType === "individual_vehicle") return false;
-
-      if (revenueSearch.trim()) {
-
-        return matchesOnlineSearchQuery(b, revenueSearch) || matchesIndividualSearchQuery(b, revenueSearch);
-
-      }
-
-      return true;
-
-    });
-
-
-
-    const periodTotal = periodBookings.reduce((sum, b) => sum + computeBookingRevenueForRange(b, rangeStart, rangeEnd), 0);
-
-    const periodIndividual = periodBookings.filter((b) => b.bookingType === "individual_vehicle");
-
-    const periodLive = periodBookings.filter((b) => b.bookingType !== "individual_vehicle");
-
-    const periodIndividualRevenue = periodIndividual.reduce((sum, b) => sum + computeBookingRevenueForRange(b, rangeStart, rangeEnd), 0);
-
-    const periodLiveRevenue = periodLive.reduce((sum, b) => sum + computeBookingRevenueForRange(b, rangeStart, rangeEnd), 0);
-
-
-
-    const periodBankSlip = periodBookings.filter(
-
-      (b) => b.paymentMethod !== "cash_manual"
-
-    );
-
-    const periodCash = periodBookings.filter((b) => !periodBankSlip.includes(b));
-
-    const periodBankRevenue = periodBankSlip.reduce((sum, b) => sum + computeBookingRevenueForRange(b, rangeStart, rangeEnd), 0);
-
-    const periodCashRevenue = periodCash.reduce((sum, b) => sum + computeBookingRevenueForRange(b, rangeStart, rangeEnd), 0);
-
-
-
+    const [start, end] = periodRange("today", "", "", clockTick);
     return {
-
       todayDateStr: getSriLankaDateStr(clockTick),
-
-      todayBookingsCount: todayBookings.length,
-
-      todayRevenue,
-
-      thisMonthBookingsCount: thisMonthBookings.length,
-
-      thisMonthRevenue,
-
-      allTimeCount: allPaid.length,
-
-      allTimeRevenue,
-
-      periodBookings,
-
-      periodTotal,
-
-      periodIndividualCount: periodIndividual.length,
-
-      periodIndividualRevenue,
-
-      periodLiveCount: periodLive.length,
-
-      periodLiveRevenue,
-
-      periodBankCount: periodBankSlip.length,
-
-      periodBankRevenue,
-
-      periodCashCount: periodCash.length,
-
-      periodCashRevenue,
-
-      customRangeDaysCount,
-
-      getPayTs,
-
+      todayRevenue: summarise(bookings, start, end, ledger).received,
+      todayBookingsCount: revenueLines(bookings, ledger).filter((l) => l.at >= start && l.at < end).length,
+      thisMonthRevenue: summarise(bookings, ...periodRange("month", "", "", clockTick), ledger).received,
     };
-
-  }, [
-
-    bookings,
-
-    clockTick,
-
-    revenueFilter,
-
-    revenueSelectedDate,
-
-    revenueDaysCount,
-
-    revenueCustomStart,
-
-    revenueCustomEnd,
-
-    revenueTypeFilter,
-
-    revenueSearch,
-
-    matchesOnlineSearchQuery,
-
-    matchesIndividualSearchQuery,
-
-  ]);
+  }, [bookings, clockTick, ledger.wallet, ledger.reversals]);
 
 
 
   // Helper to determine if a booking has pending payment
 
   const isBookingPaymentPending = useCallback((b: StoredBooking): boolean => {
+
+    // External owners collect their own fares
+    if (b.externalOwnerId) return false;
 
     if (b.status === "cancelled") return false;
 
@@ -7521,71 +7249,17 @@ export default function MasterAdminDashboard() {
 
 
   const completedStats = useMemo(() => {
-
-    let totalKm = 0;
-
-    let totalRevenue = 0;
-
-    let cashCount = 0;
-
-    let cashSum = 0;
-
-    let bankCount = 0;
-
-    let bankSum = 0;
-
-
-
-    for (const b of filteredCompletedBookings) {
-
-      const km = typeof b.distanceKm === "number" ? b.distanceKm : typeof b.actualDistanceKm === "number" ? b.actualDistanceKm : 0;
-
-      totalKm += km;
-
-      const amount = typeof b.quotedAmount === "number" ? b.quotedAmount : 0;
-
-      totalRevenue += amount;
-
-
-
-      const isBank = b.paymentMethod === "bank_transfer" || Boolean(b.paymentBankUsed || b.finalPaymentBankUsed);
-
-      if (isBank) {
-
-        bankCount++;
-
-        bankSum += amount;
-
-      } else {
-
-        cashCount++;
-
-        cashSum += amount;
-
-      }
-
-    }
-
-
-
+    const totals = summarise(filteredCompletedBookings);
+    const entries = filteredCompletedBookings.flatMap((b) => paymentEntries(b));
     return {
-
       totalCount: filteredCompletedBookings.length,
-
-      totalKm: Math.round(totalKm * 10) / 10,
-
-      totalRevenue,
-
-      cashCount,
-
-      cashSum,
-
-      bankCount,
-
-      bankSum,
-
+      totalKm: totals.km,
+      totalRevenue: totals.received,
+      cashCount: entries.filter((e) => e.method === "cash").length,
+      cashSum: totals.cash,
+      bankCount: entries.filter((e) => e.method === "bank").length,
+      bankSum: totals.bank,
     };
-
   }, [filteredCompletedBookings]);
 
 
@@ -7660,7 +7334,7 @@ export default function MasterAdminDashboard() {
 
       const completedDate = b.rideEndedAt
 
-        ? new Date(b.rideEndedAt).toLocaleDateString("en-CA")
+        ? todayYmd(b.rideEndedAt)
 
         : b.date || "";
 
@@ -7756,7 +7430,7 @@ export default function MasterAdminDashboard() {
 
     link.href = url;
 
-    link.setAttribute("download", `Sithumina-Completed-Rides-${new Date().toISOString().split("T")[0]}.csv`);
+    link.setAttribute("download", `Sithumina-Completed-Rides-${todayYmd()}.csv`);
 
     document.body.appendChild(link);
 
@@ -9137,7 +8811,7 @@ export default function MasterAdminDashboard() {
 
                 <span className="text-xs font-bold text-amber-900 bg-amber-400 px-2 py-0.5 rounded">
 
-                  ⌛ Pending Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()}
+                  Pending Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()}
 
                 </span>
 
@@ -9165,7 +8839,7 @@ export default function MasterAdminDashboard() {
 
                     <span className="text-xs font-bold text-amber-900 bg-amber-400 px-2 py-0.5 rounded">
 
-                      ⌛ Pending Rs. {b.pendingAmount.toLocaleString()}
+                      Pending Rs. {b.pendingAmount.toLocaleString()}
 
                     </span>
 
@@ -9175,7 +8849,7 @@ export default function MasterAdminDashboard() {
 
                   <span className="text-xs font-bold text-amber-900 bg-amber-400 px-2 py-0.5 rounded">
 
-                    ⌛ Pending Rs. {b.pendingAmount.toLocaleString()}
+                    Pending Rs. {b.pendingAmount.toLocaleString()}
 
                   </span>
 
@@ -9183,7 +8857,7 @@ export default function MasterAdminDashboard() {
 
                   <span className="text-xs font-bold text-amber-900 bg-amber-400 px-2 py-0.5 rounded">
 
-                    ⌛ Pending
+                    Pending
 
                   </span>
 
@@ -9249,7 +8923,7 @@ export default function MasterAdminDashboard() {
 
             >
 
-              <span>✏️ Edit</span>
+              <span>Edit</span>
 
             </button>
 
@@ -9361,7 +9035,6 @@ export default function MasterAdminDashboard() {
 
               >
 
-                <span>🚀</span>
 
                 <span>Start Ride</span>
 
@@ -9413,7 +9086,7 @@ export default function MasterAdminDashboard() {
 
               <span className="text-[11px] text-emerald-800 font-semibold hidden sm:inline">
 
-                🔒 Slot locked until Delivered
+                Slot locked until Delivered
 
               </span>
 
@@ -9483,7 +9156,6 @@ export default function MasterAdminDashboard() {
 
               >
 
-                <span>🏁</span>
 
                 <span>Close / End Ride</span>
 
@@ -9541,7 +9213,7 @@ export default function MasterAdminDashboard() {
 
               >
 
-                💳 Settle Payment Now →
+                Settle Payment Now →
 
               </button>
 
@@ -9565,7 +9237,7 @@ export default function MasterAdminDashboard() {
 
             <div className="text-[11px] text-blue-700 font-bold flex items-center gap-1.5">
 
-              <span>🔒 Locked Completed Record</span>
+              <span>Locked Completed Record</span>
 
               <span className="text-blue-400">·</span>
 
@@ -9623,7 +9295,7 @@ export default function MasterAdminDashboard() {
                 <>
                   <span className="text-gray-400">→</span>
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-900 text-[11px] font-bold" title="Rider selected intermediate towns">
-                    📍 {b.waypoints.map((w) => w.name).join(" → ")}
+                    {b.waypoints.map((w) => w.name).join(" → ")}
                   </span>
                   <span className="text-gray-400">→</span>
                 </>
@@ -9811,14 +9483,14 @@ export default function MasterAdminDashboard() {
 
                     <div className="flex flex-wrap items-center gap-1.5">
 
-                      <span>🚩 {b.pickupCity}</span>
+                      <span>{b.pickupCity}</span>
 
                       {Array.isArray(b.waypoints) && b.waypoints.length > 0 ? (
                         b.waypoints.map((wp, idx) => (
                           <React.Fragment key={`${wp.name}-${idx}`}>
                             <span className="text-gray-400">➔</span>
                             <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-900 text-xs font-bold">
-                              {idx + 1}️⃣ {wp.name}
+                              {idx + 1}⃣ {wp.name}
                             </span>
                           </React.Fragment>
                         ))
@@ -9826,11 +9498,11 @@ export default function MasterAdminDashboard() {
 
                       <span className="text-gray-400">➔</span>
 
-                      <span>🏁 {b.deliveryCity}</span>
+                      <span>{b.deliveryCity}</span>
 
                       <span className="ml-2 font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 text-xs inline-block">
 
-                        🛣️ {distanceDisplay}
+                        {distanceDisplay}
 
                       </span>
 
@@ -9843,7 +9515,7 @@ export default function MasterAdminDashboard() {
                       <dt className="text-gray-500">Via Towns</dt>
                       <dd className="flex flex-wrap items-center gap-1.5">
                         <span className="text-xs font-bold text-blue-800 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded">
-                          📍 {b.waypoints.length} Intermediate Towns chosen by Rider (Live Sync)
+                          {b.waypoints.length} Intermediate Towns chosen by Rider (Live Sync)
                         </span>
                       </dd>
                     </>
@@ -9859,13 +9531,13 @@ export default function MasterAdminDashboard() {
 
                       <span className="font-mono text-xs font-bold text-gray-800 bg-gray-100 border border-gray-300 px-2 py-0.5 rounded">
 
-                        📏 Booked: {b.distanceKm ? `${b.distanceKm} km` : "—"}
+                        Booked: {b.distanceKm ? `${b.distanceKm} km` : "—"}
 
                       </span>
 
                       <span className="font-mono text-xs font-bold text-emerald-950 bg-emerald-50 border border-emerald-300 px-2 py-0.5 rounded flex items-center gap-1.5">
 
-                        <span>🚚 Actual (Live): {b.actualDistanceKm ? `${b.actualDistanceKm} km` : "Tracking pending"}</span>
+                        <span>Actual (Live): {b.actualDistanceKm ? `${b.actualDistanceKm} km` : "Tracking pending"}</span>
 
                         {b.distanceKm && b.actualDistanceKm ? (
 
@@ -9885,7 +9557,7 @@ export default function MasterAdminDashboard() {
 
                       <div className="text-xs text-blue-900 bg-blue-50 border border-blue-200 p-1.5 rounded-lg font-mono">
 
-                        <strong>🗺️ Waypoints ({b.waypoints.length}/3):</strong> {b.pickupCity} → {b.waypoints.map((w: any) => w.name).join(" → ")} → {b.deliveryCity}
+                        <strong>Waypoints ({b.waypoints.length}/3):</strong> {b.pickupCity} → {b.waypoints.map((w: any) => w.name).join(" → ")} → {b.deliveryCity}
 
                       </div>
 
@@ -9897,7 +9569,7 @@ export default function MasterAdminDashboard() {
 
                         <span className="w-2 h-2 rounded-full bg-purple-600 animate-ping" />
 
-                        <span>🚚 Returning Empty (Empty Return):</span>
+                        <span>Returning Empty (Empty Return):</span>
 
                         <span className="font-mono font-black">{b.emptyReturnDistanceKm || 0} KM</span>
 
@@ -10153,7 +9825,7 @@ export default function MasterAdminDashboard() {
 
                           const checked = e.target.checked;
 
-                          const sDate = draft.date || new Date().toISOString().split("T")[0];
+                          const sDate = draft.date || todayYmd();
 
                           const defaultEndDate = checked
 
@@ -10445,7 +10117,7 @@ export default function MasterAdminDashboard() {
 
                             <span>Assign Rider *</span>
 
-                            <span className="text-[10px] font-bold text-amber-700">🔒 Assigned Driver</span>
+                            <span className="text-[10px] font-bold text-amber-700">Assigned Driver</span>
 
                           </label>
 
@@ -10827,7 +10499,6 @@ export default function MasterAdminDashboard() {
 
                               <span className="font-bold text-[11px] text-blue-900 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded flex items-center gap-1">
 
-                                <span>🏛</span>
 
                                 <span>{advMeta.bankName}</span>
 
@@ -10893,7 +10564,6 @@ export default function MasterAdminDashboard() {
 
                               <span className="font-bold text-[11px] text-blue-900 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded flex items-center gap-1">
 
-                                <span>🏛</span>
 
                                 <span>{balMeta.bankName}</span>
 
@@ -10961,7 +10631,6 @@ export default function MasterAdminDashboard() {
 
                             <span className="font-bold text-[11px] text-blue-900 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded flex items-center gap-1">
 
-                              <span>🏛</span>
 
                               <span>{fullMeta.bankName}</span>
 
@@ -11201,7 +10870,7 @@ export default function MasterAdminDashboard() {
 
                       >
 
-                        💳 Settle Balance (Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()})
+                        Settle Balance (Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()})
 
                       </button>
 
@@ -11447,7 +11116,6 @@ export default function MasterAdminDashboard() {
 
                   >
 
-                    <span>🗑</span>
 
                     <span>Delete Booking</span>
 
@@ -11717,7 +11385,7 @@ export default function MasterAdminDashboard() {
 
                 >
 
-                  ⌛ {pendingPaymentBookings.length}
+                  {pendingPaymentBookings.length}
 
                 </span>
 
@@ -12828,6 +12496,8 @@ export default function MasterAdminDashboard() {
           {/* TAB 1: DASHBOARD OVERVIEW                                 */}
 
           {/* ========================================================= */}
+          <DeclineAlerts bookings={bookings} onReassign={(b) => openAssignModal(b)} />
+
 
           {activeNav === "overview" && (
 
@@ -13393,7 +13063,6 @@ export default function MasterAdminDashboard() {
 
                 >
 
-                  <span>⌛</span>
 
                   <span>Pending Payment</span>
 
@@ -13557,7 +13226,38 @@ export default function MasterAdminDashboard() {
 
                     ) : (
 
-                      filteredOngoingBookings.map((b) => renderBookingDispatchCard(b, "ongoing"))
+                      groupTrips(filteredOngoingBookings, bookings).map((group) => (
+                        <div key={group.key} className="flex flex-col gap-2">
+                          {group.primary ? (
+                            <>
+                              {renderBookingDispatchCard(group.primary, "ongoing")}
+                              <TripDetails booking={group.primary} />
+                            </>
+                          ) : (
+                            <div className="p-3 rounded-lg border border-amber-300 bg-amber-50 text-xs font-semibold text-amber-900">
+                              Primary trip {group.key} is no longer on record.
+                            </div>
+                          )}
+                          {group.legs.length > 0 && (
+                            <div className="ml-3 sm:ml-8 pl-3 border-l-4 border-sky-500 flex flex-col gap-2">
+                              <p className="text-[11px] font-black uppercase tracking-wide text-sky-800">
+                                Attached return bookings ({group.legs.length})
+                              </p>
+                              {group.legs.map((leg) => (
+                                <div key={leg.id} className="flex flex-col gap-1.5">
+                                  <TripDetails booking={leg} />
+                                  <details className="text-xs">
+                                    <summary className="cursor-pointer font-semibold text-sky-800">
+                                      Manage return booking {leg.id}
+                                    </summary>
+                                    <div className="mt-2">{renderBookingDispatchCard(leg, "ongoing")}</div>
+                                  </details>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))
 
                     )}
 
@@ -13675,7 +13375,11 @@ export default function MasterAdminDashboard() {
 
                     ) : (
 
-                      filteredPendingPaymentBookings.map((b) => renderBookingDispatchCard(b, "pending_payment"))
+                      <TripGroupList
+                        groups={groupTrips(filteredPendingPaymentBookings, bookings)}
+                        manage={(b) => renderBookingDispatchCard(b, "pending_payment")}
+                        empty="No trips are waiting for payment."
+                      />
 
                     )}
 
@@ -13755,7 +13459,7 @@ export default function MasterAdminDashboard() {
 
                         <span className="text-xs font-bold text-gray-800 font-mono block truncate" title={`Cash: Rs. ${completedStats.cashSum.toLocaleString()} (${completedStats.cashCount}) | Bank: Rs. ${completedStats.bankSum.toLocaleString()} (${completedStats.bankCount})`}>
 
-                          💵 Rs. {completedStats.cashSum.toLocaleString()} · 🏦 Rs. {completedStats.bankSum.toLocaleString()}
+                          Rs. {completedStats.cashSum.toLocaleString()} · Rs. {completedStats.bankSum.toLocaleString()}
 
                         </span>
 
@@ -13949,279 +13653,16 @@ export default function MasterAdminDashboard() {
 
                       <div className="overflow-x-auto border border-gray-300 rounded-lg bg-white shadow-2xs">
 
-                        <table className="w-full text-left border-collapse text-xs">
-
-                          <thead className="bg-gray-100 text-gray-700 text-[11px] font-bold uppercase tracking-wider border-b border-gray-300 select-none">
-
-                            <tr>
-
-                              <th className="py-2.5 px-2.5 w-10 text-center border-r border-gray-200">#</th>
-
-                              <th className="py-2.5 px-3 border-r border-gray-200 min-w-[125px]">Booking ID</th>
-
-                              <th className="py-2.5 px-3 border-r border-gray-200 min-w-[145px]">Completed Date &amp; Time</th>
-
-                              <th className="py-2.5 px-3 border-r border-gray-200 min-w-[155px]">Customer</th>
-
-                              <th className="py-2.5 px-3 border-r border-gray-200 min-w-[170px]">Route (From ➔ To)</th>
-
-                              <th className="py-2.5 px-3 border-r border-gray-200 min-w-[95px] text-right">Distance</th>
-
-                              <th className="py-2.5 px-3 border-r border-gray-200 min-w-[140px]">Driver</th>
-
-                              <th className="py-2.5 px-3 border-r border-gray-200 min-w-[135px]">Vehicle</th>
-
-                              <th className="py-2.5 px-3 border-r border-gray-200 min-w-[115px] text-right">Total (LKR)</th>
-
-                              <th className="py-2.5 px-3 border-r border-gray-200 min-w-[115px]">Payment Mode</th>
-
-                              <th className="py-2.5 px-3 border-r border-gray-200 min-w-[165px]">Bank &amp; Settlement</th>
-
-                              <th className="py-2.5 px-3 text-center min-w-[85px]">Action</th>
-
-                            </tr>
-
-                          </thead>
-
-                          <tbody className="divide-y divide-gray-200 font-medium">
-
-                            {filteredCompletedBookings.map((b, idx) => {
-
-                              const completedDate = b.rideEndedAt
-
-                                ? new Date(b.rideEndedAt).toLocaleDateString("en-CA")
-
-                                : b.date || "—";
-
-                              const completedTime = b.rideEndedAt
-
-                                ? new Date(b.rideEndedAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })
-
-                                : b.endTime ? formatTime12h(b.endTime) : "—";
-
-                              const km = typeof b.distanceKm === "number" ? b.distanceKm : typeof b.actualDistanceKm === "number" ? b.actualDistanceKm : null;
-
-                              const isBank = b.paymentMethod === "bank_transfer" || Boolean(b.paymentBankUsed || b.finalPaymentBankUsed);
-
-                              const isOnline = (b.paymentMethod as string) === "payhere" || (b.paymentSlipStatus as string) === "online_paid";
-
-                              const bankLabel = b.finalPaymentBankUsed || b.paymentBankUsed || (isBank ? "Bank Transfer" : "—");
-
-
-
-                              return (
-
-                                <tr
-
-                                  key={b.id}
-
-                                  onClick={() => setInspectBookingModal(b)}
-
-                                  className="hover:bg-amber-50/70 transition-colors cursor-pointer group"
-
-                                  title="Click to view full booking details"
-
-                                >
-
-                                  <td className="py-2.5 px-2.5 text-center text-gray-500 font-mono text-[11px] border-r border-gray-200">
-
-                                    {idx + 1}
-
-                                  </td>
-
-                                  <td className="py-2.5 px-3 font-mono font-bold text-gray-900 border-r border-gray-200 whitespace-nowrap">
-
-                                    <span className="px-1.5 py-0.5 rounded bg-gray-100 group-hover:bg-amber-100 text-gray-800 transition-colors">
-
-                                      #{b.id}
-
-                                    </span>
-
-                                  </td>
-
-                                  <td className="py-2.5 px-3 border-r border-gray-200 whitespace-nowrap text-gray-700">
-
-                                    <span className="font-mono block">{completedDate}</span>
-
-                                    <span className="text-[11px] text-gray-500 block">{completedTime}</span>
-
-                                  </td>
-
-                                  <td className="py-2.5 px-3 border-r border-gray-200">
-
-                                    <span className="font-bold text-gray-900 block truncate max-w-[150px]">{b.customerName || "Customer"}</span>
-
-                                    <span className="text-[11px] text-gray-500 font-mono block">{b.customerPhone || "—"}</span>
-
-                                  </td>
-
-                                  <td className="py-2.5 px-3 border-r border-gray-200">
-
-                                    <div className="flex items-center gap-1 font-semibold text-gray-800">
-
-                                      <span className="truncate max-w-[85px]">{b.pickupCity || "Pickup"}</span>
-
-                                      <span className="text-gray-400">➔</span>
-
-                                      <span className="truncate max-w-[85px]">{b.deliveryCity || "Delivery"}</span>
-
-                                    </div>
-
-                                    {Array.isArray(b.waypoints) && b.waypoints.length > 0 && (
-                                      <div className="text-[10px] text-blue-700 font-bold truncate max-w-[170px]" title={b.waypoints.map(w => w.name).join(" ➔ ")}>
-                                        via {b.waypoints.map(w => w.name).join(" ➔ ")}
-                                      </div>
-                                    )}
-
-                                  </td>
-
-                                  <td className="py-2.5 px-3 border-r border-gray-200 text-right whitespace-nowrap">
-
-                                    {km !== null ? (
-
-                                      <span className="px-2 py-0.5 rounded font-mono font-bold bg-slate-100 text-slate-900">
-
-                                        {km} km
-
-                                      </span>
-
-                                    ) : (
-
-                                      <span className="text-gray-400 font-mono">—</span>
-
-                                    )}
-
-                                  </td>
-
-                                  <td className="py-2.5 px-3 border-r border-gray-200">
-
-                                    <span className="font-bold text-gray-900 block truncate max-w-[140px]">
-
-                                      {cleanRiderName(b.assignedDriverName) || b.assignedDriverPhone || "—"}
-
-                                    </span>
-
-                                  </td>
-
-                                  <td className="py-2.5 px-3 border-r border-gray-200 whitespace-nowrap">
-
-                                    <span className="font-mono font-bold text-gray-900 block">
-
-                                      {b.assignedPlate || b.selectedVehiclePlate || "—"}
-
-                                    </span>
-
-                                    <span className="text-[10px] text-gray-500 block truncate max-w-[130px]">
-
-                                      {stripSinhalaText(b.vehicleType) || "Lorry"}
-
-                                    </span>
-
-                                  </td>
-
-                                  <td className="py-2.5 px-3 border-r border-gray-200 text-right font-mono font-bold text-gray-900 whitespace-nowrap">
-
-                                    Rs. {(b.quotedAmount || 0).toLocaleString()}
-
-                                  </td>
-
-                                  <td className="py-2.5 px-3 border-r border-gray-200 whitespace-nowrap">
-
-                                    {isOnline ? (
-
-                                      <span className="px-2 py-0.5 rounded-full bg-purple-100 text-purple-900 font-bold text-[10px] inline-flex items-center gap-1">
-
-                                        💳 Online
-
-                                      </span>
-
-                                    ) : isBank ? (
-
-                                      <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-900 font-bold text-[10px] inline-flex items-center gap-1">
-
-                                        🏦 Bank Transfer
-
-                                      </span>
-
-                                    ) : (
-
-                                      <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 font-bold text-[10px] inline-flex items-center gap-1">
-
-                                        💵 Cash
-
-                                      </span>
-
-                                    )}
-
-                                  </td>
-
-                                  <td className="py-2.5 px-3 border-r border-gray-200">
-
-                                    {isBank ? (
-
-                                      <div className="flex flex-col">
-
-                                        <span className="font-bold text-blue-950 truncate max-w-[160px]">{bankLabel}</span>
-
-                                        {b.advanceAmount && b.quotedAmount && b.advanceAmount < b.quotedAmount ? (
-
-                                          <span className="text-[10px] text-gray-500">
-
-                                            Adv: Rs. {b.advanceAmount.toLocaleString()} + Balance Paid
-
-                                          </span>
-
-                                        ) : (
-
-                                          <span className="text-[10px] text-emerald-700 font-semibold">Fully Settled</span>
-
-                                        )}
-
-                                      </div>
-
-                                    ) : isOnline ? (
-
-                                      <span className="text-gray-700 font-semibold">Paid via Gateway</span>
-
-                                    ) : (
-
-                                      <span className="text-gray-700 font-semibold">Cash Settled</span>
-
-                                    )}
-
-                                  </td>
-
-                                  <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-
-                                    <button
-
-                                      type="button"
-
-                                      onClick={() => setInspectBookingModal(b)}
-
-                                      className="px-2.5 py-1 rounded bg-gray-900 hover:bg-gray-800 text-white font-bold text-[11px] transition-colors cursor-pointer inline-flex items-center gap-1"
-
-                                      title="View full booking audit details"
-
-                                    >
-
-                                      <span>👁️</span>
-
-                                      <span>View</span>
-
-                                    </button>
-
-                                  </td>
-
-                                </tr>
-
-                              );
-
-                            })}
-
-                          </tbody>
-
-                        </table>
+                        <TripGroupList
+                          groups={groupTrips(filteredCompletedBookings, bookings).filter(
+                            // A trip stays under Pending Payment until every leg is paid and finished
+                            (g) =>
+                              ![g.primary, ...g.legs].some(
+                                (t) => t && (isActiveTrip(t) || (isTripFinished(t) && outstandingAmount(t) > 0))
+                              )
+                          )}
+                          empty="No completed trips match these filters."
+                        />
 
                       </div>
 
@@ -14781,7 +14222,7 @@ export default function MasterAdminDashboard() {
 
                                 <span className="text-xs font-semibold text-amber-200 bg-amber-950/80 border border-amber-600/70 px-2.5 py-1 rounded-md">
 
-                                  ⌛ Pending Rs. {b.pendingAmount.toLocaleString()}
+                                  Pending Rs. {b.pendingAmount.toLocaleString()}
 
                                 </span>
 
@@ -14791,7 +14232,7 @@ export default function MasterAdminDashboard() {
 
                               <span className="text-xs font-semibold text-amber-200 bg-amber-950/80 border border-amber-600/70 px-2.5 py-1 rounded-md">
 
-                                ⌛ Pending Rs. {b.pendingAmount.toLocaleString()}
+                                Pending Rs. {b.pendingAmount.toLocaleString()}
 
                               </span>
 
@@ -15115,7 +14556,7 @@ export default function MasterAdminDashboard() {
 
                                       <span className="ml-2 font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 text-xs inline-block">
 
-                                        🛣️ {b.distanceKm} km
+                                        {b.distanceKm} km
 
                                       </span>
 
@@ -15347,7 +14788,7 @@ export default function MasterAdminDashboard() {
 
                                           const checked = e.target.checked;
 
-                                          const sDate = draft.date || new Date().toISOString().split("T")[0];
+                                          const sDate = draft.date || todayYmd();
 
                                           const defaultEndDate = checked
 
@@ -15671,7 +15112,7 @@ export default function MasterAdminDashboard() {
 
                                             <span>Assign Rider *</span>
 
-                                            <span className="text-xs font-bold text-amber-700">🔒 Assigned Driver</span>
+                                            <span className="text-xs font-bold text-amber-700">Assigned Driver</span>
 
                                           </label>
 
@@ -16159,7 +15600,7 @@ export default function MasterAdminDashboard() {
 
                                           >
 
-                                            💳 Settle Balance (Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()})
+                                            Settle Balance (Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()})
 
                                           </button>
 
@@ -17187,7 +16628,7 @@ export default function MasterAdminDashboard() {
 
                                     <span className="ml-2 font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 text-xs inline-block">
 
-                                      🛣️ {b.distanceKm} km
+                                      {b.distanceKm} km
 
                                     </span>
 
@@ -17539,7 +16980,7 @@ export default function MasterAdminDashboard() {
 
                                       >
 
-                                        💳 Settle Balance (Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()})
+                                        Settle Balance (Rs. {(b.pendingAmount || b.quotedAmount || 0).toLocaleString()})
 
                                       </button>
 
@@ -18051,7 +17492,7 @@ export default function MasterAdminDashboard() {
 
                                 <span className="inline-flex items-center gap-1 font-mono font-bold text-[11px] px-2 py-0.5 rounded-md bg-[#F7F5EE] border border-[#E7E2D0] text-[#26231B]">
 
-                                  🪪 NIC: {c.idNumber}
+                                  NIC: {c.idNumber}
 
                                 </span>
 
@@ -18217,7 +17658,7 @@ export default function MasterAdminDashboard() {
 
                                     <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-800 border border-blue-200 text-[10px] font-mono font-bold">
 
-                                      🛣️ {b.distanceKm} km
+                                      {b.distanceKm} km
 
                                     </span>
 
@@ -18377,7 +17818,6 @@ export default function MasterAdminDashboard() {
 
                 <div className="py-12 px-4 rounded-xl bg-[#F7F5EE] border border-[#E7E2D0] text-center flex flex-col items-center justify-center gap-2">
 
-                  <span className="text-3xl">📋</span>
 
                   <p className="text-sm font-bold text-[#26231B]">No complaints or deleted booking records found</p>
 
@@ -18481,7 +17921,7 @@ export default function MasterAdminDashboard() {
 
                                 >
 
-                                  📞 Call
+                                  Call
 
                                 </a>
 
@@ -18527,7 +17967,7 @@ export default function MasterAdminDashboard() {
 
                               <div className="font-mono text-[11px] font-bold text-amber-900 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 mt-1 inline-block">
 
-                                🪪 NIC: {c.customerIdNumber}
+                                NIC: {c.customerIdNumber}
 
                               </div>
 
@@ -18555,7 +17995,7 @@ export default function MasterAdminDashboard() {
 
                               <div className="font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 text-xs mt-1 inline-block">
 
-                                🛣️ {c.distanceKm} km
+                                {c.distanceKm} km
 
                               </div>
 
@@ -18643,831 +18083,8 @@ export default function MasterAdminDashboard() {
 
           {/* ========================================================= */}
 
-          {activeNav === "revenue" && (
+          {activeNav === "revenue" && <RevenuePanel bookings={bookings} />}
 
-            <div className="flex flex-col gap-5">
-
-              {/* Top 3 Core KPI Cards */}
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-
-                {/* 1. Today's Revenue (Resets at Midnight) */}
-
-                <div className="p-5 rounded-2xl bg-[#26231B] text-white shadow-xs flex flex-col justify-between">
-
-                  <div className="flex items-center justify-between">
-
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-white/60">
-
-                      Today
-
-                    </span>
-
-                    <span className="text-[11px] font-semibold text-emerald-400">
-
-                      {revenueData.todayBookingsCount} paid · 12 AM reset
-
-                    </span>
-
-                  </div>
-
-                  <div className="text-3xl font-black text-[#FFC20E] font-mono mt-2 tracking-tight">
-
-                    Rs. {revenueData.todayRevenue.toLocaleString()}
-
-                  </div>
-
-                </div>
-
-
-
-                {/* 2. This Month */}
-
-                <div className="p-5 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
-
-                  <div className="flex items-center justify-between">
-
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#6F6A5A]">
-
-                      This Month
-
-                    </span>
-
-                    <span className="text-[11px] font-semibold text-[#6F6A5A]">
-
-                      {revenueData.thisMonthBookingsCount} paid
-
-                    </span>
-
-                  </div>
-
-                  <div className="text-3xl font-black text-[#26231B] font-mono mt-2 tracking-tight">
-
-                    Rs. {revenueData.thisMonthRevenue.toLocaleString()}
-
-                  </div>
-
-                </div>
-
-
-
-                {/* 3. All-Time Total */}
-
-                <div className="p-5 rounded-2xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
-
-                  <div className="flex items-center justify-between">
-
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#6F6A5A]">
-
-                      All-Time
-
-                    </span>
-
-                    <span className="text-[11px] font-semibold text-[#6F6A5A]">
-
-                      {revenueData.allTimeCount} paid
-
-                    </span>
-
-                  </div>
-
-                  <div className="text-3xl font-black text-[#26231B] font-mono mt-2 tracking-tight">
-
-                    Rs. {revenueData.allTimeRevenue.toLocaleString()}
-
-                  </div>
-
-                </div>
-
-              </div>
-
-
-
-              {/* Compact Filter & Search Toolbar */}
-
-              <div className="p-3.5 rounded-2xl bg-white border border-[#E7E2D0] shadow-2xs flex flex-col gap-3">
-
-                <div className="flex flex-wrap items-center justify-between gap-2.5">
-
-                  {/* Time Filters */}
-
-                  <div className="flex flex-wrap items-center gap-1.5">
-
-                    {(
-
-                      [
-
-                        { id: "today", label: "Today" },
-
-                        { id: "yesterday", label: "Yesterday" },
-
-                        { id: "pick_date", label: "Pick Date" },
-
-                        { id: "days_count", label: "By Days" },
-
-                        { id: "this_month", label: "This Month" },
-
-                        { id: "last_month", label: "Last Month" },
-
-                        { id: "custom", label: "Date Range" },
-
-                        { id: "all_time", label: "All Time" },
-
-                      ] as const
-
-                    ).map((f) => {
-
-                      const isActive = revenueFilter === f.id;
-
-                      return (
-
-                        <button
-
-                          key={f.id}
-
-                          type="button"
-
-                          onClick={() => setRevenueFilter(f.id)}
-
-                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${isActive
-
-                            ? "bg-[#26231B] text-[#FFC20E]"
-
-                            : "bg-[#F7F5EE] hover:bg-[#EBE7D8] text-[#26231B]"
-
-                            }`}
-
-                        >
-
-                          {f.label}
-
-                        </button>
-
-                      );
-
-                    })}
-
-                  </div>
-
-
-
-                  {/* Stream Filters + Search */}
-
-                  <div className="flex flex-wrap items-center gap-2">
-
-                    <div className="flex items-center gap-1 bg-[#F7F5EE] p-1 rounded-xl border border-[#E7E2D0]">
-
-                      {(
-
-                        [
-
-                          { id: "all", label: "All" },
-
-                          { id: "individual", label: "Individual" },
-
-                          { id: "live_lorry", label: "Live" },
-
-                        ] as const
-
-                      ).map((t) => {
-
-                        const isActive = revenueTypeFilter === t.id;
-
-                        return (
-
-                          <button
-
-                            key={t.id}
-
-                            type="button"
-
-                            onClick={() => setRevenueTypeFilter(t.id)}
-
-                            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${isActive
-
-                              ? "bg-[#FFC20E] text-[#26231B] shadow-2xs"
-
-                              : "text-[#6F6A5A] hover:text-[#26231B]"
-
-                              }`}
-
-                          >
-
-                            {t.label}
-
-                          </button>
-
-                        );
-
-                      })}
-
-                    </div>
-
-
-
-                    <div className="relative min-w-[210px] sm:w-64">
-
-                      <input
-
-                        type="text"
-
-                        placeholder="Search..."
-
-                        value={revenueSearch}
-
-                        onChange={(e) => setRevenueSearch(e.target.value)}
-
-                        className="w-full pl-8 pr-7 py-1.5 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] focus:outline-none focus:border-[#26231B] placeholder-[#A49F8F]"
-
-                      />
-
-                      <svg
-
-                        className="absolute left-2.5 top-2 w-3.5 h-3.5 text-[#A49F8F]"
-
-                        fill="none"
-
-                        viewBox="0 0 24 24"
-
-                        stroke="currentColor"
-
-                        strokeWidth="2.5"
-
-                      >
-
-                        <path
-
-                          strokeLinecap="round"
-
-                          strokeLinejoin="round"
-
-                          d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-
-                        />
-
-                      </svg>
-
-                      {revenueSearch && (
-
-                        <button
-
-                          type="button"
-
-                          onClick={() => setRevenueSearch("")}
-
-                          className="absolute right-2 top-1.5 text-[#A49F8F] hover:text-[#26231B] text-xs font-bold cursor-pointer"
-
-                        >
-
-                          ✕
-
-                        </button>
-
-                      )}
-
-                    </div>
-
-                  </div>
-
-                </div>
-
-
-
-                {/* Pick Single Date */}
-
-                {revenueFilter === "pick_date" && (
-
-                  <div className="flex flex-wrap items-center gap-2 pt-2.5 border-t border-[#E7E2D0]">
-
-                    <span className="text-xs font-bold text-[#6F6A5A]">Date</span>
-
-                    <input
-
-                      type="date"
-
-                      value={revenueSelectedDate}
-
-                      onChange={(e) => setRevenueSelectedDate(e.target.value)}
-
-                      className="px-2.5 py-1 rounded-lg border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B] focus:outline-none focus:border-[#26231B]"
-
-                    />
-
-                    {revenueSelectedDate !== revenueData.todayDateStr && (
-
-                      <button
-
-                        type="button"
-
-                        onClick={() => setRevenueSelectedDate(revenueData.todayDateStr)}
-
-                        className="px-2.5 py-1 rounded-lg bg-[#F7F5EE] hover:bg-[#EBE7D8] text-xs font-bold text-[#26231B] cursor-pointer"
-
-                      >
-
-                        Today
-
-                      </button>
-
-                    )}
-
-                  </div>
-
-                )}
-
-
-
-                {/* Filter by Number of Days */}
-
-                {revenueFilter === "days_count" && (
-
-                  <div className="flex flex-wrap items-center gap-2 pt-2.5 border-t border-[#E7E2D0]">
-
-                    <span className="text-xs font-bold text-[#6F6A5A]">Last</span>
-
-                    {[3, 7, 14, 30, 60].map((d) => (
-
-                      <button
-
-                        key={d}
-
-                        type="button"
-
-                        onClick={() => setRevenueDaysCount(d)}
-
-                        className={`px-2.5 py-1 rounded-lg text-xs font-bold cursor-pointer transition-all ${revenueDaysCount === d
-
-                          ? "bg-[#FFC20E] text-[#26231B]"
-
-                          : "bg-[#F7F5EE] hover:bg-[#EBE7D8] text-[#26231B]"
-
-                          }`}
-
-                      >
-
-                        {d}d
-
-                      </button>
-
-                    ))}
-
-                    <div className="flex items-center gap-1.5 ml-1">
-
-                      <input
-
-                        type="number"
-
-                        min={1}
-
-                        max={3650}
-
-                        value={revenueDaysCount}
-
-                        onChange={(e) => setRevenueDaysCount(Math.max(1, Number(e.target.value) || 1))}
-
-                        className="w-16 px-2.5 py-1 rounded-lg border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B] focus:outline-none focus:border-[#26231B]"
-
-                      />
-
-                      <span className="text-xs font-bold text-[#6F6A5A]">days</span>
-
-                    </div>
-
-                  </div>
-
-                )}
-
-
-
-                {/* Custom Date Range Pickers */}
-
-                {revenueFilter === "custom" && (
-
-                  <div className="flex flex-wrap items-center gap-2 pt-2.5 border-t border-[#E7E2D0]">
-
-                    <span className="text-xs font-bold text-[#6F6A5A]">From</span>
-
-                    <input
-
-                      type="date"
-
-                      value={revenueCustomStart}
-
-                      onChange={(e) => setRevenueCustomStart(e.target.value)}
-
-                      className="px-2.5 py-1 rounded-lg border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B] focus:outline-none"
-
-                    />
-
-                    <span className="text-xs font-bold text-[#6F6A5A]">To</span>
-
-                    <input
-
-                      type="date"
-
-                      value={revenueCustomEnd}
-
-                      onChange={(e) => setRevenueCustomEnd(e.target.value)}
-
-                      className="px-2.5 py-1 rounded-lg border border-[#E7E2D0] bg-[#F7F5EE] text-xs font-mono font-bold text-[#26231B] focus:outline-none"
-
-                    />
-
-                    {revenueData.customRangeDaysCount > 0 && (
-
-                      <span className="px-2 py-0.5 rounded-lg bg-[#26231B] text-[#FFC20E] text-[11px] font-bold font-mono">
-
-                        {revenueData.customRangeDaysCount} {revenueData.customRangeDaysCount === 1 ? "day" : "days"}
-
-                      </span>
-
-                    )}
-
-                    {(revenueCustomStart || revenueCustomEnd) && (
-
-                      <button
-
-                        type="button"
-
-                        onClick={() => {
-
-                          setRevenueCustomStart("");
-
-                          setRevenueCustomEnd("");
-
-                        }}
-
-                        className="px-2 py-1 text-xs text-red-600 hover:underline cursor-pointer font-bold"
-
-                      >
-
-                        Clear
-
-                      </button>
-
-                    )}
-
-                  </div>
-
-                )}
-
-              </div>
-
-
-
-              {/* Booking Payment History Table */}
-
-              <div className="bg-white rounded-2xl border border-[#E7E2D0] shadow-xs overflow-hidden flex flex-col">
-
-                <div className="px-5 py-3.5 border-b border-[#E7E2D0] flex items-center justify-between bg-[#FCFBF7]">
-
-                  <h3 className="text-xs font-black uppercase tracking-wider text-[#26231B]">
-
-                    Payment History
-
-                  </h3>
-
-                  <span className="text-xs font-mono font-bold text-[#6F6A5A]">
-
-                    {revenueData.periodBookings.length} records · Rs.{" "}
-
-                    {revenueData.periodTotal.toLocaleString()}
-
-                  </span>
-
-                </div>
-
-
-
-                {loadingBookings ? (
-
-                  <div className="p-10 text-center text-xs text-[#6F6A5A]">
-
-                    Loading...
-
-                  </div>
-
-                ) : revenueData.periodBookings.length === 0 ? (
-
-                  <div className="p-10 text-center flex flex-col items-center gap-2">
-
-                    <p className="text-xs font-bold text-[#6F6A5A]">
-
-                      No paid bookings found for this filter.
-
-                    </p>
-
-                    {(revenueSearch || revenueFilter !== "all_time" || revenueTypeFilter !== "all") && (
-
-                      <button
-
-                        type="button"
-
-                        onClick={() => {
-
-                          setRevenueSearch("");
-
-                          setRevenueFilter("all_time");
-
-                          setRevenueTypeFilter("all");
-
-                        }}
-
-                        className="px-3 py-1.5 rounded-xl bg-[#26231B] text-white text-xs font-bold hover:bg-[#FFC20E] hover:text-[#26231B] transition-colors cursor-pointer"
-
-                      >
-
-                        Show All History
-
-                      </button>
-
-                    )}
-
-                  </div>
-
-                ) : (
-
-                  <div className="overflow-x-auto">
-
-                    <table className="w-full text-left border-collapse">
-
-                      <thead>
-
-                        <tr className="border-b border-[#E7E2D0] bg-[#F7F5EE] text-[11px] font-bold text-[#6F6A5A] uppercase">
-
-                          <th className="py-2.5 px-4">Booking</th>
-
-                          <th className="py-2.5 px-4">Date</th>
-
-                          <th className="py-2.5 px-4">Customer</th>
-
-                          <th className="py-2.5 px-4">Vehicle / Route</th>
-
-                          <th className="py-2.5 px-4">Method</th>
-
-                          <th className="py-2.5 px-4 text-right">Amount</th>
-
-                          <th className="py-2.5 px-4">Status</th>
-
-                          <th className="py-2.5 px-4 text-right">Action</th>
-
-                        </tr>
-
-                      </thead>
-
-                      <tbody className="divide-y divide-[#E7E2D0] text-xs">
-
-                        {revenueData.periodBookings.map((b) => {
-
-                          const isIndiv = b.bookingType === "individual_vehicle";
-
-                          const payTs = revenueData.getPayTs(b);
-
-                          const dateObj = new Date(payTs + SRI_LANKA_OFFSET_MS);
-
-                          const dateStr = dateObj.toISOString().slice(0, 10);
-
-                          const h24 = dateObj.getUTCHours();
-
-                          const mins = String(dateObj.getUTCMinutes()).padStart(2, "0");
-
-                          const ampm = h24 >= 12 ? "PM" : "AM";
-
-                          const h12 = h24 % 12 || 12;
-
-                          const timeStr = `${String(h12).padStart(2, "0")}:${mins} ${ampm}`;
-
-                          const amount = Number(b.quotedAmount || 0);
-
-
-
-                          return (
-
-                            <tr
-
-                              key={b.id}
-
-                              className="hover:bg-[#FCFBF7] transition-colors"
-
-                            >
-
-                              <td className="py-3 px-4">
-
-                                <div className="font-mono font-bold text-[#26231B]">{b.id}</div>
-
-                                <span
-
-                                  className={`inline-block mt-0.5 text-[10px] font-bold ${isIndiv ? "text-amber-700" : "text-emerald-700"
-
-                                    }`}
-
-                                >
-
-                                  {isIndiv ? "Individual" : "Live Lorry"}
-
-                                </span>
-
-                              </td>
-
-
-
-                              <td className="py-3 px-4 font-mono">
-
-                                <div className="font-semibold text-[#26231B]">{dateStr}</div>
-
-                                <div className="text-[11px] text-[#6F6A5A]">{timeStr}</div>
-
-                              </td>
-
-
-
-                              <td className="py-3 px-4">
-
-                                <div className="font-bold text-[#26231B]">{b.customerName || "Customer"}</div>
-
-                                <div className="text-[11px] text-[#6F6A5A] font-mono">
-
-                                  {b.customerPhone || "-"}
-
-                                </div>
-
-                              </td>
-
-
-
-                              <td className="py-3 px-4">
-
-                                <div className="font-bold text-[#26231B]">
-
-                                  {b.assignedPlate || b.selectedVehiclePlate || b.vehicleType || "Lorry"}
-
-                                </div>
-
-                                <div className="text-[11px] text-[#6F6A5A]">
-
-                                  {b.pickupCity} → {b.deliveryCity}
-
-                                </div>
-
-                              </td>
-
-
-
-                              <td className="py-3 px-4 font-semibold">
-
-                                {b.paymentSlipId || b.paymentSlipStatus === "approved" ? (
-
-                                  <span className="text-purple-800">Bank Slip</span>
-
-                                ) : (
-
-                                  <span className="text-blue-800">Direct / Cash</span>
-
-                                )}
-
-                              </td>
-
-
-
-                              <td className="py-3 px-4 text-right font-mono font-black text-[#26231B]">
-
-                                Rs. {amount.toLocaleString()}
-
-                              </td>
-
-
-
-                              <td className="py-3 px-4">
-
-                                <span
-
-                                  className={`px-2 py-0.5 rounded-full text-[11px] font-bold capitalize ${b.status === "delivered"
-
-                                    ? "bg-gray-100 text-gray-800"
-
-                                    : b.status === "in_transit"
-
-                                      ? "bg-blue-100 text-blue-800"
-
-                                      : b.status === "goods_collected"
-
-                                        ? "bg-teal-100 text-teal-800"
-
-                                        : "bg-emerald-100 text-emerald-800"
-
-                                    }`}
-
-                                >
-
-                                  {b.status.replace("_", " ")}
-
-                                </span>
-
-                              </td>
-
-
-
-                              <td className="py-3 px-4 text-right">
-
-                                <div className="inline-flex items-center gap-1.5">
-
-                                  {(b.paymentSlipId || b.paymentSlipStatus === "approved") && (
-
-                                    <button
-
-                                      type="button"
-
-                                      onClick={() => openSlipReviewModal(b)}
-
-                                      className="px-2 py-1 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-800 font-bold text-[11px] transition-colors cursor-pointer"
-
-                                    >
-
-                                      Slip
-
-                                    </button>
-
-                                  )}
-
-                                  <button
-
-                                    type="button"
-
-                                    onClick={() => {
-
-                                      setStatusFilter("all");
-
-                                      if (isIndiv) {
-
-                                        setActiveNav("individual_bookings");
-
-                                        setIndividualSearch(b.id);
-
-                                      } else {
-
-                                        setActiveNav("online_bookings");
-
-                                        setOnlineSearch(b.id);
-
-                                        setExpandedOnlineBookings((prev) => ({ ...prev, [b.id]: true }));
-
-                                      }
-
-                                    }}
-
-                                    className="px-2.5 py-1 rounded-lg bg-[#26231B] hover:bg-[#FFC20E] text-white hover:text-[#26231B] font-bold text-[11px] transition-colors cursor-pointer"
-
-                                  >
-
-                                    View →
-
-                                  </button>
-
-                                </div>
-
-                              </td>
-
-                            </tr>
-
-                          );
-
-                        })}
-
-                      </tbody>
-
-                      <tfoot>
-
-                        <tr className="bg-[#FCFBF7] border-t border-[#E7E2D0] text-xs font-black text-[#26231B]">
-
-                          <td colSpan={5} className="py-3 px-4 text-right text-[#6F6A5A]">
-
-                            Total ({revenueData.periodBookings.length})
-
-                          </td>
-
-                          <td className="py-3 px-4 text-right font-mono text-sm">
-
-                            Rs. {revenueData.periodTotal.toLocaleString()}
-
-                          </td>
-
-                          <td colSpan={2} />
-
-                        </tr>
-
-                      </tfoot>
-
-                    </table>
-
-                  </div>
-
-                )}
-
-              </div>
-
-            </div>
-
-          )}
 
 
 
@@ -19480,6 +18097,13 @@ export default function MasterAdminDashboard() {
           {activeNav === "fleet" && (
 
             <div className="flex flex-col gap-5">
+              <PerformancePanel
+                mode="vehicles"
+                bookings={bookings}
+                drivers={drivers}
+                vehicles={fleetVehicles}
+                owners={outsideEmployees}
+              />
 
               {/* Top Action & Search Bar */}
 
@@ -19740,6 +18364,13 @@ export default function MasterAdminDashboard() {
           {activeNav === "riders" && (
 
             <div className="flex flex-col gap-5">
+              <PerformancePanel
+                mode="drivers"
+                bookings={bookings}
+                drivers={drivers}
+                vehicles={fleetVehicles}
+                owners={outsideEmployees}
+              />
 
               <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 rounded-3xl border border-[#E7E2D0] shadow-xs">
 
@@ -20861,7 +19492,7 @@ export default function MasterAdminDashboard() {
 
                                 >
 
-                                  📞 Call
+                                  Call
 
                                 </a>
 
@@ -20881,7 +19512,7 @@ export default function MasterAdminDashboard() {
 
                                   >
 
-                                    💬 WhatsApp
+                                    WhatsApp
 
                                   </a>
 
@@ -21011,7 +19642,6 @@ export default function MasterAdminDashboard() {
 
                                   <div className="flex items-center gap-2">
 
-                                    <span className="text-base">💵</span>
 
                                     <div>
 
@@ -21051,7 +19681,6 @@ export default function MasterAdminDashboard() {
 
                                 <div className="p-2 rounded-xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800 flex items-center gap-1.5">
 
-                                  <span>⚠️</span>
 
                                   <span>No security deposit slip uploaded</span>
 
@@ -21244,6 +19873,13 @@ export default function MasterAdminDashboard() {
           {activeNav === "outside_employees" && (
 
             <div className="flex flex-col gap-5">
+              <PerformancePanel
+                mode="external"
+                bookings={bookings}
+                drivers={drivers}
+                vehicles={fleetVehicles}
+                owners={outsideEmployees}
+              />
 
               {/* Summary Cards */}
 
@@ -21287,7 +19923,7 @@ export default function MasterAdminDashboard() {
 
                 <div className="p-4 rounded-3xl bg-white border border-[#E7E2D0] shadow-xs flex flex-col justify-between">
 
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#5B4300]">Total 20% Commission</span>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#5B4300]">Total Commission</span>
 
                   <div className="text-xl sm:text-2xl font-black text-[#5B4300] mt-1 font-mono">
 
@@ -21313,9 +19949,17 @@ export default function MasterAdminDashboard() {
 
                     <h2 className="text-base font-black text-[#26231B]">Outside Lorry Fleet Partners</h2>
 
+                    <button
+                      type="button"
+                      onClick={() => { setOutsideForm(emptyOutsideForm); setOutsideFormErrors({}); setOutsideFormServerError(""); setShowOutsideRegModal(true); }}
+                      className="mt-2 px-4 py-2 rounded-xl bg-[#FFC20E] hover:bg-[#e6ae00] text-[#26231B] text-xs font-black shadow-xs cursor-pointer"
+                    >
+                      + Register Outside Employee
+                    </button>
+
                     <p className="text-xs text-[#6F6A5A] mt-0.5">
 
-                      Independent lorry owners operating on the 20% commission model with Rs. 5,000 security deposit.
+                      Independent lorry owners: Rs. 5,000 prepaid wallet, 20% commission per completed hire.
 
                     </p>
 
@@ -21603,7 +20247,7 @@ export default function MasterAdminDashboard() {
 
                                 >
 
-                                  📞 Call
+                                  Call
 
                                 </a>
 
@@ -21633,7 +20277,7 @@ export default function MasterAdminDashboard() {
 
                               <span className="text-xs font-bold text-[#26231B] mt-0.5 block">
 
-                                📍 {emp.baseCity || "Registered Base"}
+                                {emp.baseCity || "Registered Base"}
 
                               </span>
 
@@ -21681,7 +20325,7 @@ export default function MasterAdminDashboard() {
 
                                   }`}>
 
-                                  Rs. {Number(emp.balance || 0).toLocaleString()}
+                                  {formatRs(emp.balance || 0)}
 
                                 </span>
 
@@ -21689,7 +20333,7 @@ export default function MasterAdminDashboard() {
 
                                   <span className="text-[10px] font-bold text-rose-700 bg-rose-100 px-2 py-0.2 rounded-full border border-rose-300">
 
-                                    ⚠️ Low Balance (&lt; Rs. 2,000)
+                                    Low Balance (&lt; Rs. 2,000)
 
                                   </span>
 
@@ -21697,7 +20341,7 @@ export default function MasterAdminDashboard() {
 
                                   <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-2 py-0.2 rounded-full border border-emerald-300">
 
-                                    ✅ Ready for Hires
+                                    Ready for Hires
 
                                   </span>
 
@@ -21713,7 +20357,7 @@ export default function MasterAdminDashboard() {
 
                               <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block">
 
-                                20% Commission Deducted
+                                Commission Deducted
 
                               </span>
 
@@ -22131,7 +20775,7 @@ export default function MasterAdminDashboard() {
 
                               >
 
-                                🔍 Inspect Slip
+                                Inspect Slip
 
                               </button>
 
@@ -22193,7 +20837,6 @@ export default function MasterAdminDashboard() {
 
                               <span className="text-xs font-bold text-emerald-700 flex items-center gap-1.5">
 
-                                <span>✅</span>
 
                                 <span>Credited on {slip.reviewedAt ? formatInquiryDate(slip.reviewedAt) : "Approved"}</span>
 
@@ -22571,7 +21214,7 @@ export default function MasterAdminDashboard() {
 
                           >
 
-                            📞 Call
+                            Call
 
                           </a>
 
@@ -22589,7 +21232,7 @@ export default function MasterAdminDashboard() {
 
                             >
 
-                              💬 WhatsApp
+                              WhatsApp
 
                             </a>
 
@@ -22605,7 +21248,7 @@ export default function MasterAdminDashboard() {
 
                             >
 
-                              ✉️ {inq.email}
+                              {inq.email}
 
                             </a>
 
@@ -22744,6 +21387,162 @@ export default function MasterAdminDashboard() {
       {/* MODAL 1: ADD / EDIT FLEET LORRY                           */}
 
       {/* ========================================================= */}
+
+      {showOutsideRegModal && (
+        <div
+          className="fixed inset-0 z-[99999] bg-black/60 flex items-start justify-center p-4 py-6 backdrop-blur-xs overflow-y-auto"
+          onClick={() => !submittingOutside && setShowOutsideRegModal(false)}
+        >
+          <form
+            onSubmit={handleRegisterOutsideEmployee}
+            noValidate
+            className="w-full max-w-lg bg-white rounded-3xl p-6 shadow-2xl border border-[#E7E2D0] my-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-[#E7E2D0] pb-3 mb-4">
+              <h2 className="text-base font-black text-[#26231B]">Register Outside Employee</h2>
+              <button
+                type="button"
+                disabled={submittingOutside}
+                onClick={() => setShowOutsideRegModal(false)}
+                className="text-[#6F6A5A] hover:text-[#26231B] font-bold text-sm p-1 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A]">Full Name *</span>
+                <input
+                  type="text"
+                  value={outsideForm.name}
+                  placeholder="Owner / driver name"
+                  onChange={(e) => setOutsideForm((p) => ({ ...p, name: e.target.value }))}
+                  className="mt-1 w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B]"
+                />
+                {outsideFormErrors.name && <span className="text-[11px] font-bold text-red-600">{outsideFormErrors.name}</span>}
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A]">NIC Number *</span>
+                <input
+                  type="text"
+                  value={outsideForm.idNumber}
+                  placeholder="912345678V"
+                  onChange={(e) => setOutsideForm((p) => ({ ...p, idNumber: e.target.value }))}
+                  className="mt-1 w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B]"
+                />
+                {outsideFormErrors.idNumber && <span className="text-[11px] font-bold text-red-600">{outsideFormErrors.idNumber}</span>}
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A]">Phone Number *</span>
+                <input
+                  type="text"
+                  value={outsideForm.phone}
+                  placeholder="0771234567"
+                  onChange={(e) => setOutsideForm((p) => ({ ...p, phone: e.target.value }))}
+                  className="mt-1 w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B]"
+                />
+                {outsideFormErrors.phone && <span className="text-[11px] font-bold text-red-600">{outsideFormErrors.phone}</span>}
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A]">Vehicle Number *</span>
+                <input
+                  type="text"
+                  value={outsideForm.plateNumber}
+                  placeholder="WP LK-1234"
+                  onChange={(e) => setOutsideForm((p) => ({ ...p, plateNumber: e.target.value }))}
+                  className="mt-1 w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B]"
+                />
+                {outsideFormErrors.plateNumber && <span className="text-[11px] font-bold text-red-600">{outsideFormErrors.plateNumber}</span>}
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A]">Vehicle Type</span>
+                <input
+                  type="text"
+                  value={outsideForm.vehicleType}
+                  placeholder="14ft Lorry"
+                  onChange={(e) => setOutsideForm((p) => ({ ...p, vehicleType: e.target.value }))}
+                  className="mt-1 w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B]"
+                />
+                {outsideFormErrors.vehicleType && <span className="text-[11px] font-bold text-red-600">{outsideFormErrors.vehicleType}</span>}
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A]">Base Location</span>
+                <input
+                  type="text"
+                  value={outsideForm.baseCity}
+                  placeholder="Colombo"
+                  onChange={(e) => setOutsideForm((p) => ({ ...p, baseCity: e.target.value }))}
+                  className="mt-1 w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B]"
+                />
+                {outsideFormErrors.baseCity && <span className="text-[11px] font-bold text-red-600">{outsideFormErrors.baseCity}</span>}
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A]">Opening Wallet Balance (Rs.)</span>
+                <input
+                  type="text"
+                  value={outsideForm.initialBalance}
+                  placeholder="0"
+                  onChange={(e) => setOutsideForm((p) => ({ ...p, initialBalance: e.target.value }))}
+                  className="mt-1 w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 focus:bg-white focus:border-[#FFC20E] focus:outline-none text-xs font-semibold text-[#26231B]"
+                />
+                {outsideFormErrors.initialBalance && <span className="text-[11px] font-bold text-red-600">{outsideFormErrors.initialBalance}</span>}
+              </label>
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A] block mb-1">Deposit paid by *</span>
+                <PaidIntoSelect
+                  label="Choose cash or bank account"
+                  value={outsideForm.paidInto}
+                  onChange={(v) => setOutsideForm((p) => ({ ...p, paidInto: v }))}
+                />
+                {outsideFormErrors.paidInto && <span className="block text-[11px] font-bold text-red-600">{outsideFormErrors.paidInto}</span>}
+              </div>
+              <label className="block">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#6F6A5A]">Status</span>
+                <select
+                  value={outsideForm.status}
+                  onChange={(e) => setOutsideForm((p) => ({ ...p, status: e.target.value as "active" | "inactive" | "suspended" }))}
+                  className="mt-1 w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE]/75 text-xs font-semibold text-[#26231B]"
+                >
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
+                  <option value="suspended">Suspended</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2 sm:col-span-2 text-xs font-bold text-[#26231B] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={outsideForm.isAvailable}
+                  onChange={(e) => setOutsideForm((p) => ({ ...p, isAvailable: e.target.checked }))}
+                />
+                Available for bookings immediately
+              </label>
+            </div>
+            {outsideFormServerError && (
+              <div className="mt-3 p-2.5 rounded-xl bg-red-50 border border-red-200 text-xs font-bold text-red-700">
+                {outsideFormServerError}
+              </div>
+            )}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={submittingOutside}
+                onClick={() => setShowOutsideRegModal(false)}
+                className="px-4 py-2 rounded-xl border border-[#E7E2D0] text-xs font-bold text-[#6F6A5A] cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={submittingOutside}
+                className="px-5 py-2 rounded-xl bg-[#26231B] text-[#FFC20E] text-xs font-black disabled:opacity-60 cursor-pointer"
+              >
+                {submittingOutside ? "Registering..." : "Register"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {showLorryModal && (
 
@@ -22941,7 +21740,7 @@ export default function MasterAdminDashboard() {
 
                       )
 
-                      ? "🔒 Permanent Driver (Locked)"
+                      ? "Permanent Driver (Locked)"
 
                       : "Assign Rider"}
 
@@ -23917,7 +22716,7 @@ export default function MasterAdminDashboard() {
 
                           <span>Assign Rider (Mandatory) *</span>
 
-                          <span className="text-xs font-bold text-amber-700">🔒 Assigned Driver</span>
+                          <span className="text-xs font-bold text-amber-700">Assigned Driver</span>
 
                         </label>
 
@@ -24049,7 +22848,7 @@ export default function MasterAdminDashboard() {
 
                           const checked = e.target.checked;
 
-                          const sDate = manualForm.date || new Date().toISOString().split("T")[0];
+                          const sDate = manualForm.date || todayYmd();
 
                           const defaultEndDate = checked
 
@@ -24871,7 +23670,7 @@ export default function MasterAdminDashboard() {
 
                             const checked = e.target.checked;
 
-                            const sDate = assignModal.date || new Date().toISOString().split("T")[0];
+                            const sDate = assignModal.date || todayYmd();
 
                             const defaultEndDate = checked
 
@@ -25137,7 +23936,7 @@ export default function MasterAdminDashboard() {
 
                         <option key={v.id || v.plate} value={v.plate}>
 
-                          {v.plate} — {v.vehicleType} {isOut ? "(🤝 Outside Partner)" : "(🏢 Company)"}
+                          {v.plate} — {v.vehicleType} {isOut ? "(Outside Partner)" : "(Company)"}
 
                         </option>
 
@@ -25193,7 +23992,7 @@ export default function MasterAdminDashboard() {
 
                         <div className="flex items-center gap-1.5 font-bold text-amber-900">
 
-                          <span>🔒 Assigned Driver / Permanent Driver (Locked)</span>
+                          <span>Assigned Driver / Permanent Driver (Locked)</span>
 
                         </div>
 
@@ -25925,42 +24724,8 @@ export default function MasterAdminDashboard() {
 
               <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 flex flex-col gap-2">
 
-                <label className="flex items-start gap-2.5 cursor-pointer select-none">
-
-                  <input
-
-                    type="checkbox"
-
-                    checked={deleteCustomerModal.deleteBookings}
-
-                    onChange={(e) =>
-
-                      setDeleteCustomerModal((prev) =>
-
-                        prev ? { ...prev, deleteBookings: e.target.checked } : null
-
-                      )
-
-                    }
-
-                    className="mt-0.5 rounded border-amber-400 text-red-600 focus:ring-red-500"
-
-                  />
-
-                  <span className="text-xs font-bold text-[#26231B] leading-snug">
-
-                    Also permanently delete all {deleteCustomerModal.totalBookings} booking
-
-                    {deleteCustomerModal.totalBookings === 1 ? "" : "s"} for this customer
-
-                  </span>
-
-                </label>
-
-                <p className="text-[11px] text-amber-900 leading-relaxed pl-6">
-
-                  Leave unchecked to remove the customer from the Customers list while keeping past booking &amp; revenue records intact.
-
+                <p className="text-xs text-amber-900 leading-relaxed">
+                  Booking and revenue records are kept. To remove a booking, delete it individually with a reason.
                 </p>
 
               </div>
@@ -26447,7 +25212,7 @@ export default function MasterAdminDashboard() {
 
                       >
 
-                        💵 Cash
+                        Cash
 
                       </button>
 
@@ -26475,7 +25240,7 @@ export default function MasterAdminDashboard() {
 
                       >
 
-                        🏦 Bank Transfer
+                        Bank Transfer
 
                       </button>
 
@@ -26799,7 +25564,7 @@ export default function MasterAdminDashboard() {
 
                   >
 
-                    💵 Cash
+                    Cash
 
                   </button>
 
@@ -26827,7 +25592,7 @@ export default function MasterAdminDashboard() {
 
                   >
 
-                    🏦 Bank Transfer
+                    Bank Transfer
 
                   </button>
 
@@ -26997,7 +25762,6 @@ export default function MasterAdminDashboard() {
 
               <div className="flex items-center gap-2.5">
 
-                <span className="text-xl">✏️</span>
 
                 <div>
 
@@ -27335,7 +26099,7 @@ export default function MasterAdminDashboard() {
 
                         <span>Assigned Rider *</span>
 
-                        <span className="text-xs font-bold text-amber-700">🔒 Assigned Driver</span>
+                        <span className="text-xs font-bold text-amber-700">Assigned Driver</span>
 
                       </label>
 
@@ -27815,7 +26579,7 @@ export default function MasterAdminDashboard() {
 
                 <div className="p-2.5 rounded-lg bg-red-100 border border-red-300 text-red-800 text-xs font-semibold">
 
-                  ⚠️ {deleteBookingModal.error}
+                  {deleteBookingModal.error}
 
                 </div>
 
@@ -27913,6 +26677,13 @@ export default function MasterAdminDashboard() {
 
             {/* Modal Content */}
             <div className="p-5 sm:p-6 overflow-y-auto space-y-5 text-xs text-gray-800">
+              <TripDetails booking={inspectBookingModal} />
+              {bookings
+                .filter((x) => x.tripRole === "return" && x.parentBookingId === inspectBookingModal.id)
+                .map((leg) => (
+                  <TripDetails key={leg.id} booking={leg} />
+                ))}
+
               {/* Executive Metrics Bar */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div className="p-3 rounded-xl border border-gray-200 bg-gray-50/70">
@@ -27946,7 +26717,6 @@ export default function MasterAdminDashboard() {
                 {/* Route & Journey Details */}
                 <div className="border border-gray-200 rounded-xl p-4 bg-white">
                   <h4 className="text-xs font-bold text-gray-900 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-gray-100">
-                    <span>📍</span>
                     <span>Route &amp; Journey Details</span>
                   </h4>
                   <div className="mt-3 space-y-2.5">
@@ -27964,7 +26734,7 @@ export default function MasterAdminDashboard() {
                         <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
                           {inspectBookingModal.waypoints.map((wp, idx) => (
                             <span key={`${wp.name}-${idx}`} className="px-2 py-0.5 rounded bg-blue-50 text-blue-900 border border-blue-200 text-xs font-bold">
-                              {idx + 1}️⃣ {wp.name}
+                              {idx + 1}⃣ {wp.name}
                             </span>
                           ))}
                         </div>
@@ -27998,7 +26768,6 @@ export default function MasterAdminDashboard() {
                 {/* Fleet & Crew */}
                 <div className="border border-gray-200 rounded-xl p-4 bg-white">
                   <h4 className="text-xs font-bold text-gray-900 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-gray-100">
-                    <span>🚚</span>
                     <span>Fleet &amp; Personnel</span>
                   </h4>
                   <div className="mt-3 space-y-2.5">
@@ -28032,7 +26801,6 @@ export default function MasterAdminDashboard() {
                 {/* Financial & Banking Settlement */}
                 <div className="border border-gray-200 rounded-xl p-4 bg-white">
                   <h4 className="text-xs font-bold text-gray-900 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-gray-100">
-                    <span>💳</span>
                     <span>Financial &amp; Banking Details</span>
                   </h4>
                   <div className="mt-3 space-y-2.5">
@@ -28090,7 +26858,6 @@ export default function MasterAdminDashboard() {
                 {/* Customer & Trip History */}
                 <div className="border border-gray-200 rounded-xl p-4 bg-white">
                   <h4 className="text-xs font-bold text-gray-900 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-gray-100">
-                    <span>👤</span>
                     <span>Customer Profile &amp; Timings</span>
                   </h4>
                   <div className="mt-3 space-y-2.5">

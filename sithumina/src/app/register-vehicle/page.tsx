@@ -47,6 +47,7 @@ export default function RegisterVehiclePage() {
 
   // Deposit slip
   const [depositSlip, setDepositSlip] = useState<string>("");
+  const [depositBank, setDepositBank] = useState("");
 
   useEffect(() => {
     const unsub = subscribePaymentBankAccounts((accs) => {
@@ -123,6 +124,7 @@ export default function RegisterVehiclePage() {
         dimensions: form.dimensions,
         images: imagesList,
         depositSlipUrl: depositSlip,
+        depositBank,
         initialDepositAmount: 5000,
       });
 
@@ -194,8 +196,8 @@ export default function RegisterVehiclePage() {
         </h1>
         <p className="text-[var(--mut)] text-sm leading-relaxed">
           {locale === "en"
-            ? "Connect your outside lorry with Sithumina Transport to receive island-wide cargo bookings with an initial Rs. 5,000 security deposit and automatic 20% commission settlement per completed booking."
-            : "සිතුමිණ ට්‍රාන්ස්පෝර්ට් පද්ධතිය සමඟ පිටින් සම්බන්ධ වන ලොරි හිමිකරුවන් සඳහා වන ලියාපදිංචි පෝරමය. ආරම්භක රු. 5,000 තැන්පතුව සහ ස්වයංක්‍රීය 20% කොමිස් ක්‍රමය යටතේ සෘජු Bookings ලබාගන්න."}
+            ? "Connect your outside lorry with Sithumina Transport to receive island-wide cargo bookings with an initial Rs. 5,000 deposit and a 20% commission per completed hire."
+            : "සිතුමිණ ට්‍රාන්ස්පෝර්ට් පද්ධතිය සමඟ පිටින් සම්බන්ධ වන ලොරි හිමිකරුවන් සඳහා වන ලියාපදිංචි පෝරමය. ආරම්භක රු. 5,000 තැන්පතුව සහ අවසන් වූ සෑම Hire එකකින්ම 20% කොමිස් ක්‍රමය යටතේ සෘජු Bookings ලබාගන්න."}
         </p>
       </div>
 
@@ -455,7 +457,6 @@ export default function RegisterVehiclePage() {
                   </div>
                 ) : (
                   <label className="aspect-[4/3] rounded-xl border-2 border-dashed border-[var(--line)] hover:border-[#FFC20E] flex flex-col items-center justify-center gap-1.5 text-center cursor-pointer p-3 transition-colors bg-white/50">
-                    <span className="text-2xl">📸</span>
                     <span className="text-xs font-bold text-[var(--ink)]">
                       {locale === "en" ? "Upload Front Photo" : "ඉදිරිපස ඡායාරූපය"}
                     </span>
@@ -488,7 +489,6 @@ export default function RegisterVehiclePage() {
                   </div>
                 ) : (
                   <label className="aspect-[4/3] rounded-xl border-2 border-dashed border-[var(--line)] hover:border-[#FFC20E] flex flex-col items-center justify-center gap-1.5 text-center cursor-pointer p-3 transition-colors bg-white/50">
-                    <span className="text-2xl">📸</span>
                     <span className="text-xs font-bold text-[var(--ink)]">
                       {locale === "en" ? "Upload Side Photo" : "පැති ඡායාරූපය"}
                     </span>
@@ -521,7 +521,6 @@ export default function RegisterVehiclePage() {
                   </div>
                 ) : (
                   <label className="aspect-[4/3] rounded-xl border-2 border-dashed border-[var(--line)] hover:border-[#FFC20E] flex flex-col items-center justify-center gap-1.5 text-center cursor-pointer p-3 transition-colors bg-white/50">
-                    <span className="text-2xl">📸</span>
                     <span className="text-xs font-bold text-[var(--ink)]">
                       {locale === "en" ? "Upload Rear Photo" : "පිටුපස ඡායාරූපය"}
                     </span>
@@ -538,7 +537,7 @@ export default function RegisterVehiclePage() {
             </div>
           </div>
 
-          {/* Section 4: Rs. 5,000 Security Deposit & 20% Commission Model */}
+          {/* Section 4: Rs. 5,000 Deposit & 20% Commission Model */}
           <div className="p-6 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-4">
             <div className="flex items-center gap-2 pb-2 border-b border-[var(--line)]">
               <span className="w-6 h-6 rounded-full bg-[var(--y)] text-[#26231B] font-black text-xs grid place-items-center">
@@ -553,7 +552,6 @@ export default function RegisterVehiclePage() {
 
             <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 flex flex-col gap-2 text-xs text-amber-950">
               <div className="flex items-center gap-2 font-bold text-sm text-amber-900">
-                <span>💰</span>
                 <span>
                   {locale === "en"
                     ? "Initial Security Deposit: LKR 5,000.00"
@@ -562,8 +560,8 @@ export default function RegisterVehiclePage() {
               </div>
               <p className="leading-relaxed">
                 {locale === "en"
-                  ? "Every outside vehicle owner deposits Rs. 5,000 to activate their account. When you receive a confirmed hire through Sithumina Transport, a 20% commission is automatically deducted from this balance (e.g. Rs. 4,000 deducted on a Rs. 20,000 hire). If your balance falls below the 20% commission needed for incoming hires, new bookings will be paused until topped up."
-                  : "පිටින් ලියාපදිංචි වන සෑම වාහන හිමිකරුවෙකුම රු. 5,000ක මුදලක් තැන්පත් කළ යුතුය. පද්ධතිය හරහා Hire එකක් තහවුරු වූ පසු, එම මුදලින් 20%ක කොමිස් මුදලක් ඔබගේ රු. 5,000 ශේෂයෙන් ස්වයංක්‍රීයව අඩු වේ (උදා: රු. 20,000ක Hire එකකින් රු. 4,000ක් අඩු වීම). ශේෂය ප්‍රමාණවත් නොවන විට අලුත් Bookings ලබාගැනීමට නැවත මුදල් තැන්පත් (Top-up) කළ යුතුය."}
+                  ? "Every outside vehicle owner deposits Rs. 5,000 as their starting wallet balance, and collects each fare directly from the customer. When a hire is completed, 20% of the hire amount is deducted from it (e.g. Rs. 400 on a Rs. 2,000 hire, leaving Rs. 4,600). The balance may go below zero; hires are not blocked, and the owed amount can be paid by top-up."
+                  : "පිටින් ලියාපදිංචි වන සෑම වාහන හිමිකරුවෙකුම රු. 5,000ක් ආරම්භක ශේෂය ලෙස තැන්පත් කළ යුතුය. Hire එකක් අවසන් වූ පසු එහි මුදලින් 20%ක් ශේෂයෙන් අඩු වේ (උදා: රු. 2,000ක Hire එකකින් රු. 400ක් අඩු වී රු. 4,600ක් ඉතිරි වේ). ශේෂය ඍණ වුවත් Bookings නතර නොවන අතර හිඟ මුදල Top-up කර ගෙවිය හැක."}
               </p>
             </div>
 
@@ -604,6 +602,23 @@ export default function RegisterVehiclePage() {
 
             {/* Bank Deposit Slip Upload */}
             <div className="flex flex-col gap-2 p-4 rounded-2xl border border-[var(--line)] bg-[var(--bg)]">
+              <label className="block">
+                <span className="block text-xs font-bold text-[var(--ink)] mb-1.5">
+                  {locale === "en" ? "Account you paid the deposit into" : "තැන්පතුව ගෙවූ බැංකු ගිණුම"}
+                </span>
+                <select
+                  value={depositBank}
+                  onChange={(e) => setDepositBank(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] font-semibold"
+                >
+                  <option value="">{locale === "en" ? "Select a bank account" : "බැංකු ගිණුම තෝරන්න"}</option>
+                  {bankAccounts.map((a) => (
+                    <option key={a.id} value={`${a.bankName} - ${a.accountNumber}`}>
+                      {a.bankName} - {a.accountNumber}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <label className="text-xs font-bold text-[var(--ink)] flex items-center justify-between">
                 <span>
                   {locale === "en"
@@ -638,7 +653,6 @@ export default function RegisterVehiclePage() {
                 </div>
               ) : (
                 <label className="p-4 rounded-xl border-2 border-dashed border-[var(--line)] hover:border-[#FFC20E] flex items-center justify-center gap-2 text-center cursor-pointer transition-colors bg-white/60">
-                  <span className="text-xl">📄</span>
                   <div className="flex flex-col text-left">
                     <span className="text-xs font-bold text-[var(--ink)]">
                       {locale === "en"

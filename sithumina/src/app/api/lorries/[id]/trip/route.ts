@@ -11,7 +11,7 @@ export async function POST(
     const { id } = await params;
     const body = await request.json();
 
-    const lorry = upsertLorryTripInStore({
+    const lorry = await upsertLorryTripInStore({
       ...body,
       lorryId: id,
     });

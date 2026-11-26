@@ -12,6 +12,7 @@ import {
 } from "@/lib/server-store";
 import { ActionResult, DriverRegistrationInput } from "./types";
 import { db } from "@/lib/firebase";
+import { allocateDriverId } from "@/lib/driver-ids";
 import { collection, doc, getDocs, setDoc, deleteDoc } from "firebase/firestore";
 
 /**
@@ -66,7 +67,7 @@ export async function getLorriesAction(): Promise<ActionResult<StoredLorry[]>> {
 
       return { success: true, data: Array.from(merged.values()) };
     } catch {
-      const lorries = getAllStoredLorries();
+      const lorries = await getAllStoredLorries();
       return { success: true, data: lorries };
     }
   } catch (err: unknown) {
@@ -90,7 +91,7 @@ export async function updateLorryStatusAction(
       return { success: false, error: "Vehicle identifier is required." };
     }
 
-    const updatedLocal = updateLorryStatusInStore(identifier, status);
+    const updatedLocal = await updateLorryStatusInStore(identifier, status);
     let firestoreOk = false;
     try {
       const rawCleanId = (updatedLocal?.id || identifier.trim().toLowerCase()).replace(/\//g, "-");
@@ -171,7 +172,7 @@ export async function updateLorryLocationAction(
       return { success: false, error: "Valid latitude and longitude numbers are required." };
     }
 
-    const updated = updateLorryGpsInStore(identifier, numLat, numLng, heading, speedKmH);
+    const updated = await updateLorryGpsInStore(identifier, numLat, numLng, heading, speedKmH);
 
     try {
       const liveKey = (updated.plate || identifier)
@@ -224,13 +225,13 @@ export async function registerDriverAndLorryAction(
       return { success: false, error: "Driver name, phone number, and vehicle plate are required." };
     }
 
-    const result = registerDriverInStore({
+    const result = await registerDriverInStore({
       name,
       phone,
       plate,
       vehicleType: input.vehicleType || "Lorry Fleet",
       route: input.route || "Island-wide Fleet",
-      driverId: input.driverId,
+      driverId: input.driverId || (await allocateDriverId()),
     });
 
     try {
@@ -269,7 +270,7 @@ export async function deleteLorryAction(id: string): Promise<ActionResult<boolea
       return { success: false, error: "Lorry ID is required." };
     }
 
-    const deleted = deleteLorryFromStore(id);
+    const deleted = await deleteLorryFromStore(id);
 
     const rawTrim = id.trim();
     const cleanAlnum = rawTrim.replace(/^lorry-/i, "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();

@@ -50,6 +50,9 @@ export interface CustomerMapPin {
   bookingId?: string;
   phone?: string;
   packageDetails?: string;
+  kind?: "pickup" | "dropoff" | "via";
+  /** The stop the driver is heading to now. */
+  isNext?: boolean;
 }
 
 interface SriLankaMapViewerProps {
@@ -1240,31 +1243,39 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
       if (!Array.isArray(pins) || pins.length === 0) return;
 
       var allBounds = [];
+      var routeEnds = {};
       pins.forEach(function(cp) {
         if (typeof cp.lat === 'number' && typeof cp.lng === 'number' && !isNaN(cp.lat) && !isNaN(cp.lng)) {
           allBounds.push([cp.lat, cp.lng]);
-          
-          var custSvg = '<svg width="18" height="18" viewBox="0 0 24 24" fill="#FFFFFF"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>';
-          var custHtml = '<div style="position:relative; width:36px; height:36px;">' +
-            '<div style="position:absolute; inset:-4px; border-radius:50%; background:rgba(26,115,232,0.35); border:1.5px solid #1A73E8; animation:pulseAnim 1.8s infinite ease-out; pointer-events:none;"></div>' +
-            '<div style="position:relative; z-index:2; background:#1A73E8; color:#ffffff; border:2.5px solid #ffffff; border-radius:50%; width:36px; height:36px; display:flex; align-items:center; justify-content:center; box-shadow:0 4px 14px rgba(0,0,0,0.45);">' + custSvg + '</div>' +
+
+          // Pickup: green "P". Drop-off: red "D". Via town: small grey dot.
+          var style = cp.kind === 'dropoff'
+            ? { color: '#D93025', letter: 'D', label: 'Drop-off', size: 36 }
+            : cp.kind === 'via'
+              ? { color: '#5F6368', letter: '', label: 'Via town', size: 18 }
+              : { color: '#188038', letter: 'P', label: 'Pickup', size: 36 };
+          var pulse = cp.isNext
+            ? '<div style="position:absolute; inset:-5px; border-radius:50%; border:2px solid ' + style.color + '; animation:pulseAnim 1.8s infinite ease-out; pointer-events:none;"></div>'
+            : '';
+          var custHtml = '<div style="position:relative; width:' + style.size + 'px; height:' + style.size + 'px;">' + pulse +
+            '<div style="position:relative; z-index:2; box-sizing:border-box; background:' + style.color + '; color:#ffffff; border:2.5px solid #ffffff; border-radius:50%; width:100%; height:100%; display:flex; align-items:center; justify-content:center; font-weight:900; font-size:16px; box-shadow:0 4px 14px rgba(0,0,0,0.45);">' + style.letter + '</div>' +
             '</div>';
-          
+
           var custIcon = L.divIcon({
             className: 'cust-marker-icon',
             html: custHtml,
-            iconSize: [36, 36],
-            iconAnchor: [18, 18],
-            popupAnchor: [0, -18]
+            iconSize: [style.size, style.size],
+            iconAnchor: [style.size / 2, style.size / 2],
+            popupAnchor: [0, -style.size / 2]
           });
-          
+
           var marker = L.marker([cp.lat, cp.lng], { icon: custIcon }).addTo(map);
-          var phoneHtml = cp.phone ? ('<div style="font-size:11px; color:#60A5FA; margin-top:2px; font-weight:700;">📞 ' + cp.phone + '</div>') : '';
-          var pkgHtml = cp.packageDetails ? ('<div style="font-size:10.5px; color:#E5E7EB; margin-top:3px; background:rgba(255,255,255,0.08); padding:3px 6px; border-radius:6px;">📦 ' + cp.packageDetails + '</div>') : '';
-          
-          var popHtml = '<div style="background:#26231B; color:#F6F1DF; padding:8px 10px; border-radius:12px; border:1.5px solid #1A73E8; min-width:190px;">' +
-            '<div style="color:#60A5FA; font-weight:900; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">📍 Customer Pickup (Booked)</div>' +
-            '<div style="color:#FFFFFF; font-weight:800; font-size:14px; margin:2px 0;">' + (cp.title || 'Customer') + '</div>' +
+          var phoneHtml = cp.phone ? ('<div style="font-size:11px; color:#60A5FA; margin-top:2px; font-weight:700;">' + cp.phone + '</div>') : '';
+          var pkgHtml = cp.packageDetails ? ('<div style="font-size:10.5px; color:#E5E7EB; margin-top:3px; background:rgba(255,255,255,0.08); padding:3px 6px; border-radius:6px;">' + cp.packageDetails + '</div>') : '';
+
+          var popHtml = '<div style="background:#26231B; color:#F6F1DF; padding:8px 10px; border-radius:12px; border:1.5px solid ' + style.color + '; min-width:190px;">' +
+            '<div style="color:#ffffff; background:' + style.color + '; display:inline-block; padding:1px 6px; border-radius:5px; font-weight:900; font-size:10px; text-transform:uppercase;">' + style.label + '</div>' +
+            '<div style="color:#FFFFFF; font-weight:800; font-size:14px; margin:2px 0;">' + (cp.title || 'Stop') + '</div>' +
             '<div style="font-size:11px; color:#D1D5DB;">' + (cp.subtitle || '') + '</div>' +
             phoneHtml +
             pkgHtml +
@@ -1272,24 +1283,27 @@ export const SriLankaMapViewer: React.FC<SriLankaMapViewerProps> = ({
           marker.bindPopup(popHtml);
           customerMarkers.push(marker);
 
-          // Dotted PickMe route corridor connecting lorry to customer pickup location
-          if (focusLorryGlobal && typeof focusLorryGlobal.lat === 'number' && typeof focusLorryGlobal.lng === 'number') {
-            var connGlow = L.polyline([[focusLorryGlobal.lat, focusLorryGlobal.lng], [cp.lat, cp.lng]], {
-              color: '#1A73E8',
-              weight: 5,
-              opacity: 0.5,
-              lineCap: 'round'
-            }).addTo(map);
-            var connDash = L.polyline([[focusLorryGlobal.lat, focusLorryGlobal.lng], [cp.lat, cp.lng]], {
-              color: '#60A5FA',
-              weight: 3,
-              dashArray: '6, 8',
-              opacity: 0.9,
-              lineCap: 'round'
-            }).addTo(map);
-            customerRouteLines.push(connGlow);
-            customerRouteLines.push(connDash);
+          if (cp.bookingId && (cp.kind === 'pickup' || cp.kind === 'dropoff')) {
+            routeEnds[cp.bookingId] = routeEnds[cp.bookingId] || {};
+            routeEnds[cp.bookingId][cp.kind] = [cp.lat, cp.lng];
           }
+
+          // Solid line from the lorry to the next stop only
+          if (cp.isNext && focusLorryGlobal && typeof focusLorryGlobal.lat === 'number' && typeof focusLorryGlobal.lng === 'number') {
+            customerRouteLines.push(L.polyline([[focusLorryGlobal.lat, focusLorryGlobal.lng], [cp.lat, cp.lng]], {
+              color: '#1A73E8', weight: 4, opacity: 0.85, lineCap: 'round'
+            }).addTo(map));
+          }
+        }
+      });
+
+      // Dashed line joining each booking's own pickup and drop-off
+      Object.keys(routeEnds).forEach(function(id) {
+        var ends = routeEnds[id];
+        if (ends.pickup && ends.dropoff) {
+          customerRouteLines.push(L.polyline([ends.pickup, ends.dropoff], {
+            color: '#26231B', weight: 3, dashArray: '6, 8', opacity: 0.8
+          }).addTo(map));
         }
       });
 

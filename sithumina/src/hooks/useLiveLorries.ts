@@ -7,10 +7,15 @@ import {
   updateLorryStatus,
   updateLorryLocation,
 } from "@/lib/db-services";
+import { db } from "@/lib/firebase";
+import { collection, onSnapshot } from "firebase/firestore";
+import { normalizeVehicleKey } from "@/lib/trip-state";
 
 export interface UseLiveLorriesOptions {
   pollingIntervalMs?: number;
   simulateMovement?: boolean;
+  /** Customer views: only vehicles that are currently on an ongoing trip. */
+  onlyOngoing?: boolean;
 }
 
 export interface UseLiveLorriesReturn {
@@ -38,8 +43,27 @@ export interface UseLiveLorriesReturn {
 export function useLiveLorries({
   pollingIntervalMs = 4000,
   simulateMovement = false,
+  onlyOngoing = false,
 }: UseLiveLorriesOptions = {}): UseLiveLorriesReturn {
-  const [lorries, setLorries] = useState<Lorry[]>([]);
+  const [allLorries, setLorries] = useState<Lorry[]>([]);
+  const [ongoingPlates, setOngoingPlates] = useState<Set<string> | null>(null);
+
+  useEffect(() => {
+    if (!onlyOngoing) return;
+    return onSnapshot(
+      collection(db, "active_trips"),
+      (snap) => setOngoingPlates(new Set(snap.docs.map((d) => d.id))),
+      () => setOngoingPlates(new Set())
+    );
+  }, [onlyOngoing]);
+
+  const lorries = useMemo(
+    () =>
+      onlyOngoing
+        ? allLorries.filter((l) => ongoingPlates?.has(normalizeVehicleKey(l.plate)))
+        : allLorries,
+    [allLorries, ongoingPlates, onlyOngoing]
+  );
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<Error | null>(null);
   const [selectedLorryId, setSelectedLorryId] = useState<string | null>(null);
@@ -172,7 +196,7 @@ export function useLiveLorries({
   return {
     lorries,
     nearbyLorries,
-    loading,
+    loading: loading || (onlyOngoing && ongoingPlates === null),
     error,
     isLive: true,
     activeCount,

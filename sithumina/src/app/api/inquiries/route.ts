@@ -28,7 +28,7 @@ export async function GET() {
     return NextResponse.json({ success: true, inquiries });
   } catch (err) {
     console.warn("Firestore inquiries GET fallback to local store:", err);
-    const inquiries = getAllStoredInquiries();
+    const inquiries = await getAllStoredInquiries();
     return NextResponse.json({ success: true, inquiries });
   }
 }
@@ -45,7 +45,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const inquiry = addInquiryInStore({
+    const inquiry = await addInquiryInStore({
       name,
       phone,
       email,
@@ -79,7 +79,7 @@ export async function PATCH(request: Request) {
       );
     }
 
-    const updatedLocal = updateInquiryStatusInStore(id, status);
+    const updatedLocal = await updateInquiryStatusInStore(id, status);
     let firestoreOk = false;
     try {
       await setDoc(

@@ -1,5 +1,6 @@
 "use client";
 
+import { todayYmd } from "@/lib/ledger";
 import React, { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -11,6 +12,7 @@ import {
   createBookingAction,
   trackBookingAction,
 } from "@/actions";
+import LocationPicker, { type Pin } from "@/components/LocationPicker";
 import { normalizePhoneNumber } from "@/lib/phone-utils";
 import { findNearestSriLankanCity, getDistanceFromLatLonInKm } from "@/lib/geo-utils";
 import { SRI_LANKA_CITIES } from "@/lib/sri-lanka-routes";
@@ -249,7 +251,6 @@ function FleetVehicleCard({
           {/* Base Location & Distance */}
           <div className="flex items-center justify-between gap-1 text-[11px] pt-1.5 border-t border-[var(--line)]">
             <span className="text-[var(--mut)] flex items-center gap-1 truncate">
-              <span>📍</span>
               <span className="font-normal">{locale === "en" ? "Base:" : "මූලස්ථානය:"}</span>
               <strong className="text-[var(--ink)] font-bold">{baseCity}</strong>
             </span>
@@ -333,6 +334,8 @@ function BookVehicleContent() {
   // GPS State for customer live location
   const [isLocating, setIsLocating] = useState(false);
   const [gpsCoords, setGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [pickupPin, setPickupPin] = useState<Pin | null>(null);
+  const [dropPin, setDropPin] = useState<Pin | null>(null);
   const [gpsError, setGpsError] = useState<string | null>(null);
 
   // Location Proximity Search state
@@ -593,8 +596,12 @@ function BookVehicleContent() {
         assignedDriverId: selectedVehicle.driverId,
         assignedDriverName: selectedVehicle.driverName,
         assignedDriverPhone: selectedVehicle.driverPhone,
-        pickupLat: gpsCoords?.lat,
-        pickupLng: gpsCoords?.lng,
+        pickupLat: pickupPin?.lat ?? gpsCoords?.lat,
+        pickupLng: pickupPin?.lng ?? gpsCoords?.lng,
+        pickupPinned: Boolean(pickupPin || gpsCoords),
+        deliveryLat: dropPin?.lat,
+        deliveryLng: dropPin?.lng,
+        dropoffPinned: Boolean(dropPin),
         bookingType: "individual_vehicle",
         cargoNature: form.cargoNature,
         daysNeeded: String(allSelectedDates.length || form.daysNeeded || 1),
@@ -825,7 +832,7 @@ function BookVehicleContent() {
             {activeSearchCoords && (
               <div className="flex items-center justify-between gap-2 pt-2 border-t border-[var(--line)]">
                 <span className="text-[11px] font-bold text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
-                  📍 {locale === "en"
+                  {locale === "en"
                     ? `Nearest to ${searchLocation || "GPS location"}`
                     : `${searchLocation || "ඔබගේ ස්ථානයට"} ආසන්නතම අනුපිළිවෙළින්`}
                 </span>
@@ -977,7 +984,7 @@ function BookVehicleContent() {
                       {selectedVehicle.plate}
                     </span>
                     <span className="px-2.5 py-1 rounded-md bg-[var(--bg)] text-[var(--ink)] border border-[var(--line)] font-bold text-xs">
-                      📍 {getLorryBaseCity(selectedVehicle)}
+                      {getLorryBaseCity(selectedVehicle)}
                     </span>
                   </div>
                   <h2 className="text-xl font-black text-[var(--ink)] mt-2">
@@ -1136,7 +1143,6 @@ function BookVehicleContent() {
               {/* Unavailable Warning */}
               {(selectedVehicle as any).isAvailable === false && (
                 <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-center gap-2.5">
-                  <span className="text-lg">⚠️</span>
                   <div>
                     <strong className="font-bold block">
                       {locale === "en" ? "Vehicle Currently Unavailable" : "මෙම වාහනය දැනට සේවයේ නොමැත"}
@@ -1272,6 +1278,13 @@ function BookVehicleContent() {
                 onChange={(e) => setForm({ ...form, pickup: e.target.value })}
                 className="w-full px-4 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] focus:outline-none focus:border-[var(--ink)] font-semibold"
               />
+              <LocationPicker
+                label={locale === "en" ? "Pickup location" : "බඩු ගන්නා ස්ථානය"}
+                address={form.pickup}
+                pin={pickupPin}
+                onChange={setPickupPin}
+                locale={locale}
+              />
 
               {gpsCoords && (
                 <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-green-50 border border-green-200 text-green-800 text-[11px] font-bold">
@@ -1298,6 +1311,13 @@ function BookVehicleContent() {
                 value={form.destination}
                 onChange={(e) => setForm({ ...form, destination: e.target.value })}
                 className="w-full px-4 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] focus:outline-none focus:border-[var(--ink)] font-semibold"
+              />
+              <LocationPicker
+                label={locale === "en" ? "Drop-off location" : "බඩු බාන ස්ථානය"}
+                address={form.destination}
+                pin={dropPin}
+                onChange={setDropPin}
+                locale={locale}
               />
             </div>
           </div>
@@ -1327,7 +1347,7 @@ function BookVehicleContent() {
                   id="individual-booking-date"
                   type="date"
                   required
-                  min={new Date().toISOString().split("T")[0]}
+                  min={todayYmd()}
                   value={form.date}
                   onChange={(e) => {
                     const nextDate = e.target.value;

@@ -1,10 +1,12 @@
 "use client";
 
+import { todayYmd } from "@/lib/ledger";
 import React, { useState } from "react";
 import { useLanguage } from "@/context/LanguageContext";
 import { useAuth } from "@/context/AuthContext";
 import { Lorry } from "@/lib/mock-lorries";
 import { createBookingAction } from "@/actions";
+import LocationPicker, { type Pin } from "@/components/LocationPicker";
 import { resolveLocationCoordinates } from "@/lib/sri-lanka-routes";
 
 interface LiveLorryBookingModalProps {
@@ -38,6 +40,8 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
   const [idNumber, setIdNumber] = useState("");
   const [whatsapp, setWhatsapp] = useState("");
   const [pickupCity, setPickupCity] = useState(lorry?.startLocation || "");
+  const [pickupPin, setPickupPin] = useState<Pin | null>(null);
+  const [dropPin, setDropPin] = useState<Pin | null>(null);
   const [deliveryCity, setDeliveryCity] = useState(lorry?.endLocation || "");
   const [cargoNature, setCargoNature] = useState(CARGO_NATURE_OPTIONS[0].en);
   const [cargoDetails, setCargoDetails] = useState("");
@@ -105,11 +109,13 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
         customerIdNumber: cIdNumber,
         pickup: pCity,
         destination: dCity,
-        pickupLat: pCoords ? pCoords[0] : undefined,
-        pickupLng: pCoords ? pCoords[1] : undefined,
-        deliveryLat: dCoords ? dCoords[0] : undefined,
-        deliveryLng: dCoords ? dCoords[1] : undefined,
-        date: new Date().toISOString().split("T")[0],
+        pickupLat: pickupPin?.lat ?? pCoords?.[0],
+        pickupLng: pickupPin?.lng ?? pCoords?.[1],
+        deliveryLat: dropPin?.lat ?? dCoords?.[0],
+        deliveryLng: dropPin?.lng ?? dCoords?.[1],
+        pickupPinned: Boolean(pickupPin),
+        dropoffPinned: Boolean(dropPin),
+        date: todayYmd(),
         vehicleType: lorry.vehicleType || "Live Empty Lorry",
         notes: fullCargoDescription,
         cargoNature,
@@ -236,7 +242,7 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
           <form onSubmit={handleSubmit} className="p-4 sm:p-5 flex flex-col gap-3.5 max-h-[70vh] overflow-y-auto">
             {errorMessage && (
               <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-bold">
-                ⚠️ {errorMessage}
+                {errorMessage}
               </div>
             )}
 
@@ -311,6 +317,13 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
                   onChange={(e) => setPickupCity(e.target.value)}
                   className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] font-bold focus:outline-none focus:border-[#FFC20E]"
                 />
+                <LocationPicker
+                  label="Pickup location"
+                  address={pickupCity}
+                  pin={pickupPin}
+                  onChange={setPickupPin}
+                  locale={locale}
+                />
               </div>
 
               <div>
@@ -323,6 +336,13 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
                   value={deliveryCity}
                   onChange={(e) => setDeliveryCity(e.target.value)}
                   className="w-full px-3 py-2 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-xs text-[#26231B] font-bold focus:outline-none focus:border-[#FFC20E]"
+                />
+                <LocationPicker
+                  label="Drop-off location"
+                  address={deliveryCity}
+                  pin={dropPin}
+                  onChange={setDropPin}
+                  locale={locale}
                 />
               </div>
             </div>

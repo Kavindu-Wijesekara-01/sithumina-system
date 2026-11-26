@@ -18,9 +18,6 @@ export default function ManageRedirectPage() {
   return (
     <main className="min-h-[60vh] flex items-center justify-center p-6 text-center">
       <div className="max-w-md p-8 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-lg flex flex-col items-center gap-4">
-        <div className="w-16 h-16 rounded-2xl bg-[#26231B] text-[#FFC20E] flex items-center justify-center text-2xl shadow-xs">
-          🚚
-        </div>
 
         <h1 className="text-xl font-black text-[var(--ink)]">
           Sithumina Driver App &amp; Hub
@@ -35,7 +32,6 @@ export default function ManageRedirectPage() {
             href="/login?tab=employee"
             className="w-full py-2.5 rounded-xl bg-[#26231B] text-[#FFC20E] text-xs font-black no-underline hover:opacity-90 transition-all flex items-center justify-center gap-1.5 shadow-sm"
           >
-            <span>📱</span>
             <span>Open Driver App &amp; Portal (Login) →</span>
           </Link>
           <Link
