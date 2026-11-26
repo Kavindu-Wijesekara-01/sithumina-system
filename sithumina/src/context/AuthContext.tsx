@@ -31,17 +31,35 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 // Matches the session cookie lifetime in app/api/auth/session
 const SESSION_MS = 5 * 24 * 60 * 60 * 1000;
 
-/** The server needs a cookie to recognise this browser in Server Actions and APIs. */
-async function startServerSession(user: User): Promise<boolean> {
-  const res = await fetch("/api/auth/session", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ idToken: await user.getIdToken(true) }),
-  });
-  return res.ok;
+let session: { key: string; ready: Promise<boolean> } | null = null;
+
+/**
+ * The server needs a cookie to recognise this browser in Server Actions and APIs.
+ * Created once per sign-in; everyone who needs it awaits the same request.
+ */
+function startServerSession(user: User, authTime: string): Promise<boolean> {
+  const key = `${user.uid}:${authTime}`;
+  if (session?.key !== key) {
+    const ready = (async () => {
+      const res = await fetch("/api/auth/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken: await user.getIdToken() }),
+      });
+      return res.ok;
+    })().catch(() => false);
+    session = { key, ready };
+    void ready.then((ok) => {
+      if (!ok && session?.key === key) session = null;
+    });
+  }
+  return session.ready;
 }
 
-const endServerSession = () => fetch("/api/auth/session", { method: "DELETE" }).catch(() => {});
+const endServerSession = () => {
+  session = null;
+  return fetch("/api/auth/session", { method: "DELETE" }).catch(() => {});
+};
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -59,6 +77,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             await endServerSession();
             await signOut(auth);
             return;
+          }
+          // On a new sign-in, pages must not call the server before the cookie exists
+          if (current && token && Date.now() - Date.parse(token.authTime) < 4 * 60 * 1000) {
+            await startServerSession(current, token.authTime);
           }
           const claims = token?.claims;
           const role = claims?.role as Role | undefined;
@@ -86,7 +108,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!email || !password) return { ok: false, error: "Enter your phone number or ID, and your password." };
     try {
       const credential = await signInWithEmailAndPassword(auth, email, password);
-      if (!(await startServerSession(credential.user))) {
+      const { authTime } = await credential.user.getIdTokenResult();
+      if (!(await startServerSession(credential.user, authTime))) {
         await signOut(auth);
         return { ok: false, error: "Sign-in could not be verified. Please try again." };
       }

@@ -4,8 +4,8 @@
  * Only records that do NOT already exist in Firestore are added; nothing is
  * overwritten. Without --apply it only reports what it would do.
  *
- *   node --env-file=.env.local scripts/import-fleet-store.mjs
- *   node --env-file=.env.local scripts/import-fleet-store.mjs --apply
+ *   node --env-file=.env scripts/import-fleet-store.mjs
+ *   node --env-file=.env scripts/import-fleet-store.mjs --apply
  */
 import { readFile } from "node:fs/promises";
 import { initializeApp } from "firebase/app";
@@ -19,7 +19,7 @@ const config = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 if (!config.projectId) {
-  console.error("Firebase settings are missing. Run with --env-file=.env.local");
+  console.error("Firebase settings are missing. Run with --env-file=.env");
   process.exit(1);
 }
 

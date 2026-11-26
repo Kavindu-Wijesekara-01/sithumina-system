@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import { collection, onSnapshot, query, where, type Query } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import { useAuth } from "@/context/AuthContext";
 import type { LedgerContext, Reversal, WalletEntry } from "@/lib/ledger";
 
 export function useLedger(): LedgerContext & { error: boolean } {
@@ -11,7 +12,13 @@ export function useLedger(): LedgerContext & { error: boolean } {
   const [reversals, setReversals] = useState<Reversal[]>([]);
   const [error, setError] = useState(false);
 
+  const { profile } = useAuth();
+  const isAdmin = profile?.role === "admin";
+
   useEffect(() => {
+    // The rules refuse these reads until an admin is signed in
+    if (!isAdmin) return;
+    setError(false);
     const read = <T,>(source: Query, set: (rows: T[]) => void) =>
       onSnapshot(
         source,
@@ -28,7 +35,7 @@ export function useLedger(): LedgerContext & { error: boolean } {
       stopWallet();
       stopReversals();
     };
-  }, []);
+  }, [isAdmin]);
 
   return { wallet, reversals, error };
 }

@@ -66,7 +66,7 @@ export default function TripDetails({
     >
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <span
-          className={`px-2 py-0.5 rounded font-black text-[10px] uppercase tracking-wide ${isReturn ? "bg-sky-700 text-white" : "bg-gray-900 text-white"}`}
+          className={`px-2 py-0.5 rounded font-semibold text-xs ${isReturn ? "bg-sky-700 text-white" : "bg-gray-900 text-white"}`}
         >
           {isReturn ? `Return booking, attached to ${b.parentBookingId}` : "Primary trip"}
         </span>
@@ -87,7 +87,7 @@ export default function TripDetails({
       <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-3 gap-y-1.5">
         {rows.map(([label, value]) => (
           <div key={label}>
-            <dt className="text-[10px] font-bold uppercase text-gray-500">{label}</dt>
+            <dt className="text-xs font-bold text-gray-500">{label}</dt>
             <dd className="font-semibold break-words">{value}</dd>
           </div>
         ))}

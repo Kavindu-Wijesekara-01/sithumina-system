@@ -2,7 +2,7 @@
  * Create or reset an Admin sign-in. Run on a trusted computer only.
  *
  *   ADMIN_ID=ADMIN ADMIN_PASSWORD='a long password' \
- *     node --env-file=.env.local scripts/create-admin.mjs
+ *     node --env-file=.env scripts/create-admin.mjs
  *
  * Needs FIREBASE_SERVICE_ACCOUNT. The password is read from the environment so
  * that it is never stored in the repository.

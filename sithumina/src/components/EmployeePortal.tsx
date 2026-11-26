@@ -56,6 +56,7 @@ const WAYPOINT_CITY_CHOICES = [
 export default function EmployeePortal({ locale }: EmployeePortalProps) {
   const { profile, logout } = useAuth();
   const signedInDriverId = profile?.role === "driver" ? profile.driverId : "";
+  const [loadError, setLoadError] = useState("");
   const [employee, setEmployee] = useState<StoredOutsideEmployee | null>(null);
   const [transactions, setTransactions] = useState<StoredCommissionTransaction[]>([]);
   const [slips, setSlips] = useState<StoredTopupSlip[]>([]);
@@ -117,7 +118,9 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
 
   const refreshEmployeeData = async (idNum: string) => {
     try {
+      setLoadError("");
       const res = await loginOutsideEmployeeAction(idNum);
+      if (!res.success) setLoadError(res.error);
       if (res.success && res.data) {
         setEmployee(res.data.employee);
         setTransactions(res.data.transactions || []);
@@ -134,6 +137,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
       }
     } catch (e) {
       console.warn("Could not refresh employee data:", e);
+      setLoadError("Your records could not be loaded. Please try again.");
     }
   };
 
@@ -507,9 +511,9 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
   if (!signedInDriverId) return <SignInForm role="driver" />;
   if (!employee) {
     return (
-      <div className="mx-auto w-full max-w-sm rounded-2xl border border-gray-200 bg-white p-6 text-center">
+      <div className="mx-auto w-full max-w-sm rounded-xl border border-gray-200 bg-white p-6 text-center">
         <p className="text-sm text-gray-700">
-          Loading your records. This page is for external vehicle owners; company drivers use the Driver App.
+          {loadError || "Loading your records. This page is for external vehicle owners; company drivers use the Driver App."}
         </p>
         <button type="button" onClick={handleLogout} className="mt-4 rounded-lg bg-gray-900 px-4 py-2 text-sm font-semibold text-white cursor-pointer">
           Sign out
@@ -534,25 +538,25 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
   return (
     <div className="flex flex-col gap-6">
       {/* 1. Header Profile & Duty Status Card */}
-      <div className="p-6 sm:p-7 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-5">
+      <div className="p-6 sm:p-7 rounded-xl bg-[var(--card)] border border-[var(--line)] flex flex-col gap-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-3.5">
-            <div className="w-14 h-14 rounded-2xl bg-[#26231B] text-[#FFC20E] flex items-center justify-center font-black text-xl shadow-xs shrink-0">
+            <div className="w-14 h-14 rounded-xl bg-[#26231B] text-[#FFC20E] flex items-center justify-center font-semibold text-xl shrink-0">
               {employee.name.slice(0, 2).toUpperCase()}
             </div>
             <div className="flex flex-col">
               <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-lg sm:text-xl font-black text-[var(--ink)]">{employee.name}</h2>
-                <span className="px-2 py-0.5 rounded-md bg-[#26231B] text-[#FFC20E] font-mono text-xs font-black">
+                <h2 className="text-lg sm:text-xl font-semibold text-[var(--ink)]">{employee.name}</h2>
+                <span className="px-2 py-0.5 rounded-md bg-[#26231B] text-[#FFC20E] font-mono text-xs font-semibold">
                   ID: {employee.driverId || employee.id}
                 </span>
               </div>
               <div className="mt-1 flex items-center gap-2 flex-wrap">
                 <span className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-950 font-bold text-xs flex items-center gap-1.5 shadow-2xs">
                   <span>Driver App Login:</span>
-                  <strong className="font-mono text-xs font-black text-emerald-900">{employee.driverId || employee.id}</strong>
+                  <strong className="font-mono text-xs font-semibold text-emerald-900">{employee.driverId || employee.id}</strong>
                 </span>
-                <span className="text-[11px] text-[var(--mut)]">
+                <span className="text-xs text-[var(--mut)]">
                   {locale === "en"
                     ? "Use this ID to log in to the Driver App"
                     : "Driver App එකට Log වීමට මෙම අංකය භාවිතා කරන්න"}
@@ -580,7 +584,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
         </div>
 
         {/* Duty Availability Toggle (Tick / Switch) */}
-        <div className="p-4 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="p-4 rounded-xl bg-[var(--bg)] border border-[var(--line)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <label className="relative inline-flex items-center cursor-pointer select-none">
               <input
@@ -593,19 +597,19 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               <div className="w-12 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
             </label>
             <div className="flex flex-col">
-              <span className="text-xs font-extrabold text-[var(--ink)] flex items-center gap-2">
+              <span className="text-xs font-semibold text-[var(--ink)] flex items-center gap-2">
                 <span>{locale === "en" ? "Duty Availability Status:" : "සේවයට සූදානම් තත්ත්වය (Duty Status):"}</span>
                 {employee.isAvailable ? (
-                  <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-black">
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold">
                     {locale === "en" ? "Available / සේවයට සූදානම්" : "Available / සේවයට සූදානම්"}
                   </span>
                 ) : (
-                  <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 text-[10px] font-black">
+                  <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 text-xs font-semibold">
                     {locale === "en" ? "Unavailable / සේවය අත්හිටුවා ඇත" : "Unavailable / තාවකාලිකව සේවයෙන් බැහැරයි"}
                   </span>
                 )}
               </span>
-              <span className="text-[11px] text-[var(--mut)] mt-0.5">
+              <span className="text-xs text-[var(--mut)] mt-0.5">
                 {employee.isAvailable
                   ? locale === "en"
                     ? "Your vehicle is currently visible and bookable by customers in Individual Lorry."
@@ -617,7 +621,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
             </div>
           </div>
 
-          <div className="text-[11px] font-mono text-[var(--mut)] shrink-0">
+          <div className="text-xs font-mono text-[var(--mut)] shrink-0">
             {dutyLoading ? "Updating..." : "Click toggle to change status"}
           </div>
         </div>
@@ -628,9 +632,9 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
         <button
           type="button"
           onClick={() => setActiveMainTab("driver_app")}
-          className={`px-5 py-3 rounded-2xl font-black text-xs flex items-center gap-2.5 cursor-pointer transition-all ${
+          className={`px-5 py-3 rounded-xl font-semibold text-xs flex items-center gap-2.5 cursor-pointer transition-all ${
             activeMainTab === "driver_app"
-              ? "bg-[#26231B] text-[#FFC20E] shadow-sm scale-[1.02]"
+              ? "bg-[#26231B] text-[#FFC20E] scale-[1.02]"
               : "bg-[var(--card)] text-[var(--ink)] hover:bg-[var(--y3)] border border-[var(--line)]"
           }`}
         >
@@ -643,7 +647,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               b.status !== "completed" &&
               b.status !== "cancelled"
           ).length > 0 && (
-            <span className="px-2 py-0.5 rounded-full bg-red-600 text-white font-mono text-[10px] font-black animate-pulse">
+            <span className="px-2 py-0.5 rounded-full bg-red-600 text-white font-mono text-xs font-semibold">
               {
                 driverBookings.filter(
                   (b) =>
@@ -662,15 +666,15 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
         <button
           type="button"
           onClick={() => setActiveMainTab("wallet")}
-          className={`px-5 py-3 rounded-2xl font-black text-xs flex items-center gap-2.5 cursor-pointer transition-all ${
+          className={`px-5 py-3 rounded-xl font-semibold text-xs flex items-center gap-2.5 cursor-pointer transition-all ${
             activeMainTab === "wallet"
-              ? "bg-[#26231B] text-[#FFC20E] shadow-sm scale-[1.02]"
+              ? "bg-[#26231B] text-[#FFC20E] scale-[1.02]"
               : "bg-[var(--card)] text-[var(--ink)] hover:bg-[var(--y3)] border border-[var(--line)]"
           }`}
         >
           <span>{locale === "en" ? "Wallet & Top-up" : "පසුම්බිය සහ තැන්පතු (Wallet)"}</span>
           {isBalanceLow && (
-            <span className="px-2 py-0.5 rounded-full bg-amber-500 text-black font-bold text-[10px]">
+            <span className="px-2 py-0.5 rounded-full bg-amber-500 text-black font-bold text-xs">
               Low
             </span>
           )}
@@ -694,11 +698,11 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
             );
 
             return (
-              <div className="p-6 sm:p-7 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-4">
+              <div className="p-6 sm:p-7 rounded-xl bg-[var(--card)] border border-[var(--line)] flex flex-col gap-4">
                 <div className="flex items-center justify-between pb-3 border-b border-[var(--line)] flex-wrap gap-2">
                   <div className="flex items-center gap-2">
                     <div>
-                      <h3 className="text-base font-black text-[var(--ink)]">
+                      <h3 className="text-base font-semibold text-[var(--ink)]">
                         {locale === "en" ? "New Assigned Booking Requests" : "අලුතින් ලැබුණු ගමන්වාර ඉල්ලීම් (Assigned Requests)"}
                       </h3>
                       <p className="text-xs text-[var(--mut)]">
@@ -708,13 +712,13 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                       </p>
                     </div>
                   </div>
-                  <span className="px-3 py-1 rounded-full bg-amber-100 text-amber-900 font-mono text-xs font-black">
+                  <span className="px-3 py-1 rounded-full bg-amber-100 text-amber-900 font-mono text-xs font-semibold">
                     {pendingRequests.length} Pending Requests
                   </span>
                 </div>
 
                 {pendingRequests.length === 0 ? (
-                  <div className="p-8 text-center text-xs text-[var(--mut)] bg-[var(--bg)] rounded-2xl border border-[var(--line)] flex flex-col items-center gap-2">
+                  <div className="p-8 text-center text-xs text-[var(--mut)] bg-[var(--bg)] rounded-xl border border-[var(--line)] flex flex-col items-center gap-2">
                     <span className="font-bold text-[var(--ink)]">
                       {locale === "en" ? "No new trip requests pending" : "දැනට අලුත් ගමන්වාර ඉල්ලීම් නොමැත"}
                     </span>
@@ -729,18 +733,18 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                     {pendingRequests.map((b) => (
                       <div
                         key={b.id}
-                        className="p-5 rounded-2xl bg-[var(--bg)] border-2 border-amber-300 shadow-sm flex flex-col gap-4 text-xs"
+                        className="p-5 rounded-xl bg-[var(--bg)] border-2 border-amber-300 flex flex-col gap-4 text-xs"
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-[var(--line)]">
                           <div className="flex items-center gap-2">
-                            <span className="px-2.5 py-1 rounded-md bg-[#26231B] text-[#FFC20E] font-mono text-xs font-black">
+                            <span className="px-2.5 py-1 rounded-md bg-[#26231B] text-[#FFC20E] font-mono text-xs font-semibold">
                               Trip #{b.id}
                             </span>
                             <span className="font-bold text-gray-700">
                               {b.date} ({b.startTime || "08:00"} – {b.endTime || "17:00"})
                             </span>
                           </div>
-                          <span className="px-2.5 py-0.5 rounded bg-blue-100 text-blue-900 font-bold text-[11px]">
+                          <span className="px-2.5 py-0.5 rounded bg-blue-100 text-blue-900 font-bold text-xs">
                             {b.bookingType === "individual_vehicle" ? "Individual Cargo Booking" : "Live Lorry Booking"}
                           </span>
                         </div>
@@ -748,21 +752,21 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                         {/* Detailed trip specifications */}
                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 bg-[var(--card)] p-3.5 rounded-xl border border-[var(--line)]">
                           <div>
-                            <span className="text-[10px] text-[var(--mut)] font-bold uppercase block">Route (ගමන් මග)</span>
+                            <span className="text-xs text-[var(--mut)] font-bold block">Route (ගමන් මග)</span>
                             <strong className="text-sm text-[var(--ink)] block mt-0.5">
                               {b.pickupCity} ➔ {b.deliveryCity}
                             </strong>
                           </div>
 
                           <div>
-                            <span className="text-[10px] text-[var(--mut)] font-bold uppercase block">Booked Distance (දුර)</span>
+                            <span className="text-xs text-[var(--mut)] font-bold block">Booked Distance (දුර)</span>
                             <strong className="text-sm text-[var(--ink)] font-mono block mt-0.5">
                               {b.distanceKm ? `${b.distanceKm} KM` : "To be calculated"}
                             </strong>
                           </div>
 
                           <div>
-                            <span className="text-[10px] text-[var(--mut)] font-bold uppercase block">Cargo Goods &amp; Weight</span>
+                            <span className="text-xs text-[var(--mut)] font-bold block">Cargo Goods &amp; Weight</span>
                             <span className="text-xs text-[var(--ink)] block mt-0.5 font-medium">
                               {b.cargoNature || "General Cargo"}
                               {b.cargoWeight ? ` (${b.cargoWeight})` : ""}
@@ -771,7 +775,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                           </div>
 
                           <div>
-                            <span className="text-[10px] text-[var(--mut)] font-bold uppercase block">Customer Details</span>
+                            <span className="text-xs text-[var(--mut)] font-bold block">Customer Details</span>
                             <span className="text-xs text-[var(--ink)] block mt-0.5 font-medium">
                               {b.customerName}
                               {b.customerPhone && (
@@ -787,7 +791,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                         </div>
 
                         {b.packageDetails && (
-                          <div className="text-[11px] text-[var(--mut)] bg-amber-50 p-2.5 rounded-lg border border-amber-200">
+                          <div className="text-xs text-[var(--mut)] bg-amber-50 p-2.5 rounded-lg border border-amber-200">
                             <strong>Note:</strong> {b.packageDetails}
                           </div>
                         )}
@@ -824,7 +828,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                                 void loadDriverBookings(employee.driverId || employee.id);
                               }
                             }}
-                            className="px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs cursor-pointer shadow-md transition-all flex items-center gap-2"
+                            className="px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs cursor-pointer transition-all flex items-center gap-2"
                           >
                             <span>✓</span>
                             <span>Accept Trip &amp; Start Dispatch (ගමන භාරගන්න)</span>
@@ -840,15 +844,15 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
 
           {/* Section B: Active Trip Console (Auto-fill, Waypoints & Live KM) */}
           {activeTrip && (
-            <div className="p-6 sm:p-7 rounded-3xl bg-[var(--card)] border-2 border-emerald-500 shadow-md flex flex-col gap-6">
+            <div className="p-6 sm:p-7 rounded-xl bg-[var(--card)] border-2 border-emerald-500 flex flex-col gap-6">
               <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[var(--line)]">
                 <div className="flex items-center gap-3">
                   <div>
                     <div className="flex items-center gap-2">
-                      <h3 className="text-base font-black text-[var(--ink)]">
+                      <h3 className="text-base font-semibold text-[var(--ink)]">
                         Active Journey Console · ක්‍රියාකාරී ගමන් පාලකය
                       </h3>
-                      <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-950 font-mono text-xs font-black">
+                      <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-950 font-mono text-xs font-semibold">
                         #{activeTrip.id}
                       </span>
                     </div>
@@ -863,7 +867,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                 <div className="flex items-center gap-2">
                   <span className={`px-3 py-1 rounded-full text-xs font-bold ${
                     activeTrip.status === "in_transit"
-                      ? "bg-emerald-600 text-white animate-pulse"
+                      ? "bg-emerald-600 text-white"
                       : "bg-blue-100 text-blue-900"
                   }`}>
                     {activeTrip.status === "in_transit" ? "On Road (Ongoing)" : "Trip Accepted"}
@@ -873,44 +877,44 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
 
               {/* 1. Auto-filled Locations */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="p-4 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-1">
-                  <span className="text-[10px] font-black uppercase tracking-wider text-emerald-800 flex items-center gap-1">
+                <div className="p-4 rounded-xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-1">
+                  <span className="text-xs font-semibold text-emerald-800 flex items-center gap-1">
                     <span>Start Location (ආරම්භක ස්ථානය)</span>
-                    <span className="bg-emerald-200 text-emerald-900 px-1.5 py-0.2 rounded text-[9px] font-mono">Auto-filled</span>
+                    <span className="bg-emerald-200 text-emerald-900 px-1.5 py-0.2 rounded text-xs font-mono">Auto-filled</span>
                   </span>
-                  <div className="text-base font-black text-[var(--ink)] mt-1">
+                  <div className="text-base font-semibold text-[var(--ink)] mt-1">
                     {activeTrip.pickupCity}
                   </div>
-                  <span className="text-[11px] text-[var(--mut)]">
+                  <span className="text-xs text-[var(--mut)]">
                     Auto-selected from booking request. No manual retyping needed.
                   </span>
                 </div>
 
-                <div className="p-4 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-1">
-                  <span className="text-[10px] font-black uppercase tracking-wider text-red-800 flex items-center gap-1">
+                <div className="p-4 rounded-xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-1">
+                  <span className="text-xs font-semibold text-red-800 flex items-center gap-1">
                     <span>End Destination (ගමනාන්තය)</span>
-                    <span className="bg-red-200 text-red-900 px-1.5 py-0.2 rounded text-[9px] font-mono">Auto-filled</span>
+                    <span className="bg-red-200 text-red-900 px-1.5 py-0.2 rounded text-xs font-mono">Auto-filled</span>
                   </span>
-                  <div className="text-base font-black text-[var(--ink)] mt-1">
+                  <div className="text-base font-semibold text-[var(--ink)] mt-1">
                     {activeTrip.deliveryCity}
                   </div>
-                  <span className="text-[11px] text-[var(--mut)]">
+                  <span className="text-xs text-[var(--mut)]">
                     Auto-selected destination. Ready for waypoint configuration.
                   </span>
                 </div>
               </div>
 
               {/* 2. Intermediate Waypoints (අතරමැදි නගර 3ක් දක්වා) */}
-              <div className="p-5 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-4 text-xs">
+              <div className="p-5 rounded-xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-4 text-xs">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <h4 className="font-extrabold text-sm text-[var(--ink)] flex items-center gap-2">
+                    <h4 className="font-semibold text-sm text-[var(--ink)] flex items-center gap-2">
                       <span>Intermediate Waypoints (අතරමැදි නගර 3ක් දක්වා)</span>
                       <span className="text-xs font-mono font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded">
                         {selectedWaypoints.length} / 3 Cities
                       </span>
                     </h4>
-                    <p className="text-[11px] text-[var(--mut)] mt-0.5">
+                    <p className="text-xs text-[var(--mut)] mt-0.5">
                       Select up to 3 intermediate stops along the route. Edit anytime mid-journey if detour occurs.
                     </p>
                   </div>
@@ -930,7 +934,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                         <button
                           type="button"
                           onClick={() => handleRemoveWaypoint(idx)}
-                          className="w-4 h-4 rounded-full bg-blue-200 hover:bg-rose-500 hover:text-white flex items-center justify-center text-[10px] cursor-pointer"
+                          className="w-4 h-4 rounded-full bg-blue-200 hover:bg-rose-500 hover:text-white flex items-center justify-center text-xs cursor-pointer"
                           title="Remove waypoint"
                         >
                           ✕
@@ -970,7 +974,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                       ))}
                     </select>
 
-                    <span className="text-[11px] text-[var(--mut)]">
+                    <span className="text-xs text-[var(--mut)]">
                       {3 - selectedWaypoints.length} more waypoint(s) can be added.
                     </span>
                   </div>
@@ -979,7 +983,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                 {/* Distance Comparison & Live Update */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-[var(--line)]">
                   <div className="p-3 rounded-xl bg-[var(--card)] border border-[var(--line)]">
-                    <span className="text-[10px] text-[var(--mut)] uppercase font-bold block">
+                    <span className="text-xs text-[var(--mut)] font-bold block">
                       Booked KM (වෙන්කළ දුර)
                     </span>
                     <strong className="text-base font-mono text-[var(--ink)] block mt-0.5">
@@ -988,7 +992,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                   </div>
 
                   <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-200">
-                    <span className="text-[10px] text-blue-900 uppercase font-bold block">
+                    <span className="text-xs text-blue-900 font-bold block">
                       Actual Route KM (ගණනය වූ සැබෑ දුර)
                     </span>
                     <strong className="text-base font-mono text-blue-950 block mt-0.5">
@@ -1002,7 +1006,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
 
                   <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 flex flex-col justify-between">
                     <div>
-                      <span className="text-[10px] text-amber-900 uppercase font-bold block">
+                      <span className="text-xs text-amber-900 font-bold block">
                         KM Difference (වෙනස)
                       </span>
                       <strong className="text-base font-mono text-amber-950 block mt-0.5">
@@ -1019,7 +1023,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                     type="button"
                     disabled={savingRoute || calcLoading}
                     onClick={handleSaveRoute}
-                    className="px-4 py-2 rounded-xl bg-[#26231B] text-[#FFC20E] text-xs font-black cursor-pointer hover:bg-black transition-all flex items-center gap-1.5 shadow-xs disabled:opacity-50"
+                    className="px-4 py-2 rounded-xl bg-[#26231B] text-[#FFC20E] text-xs font-semibold cursor-pointer hover:bg-black transition-all flex items-center gap-1.5 disabled:opacity-50"
                   >
                     <span>{savingRoute ? "Saving..." : "Save Route & Update KM Live (පාර සුරකින්න)"}</span>
                   </button>
@@ -1027,7 +1031,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               </div>
 
               {/* 3. Live Location Sharing (Location Share කිරීමෙන් ඔටෝ Ongoing වීම) */}
-              <div className="p-5 rounded-2xl bg-gradient-to-r from-emerald-950 to-[#26231B] text-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-md">
+              <div className="p-5 rounded-xl bg-gradient-to-r from-emerald-950 to-[#26231B] text-white flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div className="flex items-center gap-3.5">
                   <div>
                     <div className="flex items-center gap-2">
@@ -1035,11 +1039,11 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                         {locale === "en" ? "Live Location Sharing" : "සජීවී GPS ස්ථානය බෙදාගැනීම (Live GPS)"}
                       </h4>
                       {isSharingGps ? (
-                        <span className="px-2 py-0.5 rounded-full bg-emerald-500 text-black text-[10px] font-black uppercase tracking-wider">
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-500 text-black text-xs font-semibold">
                           Live Active
                         </span>
                       ) : (
-                        <span className="px-2 py-0.5 rounded-full bg-white/20 text-white text-[10px] font-bold">
+                        <span className="px-2 py-0.5 rounded-full bg-white/20 text-white text-xs font-bold">
                           Idle
                         </span>
                       )}
@@ -1050,7 +1054,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                         : "Click button to share live location. The booking will automatically transition to 'Ongoing' on Admin Dashboard."}
                     </p>
                     {gpsCoords && (
-                      <div className="text-[11px] font-mono text-emerald-300 mt-1 flex items-center gap-2">
+                      <div className="text-xs font-mono text-emerald-300 mt-1 flex items-center gap-2">
                         <span>Speed: {gpsCoords.speed} km/h</span>
                         <span>•</span>
                         <span>Lat: {gpsCoords.lat.toFixed(4)}, Lng: {gpsCoords.lng.toFixed(4)}</span>
@@ -1062,7 +1066,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                 <button
                   type="button"
                   onClick={handleToggleGpsSharing}
-                  className={`px-5 py-3 rounded-xl font-black text-xs cursor-pointer shadow-lg transition-all shrink-0 flex items-center justify-center gap-2 ${
+                  className={`px-5 py-3 rounded-xl font-semibold text-xs cursor-pointer shadow-lg transition-all shrink-0 flex items-center justify-center gap-2 ${
                     isSharingGps
                       ? "bg-rose-600 hover:bg-rose-700 text-white"
                       : "bg-[#FFC20E] hover:bg-amber-400 text-black"
@@ -1077,10 +1081,10 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               </div>
 
               {/* 4. Delivery Conclude Button */}
-              <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl bg-[var(--bg)] border border-[var(--line)] text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-xl bg-[var(--bg)] border border-[var(--line)] text-xs">
                 <div>
                   <span className="font-bold text-[var(--ink)] block">Conclude Cargo Delivery</span>
-                  <span className="text-[11px] text-[var(--mut)]">
+                  <span className="text-xs text-[var(--mut)]">
                     Once the goods are unloaded at the destination, mark cargo delivery finished.
                   </span>
                 </div>
@@ -1092,29 +1096,29 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                     await updateBookingStatusAction(activeTrip.id, "delivered");
                     void loadDriverBookings(employee.driverId || employee.id);
                   }}
-                  className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs cursor-pointer transition-all flex items-center gap-1.5 shadow-xs"
+                  className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs cursor-pointer transition-all flex items-center gap-1.5"
                 >
                   <span>Mark Goods Delivered (බඩු බා අවසන්)</span>
                 </button>
               </div>
 
               {/* 5. Empty Return Journey (ආපසු හිස්ව එන ගමන ට්‍රැක් කිරීම) */}
-              <div className="p-5 rounded-2xl bg-purple-50/80 border-2 border-purple-300 text-purple-950 flex flex-col gap-4 text-xs">
+              <div className="p-5 rounded-xl bg-purple-50/80 border-2 border-purple-300 text-purple-950 flex flex-col gap-4 text-xs">
                 <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-purple-200">
                   <div className="flex items-center gap-2">
                     <div>
                       <h4 className="font-bold text-sm text-purple-950">
                         Empty Return Journey · ආපසු හිස්ව පැමිණීම (Empty Lorry Tracking)
                       </h4>
-                      <p className="text-[11px] text-purple-800">
+                      <p className="text-xs text-purple-800">
                         When returning empty after cargo delivery, mark Empty Return so customers can view and book your lorry on the Find Empty Lorry map.
                       </p>
                     </div>
                   </div>
 
-                  <span className={`px-2.5 py-0.5 rounded-full font-bold text-[10px] ${
+                  <span className={`px-2.5 py-0.5 rounded-full font-bold text-xs ${
                     emptyReturnActive
-                      ? "bg-purple-700 text-white animate-pulse"
+                      ? "bg-purple-700 text-white"
                       : "bg-purple-200 text-purple-900"
                   }`}>
                     {emptyReturnActive ? "Empty Return In Transit" : "Return Idle"}
@@ -1123,7 +1127,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-[11px] font-bold text-purple-900 mb-1">
+                    <label className="block text-xs font-bold text-purple-900 mb-1">
                       Return Destination (ආපසු එන නගරය)
                     </label>
                     <select
@@ -1140,7 +1144,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-purple-900 mb-1">
+                    <label className="block text-xs font-bold text-purple-900 mb-1">
                       Empty Return Distance (ආපසු එන KM ගණන)
                     </label>
                     <input
@@ -1158,7 +1162,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                       type="button"
                       disabled={actionLoadingId === "empty_return"}
                       onClick={handleToggleEmptyReturn}
-                      className={`w-full py-2.5 rounded-xl font-bold text-xs cursor-pointer shadow-sm transition-all flex items-center justify-center gap-1.5 ${
+                      className={`w-full py-2.5 rounded-xl font-bold text-xs cursor-pointer transition-all flex items-center justify-center gap-1.5 ${
                         emptyReturnActive
                           ? "bg-purple-800 hover:bg-purple-900 text-white"
                           : "bg-purple-600 hover:bg-purple-700 text-white"
@@ -1177,9 +1181,9 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
           )}
 
           {/* Section C: Completed Trips History */}
-          <div className="p-6 sm:p-7 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-4">
+          <div className="p-6 sm:p-7 rounded-xl bg-[var(--card)] border border-[var(--line)] flex flex-col gap-4">
             <div className="flex items-center justify-between pb-2 border-b border-[var(--line)] flex-wrap gap-2">
-              <h3 className="text-base font-black text-[var(--ink)]">
+              <h3 className="text-base font-semibold text-[var(--ink)]">
                 {locale === "en" ? "Concluded Trips History" : "සම්පූර්ණ වූ ගමන්වාර ඉතිහාසය"}
               </h3>
               <span className="text-xs font-mono font-bold text-[var(--mut)]">
@@ -1188,7 +1192,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
             </div>
 
             {driverBookings.filter((b) => b.status === "delivered" || b.status === "completed").length === 0 ? (
-              <div className="p-6 text-center text-xs text-[var(--mut)] bg-[var(--bg)] rounded-2xl border border-[var(--line)]">
+              <div className="p-6 text-center text-xs text-[var(--mut)] bg-[var(--bg)] rounded-xl border border-[var(--line)]">
                 No concluded trips yet.
               </div>
             ) : (
@@ -1198,7 +1202,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                   .map((b) => (
                     <div
                       key={b.id}
-                      className="p-3.5 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
+                      className="p-3.5 rounded-xl bg-[var(--bg)] border border-[var(--line)] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
                     >
                       <div className="flex items-center gap-3">
                         <span className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold text-sm">
@@ -1208,7 +1212,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                           <strong className="text-[var(--ink)]">
                             {b.pickupCity} ➔ {b.deliveryCity}
                           </strong>
-                          <div className="text-[10px] text-[var(--mut)] flex items-center gap-2 mt-0.5">
+                          <div className="text-xs text-[var(--mut)] flex items-center gap-2 mt-0.5">
                             <span>Ref: {b.id}</span>
                             <span>•</span>
                             <span>{b.date}</span>
@@ -1239,13 +1243,13 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
         <div className="flex flex-col gap-6">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Balance Card */}
-        <div className={`p-6 rounded-3xl bg-[var(--card)] border ${isOwing ? "border-rose-500" : isBalanceLow ? "border-amber-400" : "border-[var(--line)]"} shadow-xs flex flex-col justify-between`}>
+        <div className={`p-6 rounded-xl bg-[var(--card)] border ${isOwing ? "border-rose-500" : isBalanceLow ? "border-amber-400" : "border-[var(--line)]"} flex flex-col justify-between`}>
           <div>
-            <span className="text-[10px] font-black uppercase tracking-wider text-[var(--mut)] block">
+            <span className="text-xs font-semibold text-[var(--mut)] block">
               {locale === "en" ? "Current Wallet Balance" : "දැනට ඉතිරිව ඇති මුදල් ශේෂය"}
             </span>
             <div className="flex items-baseline gap-1 mt-2">
-              <span className={`text-3xl font-black ${isOwing ? "text-rose-700" : "text-[var(--ink)]"}`}>
+              <span className={`text-3xl font-semibold ${isOwing ? "text-rose-700" : "text-[var(--ink)]"}`}>
                 {formatRs(employee.balance)}
               </span>
             </div>
@@ -1265,50 +1269,50 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               )}
             </div>
           </div>
-          <p className="text-[11px] text-[var(--mut)] mt-4 pt-3 border-t border-[var(--line)]">
+          <p className="text-xs text-[var(--mut)] mt-4 pt-3 border-t border-[var(--line)]">
             Registration deposit: Rs. 5,000. Top-ups add to this balance.
           </p>
         </div>
 
         {/* Completed Hires */}
-        <div className="p-6 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col justify-between">
+        <div className="p-6 rounded-xl bg-[var(--card)] border border-[var(--line)] flex flex-col justify-between">
           <div>
-            <span className="text-[10px] font-black uppercase tracking-wider text-[var(--mut)] block">
+            <span className="text-xs font-semibold text-[var(--mut)] block">
               {locale === "en" ? "Completed Hires" : "සම්පූර්ණ වූ ගමන් වාර"}
             </span>
-            <div className="mt-2 text-3xl font-black text-[var(--ink)]">
+            <div className="mt-2 text-3xl font-semibold text-[var(--ink)]">
               {employee.totalHiresCompleted || 0}
             </div>
           </div>
-          <p className="text-[11px] text-[var(--mut)] mt-4 pt-3 border-t border-[var(--line)]">
+          <p className="text-xs text-[var(--mut)] mt-4 pt-3 border-t border-[var(--line)]">
             Total cargo trips executed through Sithumina system.
           </p>
         </div>
 
         {/* Commission Deducted */}
-        <div className="p-6 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col justify-between">
+        <div className="p-6 rounded-xl bg-[var(--card)] border border-[var(--line)] flex flex-col justify-between">
           <div>
-            <span className="text-[10px] font-black uppercase tracking-wider text-[var(--mut)] block">
+            <span className="text-xs font-semibold text-[var(--mut)] block">
               {locale === "en" ? "Total Commission Deducted" : "අයවූ මුළු කොමිස් මුදල"}
             </span>
             <div className="flex items-baseline gap-1 mt-2">
               <span className="text-xs font-bold text-[var(--mut)]">LKR</span>
-              <span className="text-3xl font-black text-[#5B4300]">
+              <span className="text-3xl font-semibold text-[#5B4300]">
                 {(employee.totalCommissionDeducted || 0).toLocaleString()}
                 <span className="text-base font-normal text-[var(--mut)]">.00</span>
               </span>
             </div>
           </div>
-          <p className="text-[11px] text-[var(--mut)] mt-4 pt-3 border-t border-[var(--line)]">
+          <p className="text-xs text-[var(--mut)] mt-4 pt-3 border-t border-[var(--line)]">
             Calculated as 20% of each completed hire.
           </p>
         </div>
       </div>
 
       {/* Deposit usage progress */}
-      <div className="p-5 sm:p-6 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-3">
+      <div className="p-5 sm:p-6 rounded-xl bg-[var(--card)] border border-[var(--line)] flex flex-col gap-3">
         <div className="flex items-center justify-between flex-wrap gap-2 text-xs">
-          <strong className="text-sm font-black text-[var(--ink)]">
+          <strong className="text-sm font-semibold text-[var(--ink)]">
             {locale === "en" ? "Deposit Usage" : "තැන්පතු භාවිතය"}
           </strong>
           <span className="font-mono font-bold text-[var(--mut)]">
@@ -1344,11 +1348,11 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
       </div>
 
       {/* 3. Top-up Section (නැවත මුදල් තැන්පත් කිරීම) */}
-      <div id="topup-section" className="p-6 sm:p-8 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-5">
+      <div id="topup-section" className="p-6 sm:p-8 rounded-xl bg-[var(--card)] border border-[var(--line)] flex flex-col gap-5">
         <div className="flex items-center justify-between pb-2 border-b border-[var(--line)] flex-wrap gap-2">
           <div className="flex items-center gap-2.5">
             <div>
-              <h3 className="text-base font-black text-[var(--ink)]">
+              <h3 className="text-base font-semibold text-[var(--ink)]">
                 {locale === "en"
                   ? "Wallet Top-up & Bank Slip Upload"
                   : "මුදල් නැවත තැන්පත් කිරීම (Top-up) සහ රිසිට්පත් Upload කිරීම"}
@@ -1367,19 +1371,19 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
           {bankAccounts.map((acc) => (
             <div
               key={acc.id}
-              className="p-3.5 rounded-2xl border border-[var(--line)] bg-[var(--bg)] flex flex-col gap-1 text-xs"
+              className="p-3.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] flex flex-col gap-1 text-xs"
             >
               <div className="flex items-center justify-between">
-                <span className="font-extrabold text-[var(--ink)]">{acc.bankName}</span>
-                <span className="text-[10px] text-[var(--mut)]">{acc.branch}</span>
+                <span className="font-semibold text-[var(--ink)]">{acc.bankName}</span>
+                <span className="text-xs text-[var(--mut)]">{acc.branch}</span>
               </div>
-              <span className="text-[11px] text-[var(--mut)]">Acc Name: {acc.accountName}</span>
+              <span className="text-xs text-[var(--mut)]">Acc Name: {acc.accountName}</span>
               <div className="flex items-center justify-between mt-1 pt-1 border-t border-[var(--line)]/50">
                 <span className="font-mono font-bold text-sm text-[var(--ink)]">{acc.accountNumber}</span>
                 <button
                   type="button"
                   onClick={() => handleCopyAccount(acc.id, acc.accountNumber)}
-                  className="px-2.5 py-0.5 rounded-lg bg-[var(--card)] border border-[var(--line)] hover:bg-[var(--y)] text-[10px] font-bold text-[var(--ink)] cursor-pointer transition-colors"
+                  className="px-2.5 py-0.5 rounded-lg bg-[var(--card)] border border-[var(--line)] hover:bg-[var(--y)] text-xs font-bold text-[var(--ink)] cursor-pointer transition-colors"
                 >
                   {copiedBankId === acc.id ? "✓ Copied" : "Copy"}
                 </button>
@@ -1391,7 +1395,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
         {/* Feedback message */}
         {topupFeedback && (
           <div
-            className={`p-4 rounded-2xl text-xs font-bold leading-relaxed ${
+            className={`p-4 rounded-xl text-xs font-bold leading-relaxed ${
               topupFeedback.type === "success"
                 ? "bg-emerald-50 border border-emerald-300 text-emerald-900"
                 : "bg-rose-50 border border-rose-300 text-rose-900"
@@ -1445,7 +1449,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                 <button
                   type="button"
                   onClick={() => setTopupSlipImage("")}
-                  className="px-2 py-0.5 rounded bg-rose-600 text-white text-[10px] font-bold cursor-pointer"
+                  className="px-2 py-0.5 rounded bg-rose-600 text-white text-xs font-bold cursor-pointer"
                 >
                   Change
                 </button>
@@ -1467,7 +1471,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
             <button
               type="submit"
               disabled={topupSubmitting}
-              className="py-3 px-6 rounded-xl bg-[#26231B] hover:bg-[#1a1813] text-[#FFC20E] font-black text-xs cursor-pointer transition-all shadow-xs disabled:opacity-50 flex items-center justify-center gap-2"
+              className="py-3 px-6 rounded-xl bg-[#26231B] hover:bg-[#1a1813] text-[#FFC20E] font-semibold text-xs cursor-pointer transition-all disabled:opacity-50 flex items-center justify-center gap-2"
             >
               {topupSubmitting ? "Submitting Top-up Slip..." : "Submit Top-up Slip for Admin Approval / රිසිට්පත යොමු කරන්න"}
             </button>
@@ -1490,16 +1494,16 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                     )}
                     <div className="flex flex-col">
                       <span className="font-bold text-[var(--ink)]">LKR {s.amount.toLocaleString()}</span>
-                      <span className="text-[10px] text-[var(--mut)]">{formatDate(s.createdAt)}</span>
+                      <span className="text-xs text-[var(--mut)]">{formatDate(s.createdAt)}</span>
                     </div>
                   </div>
                   <div>
                     {s.status === "approved" ? (
-                      <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold">
                         ✓ Approved &amp; Credited
                       </span>
                     ) : (
-                      <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 text-[10px] font-bold">
+                      <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 text-xs font-bold">
                         Pending Admin Review
                       </span>
                     )}
@@ -1512,10 +1516,10 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
       </div>
 
       {/* 4. Commission Deductions & Transaction Ledger (කොමිස් අඩු වූ ආකාරය) */}
-      <div className="p-6 sm:p-8 rounded-3xl bg-[var(--card)] border border-[var(--line)] shadow-xs flex flex-col gap-4">
+      <div className="p-6 sm:p-8 rounded-xl bg-[var(--card)] border border-[var(--line)] flex flex-col gap-4">
         <div className="flex items-center justify-between pb-2 border-b border-[var(--line)] flex-wrap gap-2">
           <div>
-            <h3 className="text-base font-black text-[var(--ink)]">
+            <h3 className="text-base font-semibold text-[var(--ink)]">
               {locale === "en"
                 ? "Commission Deductions & Balance Ledger"
                 : "කොමිස් අඩු වූ ආකාරය සහ ගිණුම් විස්තරය"}
@@ -1532,7 +1536,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
         </div>
 
         {transactions.length === 0 ? (
-          <div className="p-8 text-center text-xs text-[var(--mut)] bg-[var(--bg)] rounded-2xl border border-[var(--line)]">
+          <div className="p-8 text-center text-xs text-[var(--mut)] bg-[var(--bg)] rounded-xl border border-[var(--line)]">
             No transactions recorded yet. Initial Rs. 5,000 security deposit is active.
           </div>
         ) : (
@@ -1542,7 +1546,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
               return (
                 <div
                   key={tx.id}
-                  className="p-3.5 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
+                  className="p-3.5 rounded-xl bg-[var(--bg)] border border-[var(--line)] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
                 >
                   <div className="flex items-center gap-3">
                     <div
@@ -1558,7 +1562,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                       <span className="font-bold text-[var(--ink)]">
                         {tx.note || (isDeduction ? `Commission for ${tx.bookingId || "Booking"}` : "Balance Credit")}
                       </span>
-                      <div className="flex items-center gap-2 text-[10px] text-[var(--mut)] flex-wrap mt-0.5">
+                      <div className="flex items-center gap-2 text-xs text-[var(--mut)] flex-wrap mt-0.5">
                         <span>{formatDate(tx.createdAt)}</span>
                         {tx.bookingId && (
                           <span className="font-mono bg-[var(--card)] px-1.5 py-0.2 rounded border border-[var(--line)]">
@@ -1574,13 +1578,13 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
 
                   <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-center text-right shrink-0">
                     <span
-                      className={`text-sm font-black font-mono ${
+                      className={`text-sm font-semibold font-mono ${
                         isDeduction ? "text-rose-700" : "text-emerald-700"
                       }`}
                     >
                       {isDeduction ? "-" : "+"} LKR {Math.abs(tx.amount).toLocaleString()}.00
                     </span>
-                    <span className="text-[10px] font-mono text-[var(--mut)]">
+                    <span className="text-xs font-mono text-[var(--mut)]">
                       <span className={Number(tx.balanceAfter) < 0 ? "text-rose-700 font-bold" : ""}>Bal After: {formatRs(tx.balanceAfter)}</span>
                     </span>
                   </div>

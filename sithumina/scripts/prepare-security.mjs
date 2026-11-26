@@ -2,8 +2,8 @@
  * One-time preparation of existing data for the role-based Firestore rules.
  * Run BEFORE deploying the rules. Without --apply it only reports.
  *
- *   node --env-file=.env.local scripts/prepare-security.mjs
- *   node --env-file=.env.local scripts/prepare-security.mjs --apply
+ *   node --env-file=.env scripts/prepare-security.mjs
+ *   node --env-file=.env scripts/prepare-security.mjs --apply
  *
  *  1. Stores every booking and payment slip phone as 0XXXXXXXXX, so customers
  *     can read their own records.

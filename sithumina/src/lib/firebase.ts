@@ -1,11 +1,12 @@
 import { initializeApp, getApps, getApp, FirebaseApp } from "firebase/app";
 import {
+  connectFirestoreEmulator,
   getFirestore,
   initializeFirestore,
   memoryLocalCache,
   Firestore,
 } from "firebase/firestore";
-import { getAuth, Auth } from "firebase/auth";
+import { connectAuthEmulator, getAuth, Auth } from "firebase/auth";
 import { getStorage, FirebaseStorage } from "firebase/storage";
 import { getAnalytics, isSupported, Analytics } from "firebase/analytics";
 
@@ -39,6 +40,16 @@ export const db: Firestore = dbInstance;
 
 // Initialize Auth
 export const auth: Auth = getAuth(app);
+
+// Local testing only: NEXT_PUBLIC_USE_EMULATORS=1 points the browser at the Firebase emulators
+if (process.env.NEXT_PUBLIC_USE_EMULATORS === "1" && typeof window !== "undefined") {
+  try {
+    connectFirestoreEmulator(db, "127.0.0.1", 8085);
+    connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
+  } catch {
+    // Already connected (hot reload)
+  }
+}
 
 // Initialize Storage
 export const storage: FirebaseStorage = getStorage(app);
