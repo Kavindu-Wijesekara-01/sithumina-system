@@ -5,7 +5,7 @@ import { AccountError, upsertAccount, disableAccount } from "@/lib/auth/accounts
 import { authorize } from "@/lib/auth/server";
 import { looksLikePhone } from "@/lib/auth/identity";
 import { normalizePhoneNumber } from "@/lib/phone-utils";
-import { db, doc, getDoc } from "@/lib/fs-server";
+import { ensureDriverRecord } from "@/lib/riders";
 import { getBookingsByCustomerPhone, upsertCustomerInStore } from "@/lib/server-store";
 
 function failure(context: string, err: unknown): { success: false; error: string } {
@@ -66,7 +66,8 @@ export async function setDriverPasswordAction(driverId: string, password: string
   if (!auth.ok) return auth.denied;
   try {
     const id = (driverId || "").trim().toUpperCase();
-    const driver = (await getDoc(doc(db, "drivers", id))).data();
+    // Rebuilds the driver record for outside owners saved without one
+    const driver = await ensureDriverRecord(id);
     if (!driver) return { success: false, error: "Driver not found." };
     await upsertAccount({
       identifier: id,

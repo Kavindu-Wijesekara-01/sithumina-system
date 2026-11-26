@@ -5,9 +5,9 @@ import { VEHICLE_TYPE_OPTIONS } from "../shared";
 
 export default function LorryModal({ admin }: { admin: Admin }) {
   const {
-    drivers,
+    companyDrivers,
+    lorryError,
     editingLorryPlate,
-    fleetVehicles,
     handleLorryImageUpload,
     handleSaveLorry,
     lorryForm,
@@ -100,45 +100,17 @@ export default function LorryModal({ admin }: { admin: Admin }) {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-[#111827] mb-1">
-                    {editingLorryPlate &&
-                      fleetVehicles.some(
-                        (v) =>
-                          v.plate === editingLorryPlate &&
-                          ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
-                      )
-                      ? "Permanent Driver (Locked)"
-                      : "Assign Rider"}
-                  </label>
-                  {editingLorryPlate &&
-                    fleetVehicles.some(
-                      (v) =>
-                        v.plate === editingLorryPlate &&
-                        ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
-                    ) ? (
-                    <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs">
-                      <div className="font-bold text-amber-950 flex items-center justify-between">
-                        <span>{lorryForm.rider}</span>
-                        <span className="px-2 py-0.5 rounded bg-amber-200/80 font-mono text-xs text-amber-900">
-                          {fleetVehicles.find((v) => v.plate === editingLorryPlate)?.driverId || "Outside Driver"}
-                        </span>
-                      </div>
-                      <p className="text-xs text-amber-800 mt-1">
-                        Assigned driver for this partner lorry is fixed to the registered driver.
-                      </p>
-                    </div>
-                  ) : (
-                    <select
-                      value={lorryForm.rider}
-                      onChange={(e) => setLorryForm((p) => ({ ...p, rider: e.target.value }))}
-                      className="w-full px-3 py-2 rounded-xl border border-[#E5E7EB] bg-[#F9FAFB] text-xs text-[#111827]"
-                    >
-                      <option value="Unassigned">Unassigned</option>
-                      {drivers.map((d) => (
-                        <option key={d.driverId} value={d.name}>{d.name} ({d.driverId})</option>
-                      ))}
-                    </select>
-                  )}
+                  <label className="block text-xs font-bold text-[#111827] mb-1">Assign Rider</label>
+                  <select
+                    value={lorryForm.rider}
+                    onChange={(e) => setLorryForm((p) => ({ ...p, rider: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl border border-[#E5E7EB] bg-[#F9FAFB] text-xs text-[#111827]"
+                  >
+                    <option value="Unassigned">Unassigned</option>
+                    {companyDrivers.map((d) => (
+                      <option key={d.driverId} value={d.name}>{d.name} ({d.driverId})</option>
+                    ))}
+                  </select>
                 </div>
               </div>
               {/* Photos Upload Section (3 photos) */}
@@ -179,6 +151,11 @@ export default function LorryModal({ admin }: { admin: Admin }) {
                   className="w-full px-3 py-2 rounded-xl border border-[#E5E7EB] bg-[#F9FAFB] text-xs text-[#111827] focus:outline-none"
                 />
               </div>
+              {lorryError && (
+                <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+                  {lorryError}
+                </p>
+              )}
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E5E7EB]">
                 <button
                   type="button"

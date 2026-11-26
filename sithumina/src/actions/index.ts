@@ -5,3 +5,4 @@ export * from "./registrations";
 export * from "./inquiries";
 export * from "./reviews";
 export * from "./auth";
+export * from "./riders";

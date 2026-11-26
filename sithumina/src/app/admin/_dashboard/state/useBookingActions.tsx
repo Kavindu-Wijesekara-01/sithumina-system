@@ -7,9 +7,9 @@ import { cleanRiderName, findBookingScheduleConflict, formatJourneyScheduleSumma
 import { PaymentSlipRecord, savePaymentBankAccounts, fetchPaymentSlipFromDb, deletePaymentSlipFromDb, dataUrlToBlobUrl } from "@/lib/payment-settings";
 import { db } from "@/lib/firebase";
 import { doc, deleteDoc } from "firebase/firestore";
-import { saveAdminFleetVehicle, deleteAdminFleetVehicle, saveAdminRider, deleteAdminRider, toggleAdminRiderStatus } from "@/lib/db-services";
+import { addRiderAction, deleteRiderAction, setRiderActiveAction, saveFleetVehicleAction, deleteFleetVehicleAction } from "@/actions/riders";
 import { Lorry } from "@/lib/mock-lorries";
-import { createBookingAction, updateBookingStatusAction, updateRegistrationStatusAction, approveRegistrationAndAddToFleetAction, updateInquiryStatusAction, registerCustomerAction, deleteCustomerAction, getAllOutsideEmployeesAction, getAllTopupSlipsAction, approveTopupSlipAction, deleteTopupSlipAction, TopupSlipRecord } from "@/actions";
+import { createBookingAction, updateBookingStatusAction, updateRegistrationStatusAction, approveRegistrationAndAddToFleetAction, updateInquiryStatusAction, registerCustomerAction, deleteCustomerAction, approveTopupSlipAction, deleteTopupSlipAction, TopupSlipRecord } from "@/actions";
 import { periodRange, revenueLines, summarise, todayYmd, withExternalOwners } from "@/lib/ledger";
 import { useLedger } from "@/components/admin/useLedger";
 import { useBookingQuery } from "@/components/admin/useBookingQuery";
@@ -83,6 +83,10 @@ export function useStage2(previous: Stage1) {
     storedBookings,
     updateBooking,
     validateIndividualScheduleOrToast,
+    setLorryError,
+    setRiderError,
+    setDrivers,
+    setFleetVehicles,
   } = previous;
   // ---- Payment Quote, Slip Review, Approve & Delete Handlers ----
   const handleSendQuote = async (booking: StoredBooking) => {
@@ -1138,6 +1142,7 @@ export function useStage2(previous: Stage1) {
       rider: drivers[0]?.name || "Unassigned",
       images: [],
     });
+    setLorryError("");
     setShowLorryModal(true);
   };
   const handleOpenEditLorry = (v: Lorry) => {
@@ -1155,6 +1160,7 @@ export function useStage2(previous: Stage1) {
       rider: v.driverName || "Unassigned",
       images: existingImgs,
     });
+    setLorryError("");
     setShowLorryModal(true);
   };
   const handleLorryImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1182,66 +1188,66 @@ export function useStage2(previous: Stage1) {
     e.preventDefault();
     const cleanPlate = lorryForm.plate.trim().toUpperCase();
     if (!cleanPlate) {
-      showToast("Lorry Plate Number is required.", "error");
+      setLorryError("Lorry Plate Number is required.");
       return;
     }
-    const matchedOutVehicle = fleetVehicles.find(
-      (v) =>
-        v.plate.toUpperCase() === cleanPlate &&
-        ((v as any).isOutsideLorry || (v as any).ownershipType === "outside")
-    );
-    const matchedDriverObj = drivers.find((d) => d.name === lorryForm.rider);
-    const resolvedRider = matchedOutVehicle?.driverName || lorryForm.rider;
-    const resolvedDriverId = matchedOutVehicle?.driverId || matchedDriverObj?.driverId || "";
-    const resolvedDriverPhone = matchedOutVehicle?.driverPhone || matchedDriverObj?.phone || "";
+    const rider = drivers.find((d) => !d.isOutsideDriver && d.name === lorryForm.rider);
+    setLorryError("");
     setLorrySubmitting(true);
     try {
-      await saveAdminFleetVehicle({
-        plate: cleanPlate,
-        vehicleType: lorryForm.vehicleType,
-        capacity: lorryForm.capacity,
-        maxWeight: lorryForm.maxWeight,
-        baseCity: lorryForm.baseCity,
-        description: lorryForm.description,
-        rider: resolvedRider,
-        driverId: resolvedDriverId,
-        driverPhone: resolvedDriverPhone,
-        images: lorryForm.images,
-        imageUrl: lorryForm.images[0] || "",
-      });
+      const res = await saveFleetVehicleAction(
+        {
+          plate: cleanPlate,
+          vehicleType: lorryForm.vehicleType,
+          capacity: lorryForm.capacity,
+          maxWeight: lorryForm.maxWeight,
+          baseCity: lorryForm.baseCity,
+          description: lorryForm.description,
+          driverId: rider?.driverId || "",
+          images: lorryForm.images,
+        },
+        !editingLorryPlate
+      );
+      if (!res.success) {
+        setLorryError(res.error);
+        return;
+      }
       showToast(editingLorryPlate ? "Vehicle updated successfully." : "New vehicle registered into fleet.");
       setShowLorryModal(false);
     } catch {
-      showToast("Failed to save fleet vehicle. Please retry.", "error");
+      setLorryError("Could not save the vehicle. Check the photo sizes and your connection.");
     } finally {
       setLorrySubmitting(false);
     }
   };
   const handleDeleteLorry = async (plate: string) => {
     if (!confirm(`Are you sure you want to delete vehicle ${plate} from the fleet?`)) return;
+    // Hide it at once; put it back if the server refuses
+    const removed = fleetVehicles.filter((v) => v.plate === plate);
+    const restore = () => setFleetVehicles((prev) => [...prev.filter((v) => v.plate !== plate), ...removed]);
+    setFleetVehicles((prev) => prev.filter((v) => v.plate !== plate));
     try {
-      await deleteAdminFleetVehicle(plate);
-      showToast(`Vehicle ${plate} removed from fleet.`);
+      const res = await deleteFleetVehicleAction(plate);
+      if (res.success) {
+        showToast(`Vehicle ${plate} removed from fleet.`);
+      } else {
+        restore();
+        showToast(res.error, "error");
+      }
     } catch {
+      restore();
       showToast("Failed to delete vehicle.", "error");
     }
   };
   // ---- Rider Registration & Management ----
   const handleOpenAddRider = () => {
-    let maxRiderNum = 9;
-    drivers.forEach((d) => {
-      const m = String(d.driverId || "").match(/^R-(\d+)$/i);
-      if (m) {
-        const num = parseInt(m[1], 10);
-        if (num > maxRiderNum) maxRiderNum = num;
-      }
-    });
+    setRiderError("");
     setRiderForm({
-      driverId: `R-${maxRiderNum + 1}`,
+      driverId: "",
       name: "",
       phone: "",
       nic: "",
-      plate: fleetVehicles[0]?.plate || "",
+      plate: "",
       vehicleType: VEHICLE_TYPE_OPTIONS[0],
       route: "Colombo – Island-wide",
       active: true,
@@ -1250,49 +1256,64 @@ export function useStage2(previous: Stage1) {
   };
   const handleSaveRider = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!riderForm.name.trim()) {
-      showToast("Rider name is required.", "error");
-      return;
-    }
-    const phoneClean = String(riderForm.phone || "").replace(/[^0-9]/g, "");
-    if (phoneClean.length < 9) {
-      showToast("Valid mobile phone number is required.", "error");
-      return;
-    }
+    setRiderError("");
     setRiderSubmitting(true);
     try {
-      await saveAdminRider({
-        driverId: riderForm.driverId,
+      const vehicle = fleetVehicles.find((v) => v.plate === riderForm.plate);
+      const res = await addRiderAction({
         name: riderForm.name,
         phone: riderForm.phone,
         nic: riderForm.nic,
         plate: riderForm.plate,
-        vehicleType: riderForm.vehicleType,
+        vehicleType: vehicle?.vehicleType || riderForm.vehicleType,
         route: riderForm.route,
         active: riderForm.active,
       });
-      showToast("Rider registered successfully.");
+      if (!res.success) {
+        setRiderError(res.error);
+        return;
+      }
+      showToast(`Rider ${res.data.driverId} registered. Select them to set a sign-in password.`);
       setShowRiderModal(false);
     } catch {
-      showToast("Failed to register rider. Please retry.", "error");
+      setRiderError("Could not register the rider. Check your connection and try again.");
     } finally {
       setRiderSubmitting(false);
     }
   };
   const handleDeleteRider = async (driverId: string, name: string) => {
-    if (!confirm(`Are you sure you want to remove rider ${name} (${driverId})?`)) return;
+    if (!confirm(`Remove rider ${name} (${driverId})? Their sign-in will be deleted.`)) return;
+    const removed = drivers.find((d) => d.driverId === driverId);
+    const restore = () =>
+      removed && setDrivers((prev) => [removed, ...prev.filter((d) => d.driverId !== driverId)]);
+    setDrivers((prev) => prev.filter((d) => d.driverId !== driverId));
     try {
-      await deleteAdminRider(driverId);
-      showToast(`Rider ${name} removed.`);
+      const res = await deleteRiderAction(driverId);
+      if (res.success) {
+        showToast(`Rider ${name} removed.`);
+      } else {
+        restore();
+        showToast(res.error, "error");
+      }
     } catch {
+      restore();
       showToast("Failed to delete rider.", "error");
     }
   };
   const handleToggleRider = async (driverId: string, currentActive: boolean) => {
+    const apply = (active: boolean) =>
+      setDrivers((prev) => prev.map((d) => (d.driverId === driverId ? { ...d, active } : d)));
+    apply(!currentActive);
     try {
-      await toggleAdminRiderStatus(driverId, !currentActive);
-      showToast(`Rider status set to ${!currentActive ? "Active" : "Inactive"}.`);
+      const res = await setRiderActiveAction(driverId, !currentActive);
+      if (res.success) {
+        showToast(`Rider status set to ${!currentActive ? "Active" : "Inactive"}.`);
+      } else {
+        apply(currentActive);
+        showToast(res.error, "error");
+      }
     } catch {
+      apply(currentActive);
       showToast("Failed to update status.", "error");
     }
   };
@@ -1357,10 +1378,6 @@ export function useStage2(previous: Stage1) {
       const res = await approveTopupSlipAction(slip.id);
       if (res.success) {
         showToast(`Top-up approved! Rs. ${Number(slip.amount || 0).toLocaleString()} credited to partner wallet.`, "success");
-        const slipsRes = await getAllTopupSlipsAction();
-        if (slipsRes.success && slipsRes.data) setTopupSlips(slipsRes.data);
-        const empRes = await getAllOutsideEmployeesAction();
-        if (empRes.success && empRes.data) setOutsideEmployees(empRes.data);
       } else {
         showToast(res.error || "Failed to approve slip.", "error");
       }

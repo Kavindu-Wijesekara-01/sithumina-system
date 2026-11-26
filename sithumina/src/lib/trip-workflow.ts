@@ -153,9 +153,8 @@ export async function performTripAction(
   const dispatchRef = doc(db, "dispatches", dispatchId);
 
   // Candidates for "what is this driver already doing" (queries are not allowed inside transactions)
-  const queried = (await listActiveBookings()).filter((b) => sameDriverOrVehicle(b, driverId, plate));
-
-  const externalOwner = await findOutsideOwnerByPlate(plate);
+  const [allActive, externalOwner] = await Promise.all([listActiveBookings(), findOutsideOwnerByPlate(plate)]);
+  const queried = allActive.filter((b) => sameDriverOrVehicle(b, driverId, plate));
 
   const result = await runTransaction(db, async (tx) => {
     const dispatch = (await tx.get(dispatchRef)).data();
@@ -177,18 +176,18 @@ export async function performTripAction(
     }
 
     const keys = lockKeys(driverId, plate);
-    const locks = [];
-    for (const key of keys) locks.push(await tx.get(doc(db, LOCKS, key)));
+    const locks = await Promise.all(keys.map((key) => tx.get(doc(db, LOCKS, key))));
     const lockedIds = locks.flatMap((l) => (l.data()?.bookingIds as string[]) || []);
 
     const candidateIds = new Set([...lockedIds, ...queried.map((b) => b.id)]);
     candidateIds.delete(bookingId);
-    const active: Doc[] = [];
-    for (const id of candidateIds) {
-      const snap = await tx.get(doc(db, "bookings", id));
-      const data = snap.data();
-      if (data && isActiveTrip(data)) active.push({ ...data, id });
-    }
+    const candidates = await Promise.all(
+      [...candidateIds].map(async (id) => ({ id, data: (await tx.get(doc(db, "bookings", id))).data() }))
+    );
+    // A locked booking that has since moved to another driver no longer counts
+    const active: Doc[] = candidates
+      .filter((c) => c.data && isActiveTrip(c.data) && sameDriverOrVehicle(c.data, driverId, plate))
+      .map((c) => ({ ...c.data, id: c.id }) as Doc);
 
     const now = Date.now();
     let role = (booking.tripRole || "primary") as TripRole;

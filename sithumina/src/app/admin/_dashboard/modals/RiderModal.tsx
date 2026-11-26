@@ -4,7 +4,8 @@ import type { Admin } from "../state/useAdminDashboard";
 
 export default function RiderModal({ admin }: { admin: Admin }) {
   const {
-    fleetVehicles,
+    companyVehicles,
+    riderError,
     handleSaveRider,
     riderForm,
     riderSubmitting,
@@ -40,7 +41,7 @@ export default function RiderModal({ admin }: { admin: Admin }) {
                 <input
                   type="text"
                   readOnly
-                  value={riderForm.driverId}
+                  value="Assigned automatically when saved"
                   className="w-full px-3 py-2 rounded-xl border border-[#E5E7EB] bg-[#F9FAFB] text-xs font-mono font-bold text-[#111827]"
                 />
               </div>
@@ -83,7 +84,7 @@ export default function RiderModal({ admin }: { admin: Admin }) {
                   className="w-full px-3 py-2 rounded-xl border border-[#E5E7EB] bg-[#F9FAFB] text-xs text-[#111827]"
                 >
                   <option value="">Unassigned</option>
-                  {fleetVehicles.map((v) => (
+                  {companyVehicles.map((v) => (
                     <option key={v.plate} value={v.plate}>{v.plate} ({v.vehicleType})</option>
                   ))}
                 </select>
@@ -109,6 +110,11 @@ export default function RiderModal({ admin }: { admin: Admin }) {
                   Active On Duty Status
                 </label>
               </div>
+              {riderError && (
+                <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+                  {riderError}
+                </p>
+              )}
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#E5E7EB]">
                 <button
                   type="button"

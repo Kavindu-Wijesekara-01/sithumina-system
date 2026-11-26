@@ -6,10 +6,6 @@ import {
   createBookingAction,
   trackBookingAction,
   updateBookingStatusAction,
-  updateLorryStatusAction,
-  updateLorryLocationAction,
-  registerDriverAndLorryAction,
-  deleteLorryAction,
   registerVehicleAction,
   updateRegistrationStatusAction,
   submitInquiryAction,
@@ -21,7 +17,6 @@ import {
  * LORRIES / FLEET SERVICE
  * ============================================================ */
 
-const LORRIES_LIVE_COL = "lorries_live";
 const LORRIES_REGISTRY_COL = "lorries_registry";
 
 /**
@@ -31,29 +26,15 @@ export async function seedInitialLorriesIfEmpty(): Promise<boolean> {
   return false;
 }
 
-/**
- * Secondary REST API fetcher for zero-interruption resilience.
- * Seamlessly connects when Firestore security rules or network streams are restricted.
- */
-async function fetchLorriesFromApi(type: "live" | "fleet" = "live"): Promise<Lorry[]> {
+/** One read of the public vehicle list; null when it could not be loaded. */
+async function fetchLorriesFromApi(type: "live" | "fleet" = "live"): Promise<Lorry[] | null> {
   try {
     const url = type === "fleet" ? "/api/lorries?type=fleet" : "/api/lorries";
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) return [];
+    const res = await fetch(url);
+    if (!res.ok) return null;
     const json = await res.json();
-    if (!json.success || !Array.isArray(json.lorries)) return [];
-    const now = Date.now();
-    const STALE_HEARTBEAT_MS = 15 * 60 * 1000; // 15 minutes grace window for mountainous / low-signal corridors
+    if (!json.success || !Array.isArray(json.lorries)) return null;
     return json.lorries
-      .filter((l: any) => {
-        if (type === "fleet") return true; // Fleet vehicles are permanent assets
-        if (l.isLive === false || l.status === "offline") return false;
-        const updateMs = Number(l.updatedAt) || 0;
-        if (updateMs > 0 && (now - updateMs) > STALE_HEARTBEAT_MS) {
-          return false;
-        }
-        return true;
-      })
       .map((l: any) => ({
       id: l.id || `lorry-${(l.plate || "").toLowerCase().replace(/[^a-z0-9]/g, "")}`,
       plate: (l.plate || l.id || "").toString().trim().toUpperCase(),
@@ -100,227 +81,85 @@ async function fetchLorriesFromApi(type: "live" | "fleet" = "live"): Promise<Lor
       hasHelper: !!l.hasHelper,
       isOutsideLorry: Boolean(l.isOutsideLorry || l.ownershipType === "outside"),
       ownershipType: (l.ownershipType || (l.isOutsideLorry ? "outside" : "company")) as "company" | "outside",
+      isAvailable: l.isAvailable !== false,
     }));
   } catch {
-    return [];
+    return null;
   }
 }
 
 /**
- * Subscribe to live lorries in real time.
- * Uses Firebase Firestore onSnapshot on "lorries_live" collection as primary stream,
- * with automatic, seamless fallback to Next.js REST API channel for 100% availability.
+ * Public pages read vehicles only through /api/lorries, which returns vehicle
+ * details without any owner or driver identity. Polling pauses while the tab is
+ * hidden, and a failed poll keeps what is already on screen.
  */
+function pollPublicLorries(
+  type: "live" | "fleet",
+  everyMs: number,
+  callback: (lorries: Lorry[]) => void,
+  onError?: (error: Error) => void
+): () => void {
+  let stopped = false;
+  let shown = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const poll = async () => {
+    clearTimeout(timer);
+    if (stopped) return;
+    if (!shown || document.visibilityState !== "hidden") {
+      const lorries = await fetchLorriesFromApi(type);
+      if (stopped) return;
+      if (lorries) {
+        shown = true;
+        callback(lorries);
+      } else {
+        onError?.(new Error("Could not load vehicles."));
+        if (!shown) callback([]);
+      }
+    }
+    clearTimeout(timer);
+    timer = setTimeout(poll, everyMs);
+  };
+  const wake = () => {
+    if (document.visibilityState === "visible") void poll();
+  };
+  document.addEventListener("visibilitychange", wake);
+  void poll();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+    document.removeEventListener("visibilitychange", wake);
+  };
+}
+
+/** Vehicles currently broadcasting their position. */
 export function subscribeLorries(
   callback: (lorries: Lorry[]) => void,
   onError?: (error: Error) => void
 ): () => void {
-  let isMounted = true;
-  const liveMap = new Map<string, Lorry>();
-  const fallbackMap = new Map<string, Lorry>();
-  let liveReady = false;
-  let lorriesReady = false;
-  let apiPollingTimer: NodeJS.Timeout | null = null;
-  let isUsingApiFallback = false;
-
-  const emitMerged = () => {
-    if (!isMounted || isUsingApiFallback || !liveReady || !lorriesReady) return;
-    const now = Date.now();
-    const STALE_THRESHOLD_MS = 900_000; // 15 minutes grace window for mountainous/low-signal corridors
-    const merged = new Map<string, Lorry>();
-
-    // 1. Process lorries_live (live collection has primary priority)
-    liveMap.forEach((lorry, key) => {
-      const updateMs = Number(lorry.updatedAt) || 0;
-      if (lorry.isLive && (updateMs === 0 || (now - updateMs) <= STALE_THRESHOLD_MS)) {
-        merged.set(key, lorry);
-      }
-    });
-
-    // 2. Process lorries collection (if not already in merged and actively broadcasting)
-    fallbackMap.forEach((lorry, key) => {
-      const updateMs = Number(lorry.updatedAt) || 0;
-      if (!merged.has(key) && lorry.isLive && (updateMs === 0 || (now - updateMs) <= STALE_THRESHOLD_MS)) {
-        merged.set(key, lorry);
-      }
-    });
-
-    // ALWAYS emit merged array (even if empty) so stopped vehicles disappear immediately
-    callback(Array.from(merged.values()));
-  };
-
-  const activateApiFallback = () => {
-    if (isUsingApiFallback || !isMounted) return;
-    isUsingApiFallback = true;
-    const poll = async () => {
-      if (!isMounted) return;
-      const apiLorries = await fetchLorriesFromApi();
-      if (isMounted) {
-        callback(apiLorries);
-      }
-    };
-    poll();
-    apiPollingTimer = setInterval(poll, 3500);
-  };
-
-  const parseSnapDoc = (docSnap: any): Lorry | null => {
-    const data = docSnap.data();
-    if (!data) return null;
-    // Strictly filter out any vehicle where broadcasting has stopped or ended
-    if (data.isLive !== true || data.status === "offline") {
-      return null;
-    }
-
-    const cleanId = (docSnap.id || "").toUpperCase();
-    const resolvedPlate = (data.plate || cleanId).toString().trim().toUpperCase();
-
-    const routeSummary =
-      data.startLocation && data.endLocation
-        ? `${data.startLocation} → ${data.endLocation}`
-        : data.route && data.route !== "Island-wide Fleet" && data.route !== "Colombo – Island-wide"
-        ? data.route
-        : data.travelRoute || "Island-wide Fleet";
-
-    let parsedUpdatedMs = Date.now();
-    if (data.updatedAt) {
-      if (typeof data.updatedAt === "number") {
-        parsedUpdatedMs = data.updatedAt;
-      } else if (typeof data.updatedAt?.toMillis === "function") {
-        parsedUpdatedMs = data.updatedAt.toMillis();
-      } else if (typeof data.updatedAt?.seconds === "number") {
-        parsedUpdatedMs = data.updatedAt.seconds * 1000;
-      } else if (typeof data.updatedAt === "string") {
-        const parsed = Date.parse(data.updatedAt);
-        if (!isNaN(parsed)) parsedUpdatedMs = parsed;
-      }
-    }
-
-    const rawDrvName = String(data.riderName || data.driverName || "").trim();
-    return {
-      id: docSnap.id,
-      plate: resolvedPlate,
-      route: routeSummary,
-      driverName: rawDrvName !== "Driver" && rawDrvName !== "Unassigned" ? rawDrvName : "",
-      driverPhone: data.riderPhone || data.driverPhone || "",
-      driverId: data.riderUid || data.driverId || cleanId,
-      vehicleType: data.vehicleType || "Lorry Fleet",
-      capacity: data.availableWeight || data.capacity || data.availableCapacityKg || "",
-      lat: Number.isFinite(Number(data.lat)) ? Number(data.lat) : 6.9271,
-      lng: Number.isFinite(Number(data.lng)) ? Number(data.lng) : 79.8612,
-      heading: Number(data.heading) || 0,
-      speedKmH: Number(data.speedKmH) || 0,
-      status: (data.status as LorryStatus) || "empty",
-      lastUpdated: data.lastUpdated || "Just now",
-      updatedAt: parsedUpdatedMs,
-      isOnline: true,
-      isLive: true,
-      startLocation: data.startLocation || "",
-      endLocation: data.endLocation || "",
-      startLat: Number.isFinite(Number(data.startLat)) ? Number(data.startLat) : undefined,
-      startLng: Number.isFinite(Number(data.startLng)) ? Number(data.startLng) : undefined,
-      endLat: Number.isFinite(Number(data.endLat)) ? Number(data.endLat) : undefined,
-      endLng: Number.isFinite(Number(data.endLng)) ? Number(data.endLng) : undefined,
-      travelRoute: data.travelRoute || "",
-      viaWaypoints: Array.isArray(data.viaWaypoints) ? data.viaWaypoints : [],
-      emptyTime: data.emptyTime || "",
-      returnRoute: data.returnRoute || "",
-      finalDestination: data.destination || data.finalDestination || "",
-      availableSpace: data.availableSpace || "",
-      availableCapacityKg: data.availableWeight || data.availableCapacityKg || "",
-      hasFreezer: !!(data.freezer ?? data.hasFreezer),
-      hasHelper: !!(data.helper ?? data.hasHelper),
-      isOutsideLorry: Boolean(data.isOutsideLorry || data.ownershipType === "outside"),
-      ownershipType: (data.ownershipType || (data.isOutsideLorry ? "outside" : "company")) as "company" | "outside",
-    };
-  };
-
-  let unsubLive = () => {};
-  let unsubLorries = () => {};
-
-  try {
-    const colLive = query(collection(db, "lorries_live"), where("isLive", "==", true));
-    unsubLive = onSnapshot(
-      colLive,
-      (snapshot) => {
-        liveMap.clear();
-        snapshot.forEach((d) => {
-          const item = parseSnapDoc(d);
-          if (item) {
-            const key = (item.plate || item.id).toUpperCase();
-            liveMap.set(key, item);
-          }
-        });
-        liveReady = true;
-        emitMerged();
-      },
-      (err) => {
-        liveReady = true;
-        onError?.(err);
-        activateApiFallback();
-      }
-    );
-  } catch (err) {
-    liveReady = true;
-    if (err instanceof Error) onError?.(err);
-    activateApiFallback();
-  }
-
-  try {
-    const colLorries = query(collection(db, "lorries"), where("isLive", "==", true));
-    unsubLorries = onSnapshot(
-      colLorries,
-      (snapshot) => {
-        fallbackMap.clear();
-        snapshot.forEach((d) => {
-          const item = parseSnapDoc(d);
-          if (item) {
-            const key = (item.plate || item.id).toUpperCase();
-            fallbackMap.set(key, item);
-          }
-        });
-        lorriesReady = true;
-        emitMerged();
-      },
-      (err) => {
-        lorriesReady = true;
-        onError?.(err);
-        activateApiFallback();
-      }
-    );
-  } catch (err) {
-    lorriesReady = true;
-    if (err instanceof Error) onError?.(err);
-    activateApiFallback();
-  }
-
-  // Periodic heartbeat timer (every 4 seconds) to auto-remove stale lorries
-  const timer = setInterval(() => {
-    emitMerged();
-  }, 4000);
-
-  return () => {
-    isMounted = false;
-    clearInterval(timer);
-    if (apiPollingTimer) clearInterval(apiPollingTimer);
-    unsubLive();
-    unsubLorries();
-  };
+  return pollPublicLorries("live", 8000, callback, onError);
 }
 
-/**
- * Subscribe to all fleet vehicles for dedicated individual booking.
- * Returns all registered lorries with image, specifications, and availability.
- * Real-time connection to Firestore with zero dummy data.
- */
+/** Registered vehicles for visitors and customers. */
+export function subscribePublicFleet(
+  callback: (lorries: Lorry[]) => void,
+  onError?: (error: Error) => void
+): () => void {
+  return pollPublicLorries("fleet", 60000, callback, onError);
+}
+
 function stripSinhalaText(val: string): string {
   if (!val || typeof val !== "string") return "";
   return val
-    .replace(/[\u0D80-\u0DFF]+/g, "")
+    .replace(/[඀-෿]+/g, "")
     .replace(/\(\s*\)/g, "")
     .replace(/\s{2,}/g, " ")
     .trim();
 }
 
+/**
+ * Admin only: the full fleet registry in real time, including assigned riders.
+ * The security rules refuse this read to everyone else.
+ */
 export function subscribeFleetVehicles(
   callback: (lorries: Lorry[]) => void,
   onError?: (error: Error) => void
@@ -395,16 +234,12 @@ export function subscribeFleetVehicles(
       },
       (err) => {
         onError?.(err);
-        fetchLorriesFromApi("fleet").then((apiLorries) => {
-          if (isMounted) callback(apiLorries);
-        });
+        callback([]);
       }
     );
   } catch (err) {
     if (err instanceof Error) onError?.(err);
-    fetchLorriesFromApi("fleet").then((apiLorries) => {
-      if (isMounted) callback(apiLorries);
-    });
+    callback([]);
   }
 
   return () => {
@@ -418,6 +253,7 @@ export function subscribeFleetVehicles(
  */
 export interface AdminDriverRecord {
   id?: string;
+  isOutsideDriver?: boolean;
   driverId: string;
   name: string;
   phone: string;
@@ -472,6 +308,7 @@ export function subscribeAdminDrivers(
             route: String(data.route || ""),
             lorryId: resolvedLorryId,
             active: data.active !== false,
+            isOutsideDriver: Boolean(data.isOutsideDriver),
             createdAt: Number(data.createdAt) || 0,
           });
         });
@@ -508,252 +345,6 @@ export function subscribeAdminDrivers(
     isMounted = false;
     unsub();
   };
-}
-
-/**
- * Save / Register new or edited Driver/Rider
- */
-export async function saveAdminRider(input: {
-  driverId: string;
-  name: string;
-  phone: string;
-  nic?: string;
-  plate?: string;
-  vehicleType?: string;
-  route?: string;
-  lorryId?: string;
-  active?: boolean;
-}): Promise<boolean> {
-  const cleanId = input.driverId.trim().toUpperCase().replace(/\//g, "-");
-  if (!cleanId) return false;
-  const cleanPlate = (input.plate || "").trim().toUpperCase();
-  const explicitLorry = String(input.lorryId || "").trim().toLowerCase().replace(/\//g, "-");
-  const plateSlug = cleanPlate.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const idSlug = cleanId.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const lorryId =
-    explicitLorry && explicitLorry !== "lorry-"
-      ? explicitLorry
-      : `lorry-${plateSlug || idSlug || Date.now()}`;
-
-  const payload: AdminDriverRecord = {
-    driverId: cleanId,
-    name: input.name.trim(),
-    phone: input.phone.trim(),
-    nic: (input.nic || "").trim(),
-    plate: cleanPlate,
-    vehicleType: input.vehicleType?.trim() || "Lorry Fleet",
-    route: input.route?.trim() || "Island-wide Fleet",
-    lorryId,
-    active: input.active !== false,
-    createdAt: Date.now(),
-  };
-
-  // 1. Sync to local Web Backend API (/api/drivers)
-  try {
-    await fetch("/api/drivers", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-  } catch {}
-
-  // 2. Sync to Firestore drivers and lorries
-  try {
-    await setDoc(doc(db, "drivers", cleanId), payload, { merge: true });
-    if (cleanPlate) {
-      await setDoc(
-        doc(db, "lorries", lorryId),
-        {
-          id: lorryId,
-          plate: cleanPlate,
-          route: payload.route,
-          driverName: payload.name,
-          driverId: cleanId,
-          driverPhone: payload.phone,
-          vehicleType: payload.vehicleType,
-          status: "empty",
-          lastUpdated: "Active",
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      );
-    }
-  } catch {}
-
-  return true;
-}
-
-/**
- * Delete Rider from Firestore and local API
- */
-export async function deleteAdminRider(driverId: string): Promise<boolean> {
-  const cleanId = driverId.trim().toUpperCase();
-  try {
-    await deleteDoc(doc(db, "drivers", cleanId));
-  } catch {}
-  try {
-    await fetch(`/api/drivers?id=${encodeURIComponent(cleanId)}`, { method: "DELETE" });
-  } catch {}
-  return true;
-}
-
-/**
- * Toggle Rider active status
- */
-export async function toggleAdminRiderStatus(driverId: string, active: boolean): Promise<boolean> {
-  const cleanId = driverId.trim().toUpperCase();
-  try {
-    await updateDoc(doc(db, "drivers", cleanId), {
-      active,
-      updatedAt: Date.now(),
-    });
-  } catch {}
-  return true;
-}
-
-/**
- * Save fleet vehicle into Firestore lorries_registry and sync with /api/lorries
- */
-export async function saveAdminFleetVehicle(input: {
-  plate: string;
-  vehicleType: string;
-  capacity?: string;
-  maxWeight?: string;
-  baseCity?: string;
-  description?: string;
-  images?: string[];
-  imageUrl?: string;
-  rider?: string;
-  driverId?: string;
-  driverPhone?: string;
-}): Promise<boolean> {
-  const cleanPlate = input.plate.trim().toUpperCase();
-  const docId = `lorry-${cleanPlate.replace(/[^A-Z0-9]/gi, "").toLowerCase()}`;
-  const images = Array.isArray(input.images) && input.images.length > 0
-    ? input.images
-    : (input.imageUrl ? [input.imageUrl] : []);
-
-  const riderName = input.rider?.trim() || "Unassigned";
-
-  const payload: Record<string, any> = {
-    id: docId,
-    plate: cleanPlate,
-    vehicleType: input.vehicleType.trim(),
-    capacity: input.capacity?.trim() || "14ft × 6.5ft × 7ft Cargo Space",
-    maxWeight: input.maxWeight?.trim() || "3.5 Tons (3,500 kg)",
-    baseCity: input.baseCity?.trim() || "",
-    startLocation: input.baseCity?.trim() || "",
-    description: input.description?.trim() || "Dedicated individual lorry available for custom cargo bookings.",
-    images,
-    imageUrl: images[0] || "",
-    rider: riderName,
-    driverName: riderName === "Unassigned" ? "" : riderName,
-    driverId: riderName === "Unassigned" ? "" : (input.driverId?.trim() || ""),
-    driverPhone: riderName === "Unassigned" ? "" : (input.driverPhone?.trim() || ""),
-    status: "empty",
-    updatedAt: Date.now(),
-    createdAt: Date.now(),
-  };
-
-  // 1. Sync to local API (/api/lorries)
-  try {
-    await fetch("/api/lorries", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-  } catch {}
-
-  // 2. Sync to Firestore (Both lorries_registry and lorries)
-  try {
-    await setDoc(doc(db, "lorries_registry", docId), payload, { merge: true });
-    await setDoc(doc(db, "lorries", docId), payload, { merge: true });
-  } catch {}
-
-  return true;
-}
-
-/**
- * Delete fleet vehicle from Firestore and API
- */
-export async function deleteAdminFleetVehicle(plate: string): Promise<boolean> {
-  const cleanPlate = plate.trim().toUpperCase();
-  const docId = `lorry-${cleanPlate.replace(/[^A-Z0-9]/gi, "").toLowerCase()}`;
-
-  try {
-    await fetch(`/api/lorries?id=${encodeURIComponent(docId)}`, { method: "DELETE" });
-  } catch {}
-
-  try {
-    await deleteDoc(doc(db, "lorries_registry", docId));
-    await deleteDoc(doc(db, "lorries", docId));
-  } catch {}
-
-  return true;
-}
-
-/**
- * Update lorry status ("empty" vs "on_trip") using Server Action
- */
-export async function updateLorryStatus(
-  lorryId: string,
-  status: LorryStatus
-): Promise<void> {
-  try {
-    await updateLorryStatusAction(lorryId, status);
-  } catch (e) {
-    console.warn("Server action status update notice:", e);
-  }
-}
-
-/**
- * Update lorry GPS location & heading/speed in real time using Server Action
- */
-export async function updateLorryLocation(
-  lorryId: string,
-  lat: number,
-  lng: number,
-  heading: number = 0,
-  speedKmH: number = 0
-): Promise<void> {
-  try {
-    await updateLorryLocationAction(lorryId, lat, lng, heading, speedKmH);
-  } catch (e) {
-    console.warn("Server action location update notice:", e);
-  }
-}
-
-/**
- * Add a new lorry directly to Fleet using Server Action
- */
-export async function addNewLorry(lorry: Omit<Lorry, "id">): Promise<string> {
-  const defaultId = `lorry-${lorry.plate.replace(/[^A-Z0-9]/gi, "").toLowerCase()}`;
-  try {
-    const res = await registerDriverAndLorryAction({
-      name: lorry.driverName || "Driver",
-      phone: "0112984984",
-      plate: lorry.plate,
-      vehicleType: lorry.vehicleType,
-      route: lorry.route,
-    });
-    if (res.success && res.data.lorry?.id) {
-      return res.data.lorry.id;
-    }
-  } catch (e) {
-    console.warn("Server action add lorry notice:", e);
-  }
-  return defaultId;
-}
-
-/**
- * Delete a lorry from Fleet using Server Action
- */
-export async function deleteLorry(lorryId: string): Promise<void> {
-  try {
-    await deleteLorryAction(lorryId);
-  } catch (e) {
-    console.warn("Server action delete lorry notice:", e);
-  }
 }
 
 /* ============================================================
@@ -1042,29 +633,6 @@ export async function updateRegistrationStatus(
   } catch (e) {
     console.warn("Server action registration status notice:", e);
   }
-}
-
-/**
- * Approve registration and immediately add it to the live fleet on the map
- */
-export async function approveAndAddToFleet(
-  reg: VehicleRegistration,
-  lat: number = 6.9271,
-  lng: number = 79.8612
-): Promise<void> {
-  await updateRegistrationStatus(reg.id, "approved");
-  await addNewLorry({
-    plate: reg.plateNumber,
-    route: `${reg.baseCity} – Island-wide`,
-    driverName: reg.ownerName,
-    vehicleType: reg.vehicleType,
-    lat,
-    lng,
-    heading: 0,
-    speedKmH: 0,
-    status: "empty",
-    lastUpdated: "Just now",
-  });
 }
 
 /* ============================================================

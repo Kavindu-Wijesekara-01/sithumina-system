@@ -7,9 +7,9 @@ export default function FleetSection({ admin }: { admin: Admin }) {
   const {
     activeNav,
     bookings,
-    drivers,
+    companyDrivers,
+    companyVehicles,
     filteredFleet,
-    fleetVehicles,
     handleDeleteLorry,
     handleOpenAddLorry,
     handleOpenEditLorry,
@@ -29,8 +29,8 @@ export default function FleetSection({ admin }: { admin: Admin }) {
               <PerformancePanel
                 mode="vehicles"
                 bookings={bookings}
-                drivers={drivers}
-                vehicles={fleetVehicles}
+                drivers={companyDrivers}
+                vehicles={companyVehicles}
                 owners={outsideEmployees}
               />
               {/* Top Action & Search Bar */}

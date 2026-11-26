@@ -28,30 +28,36 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------- Public site data
-    match /lorries_registry/{id} {
-      allow read: if true;
-      allow write: if isAdmin();
-    }
     match /active_trips/{id} { allow read: if true; allow write: if false; }
     match /reviews/{id}      { allow read: if true; allow write: if isAdmin(); }
     match /banners/{id}      { allow read: if true; allow write: if isAdmin(); }
     // Company bank accounts are shown to customers who need to pay
     match /settings/payment_accounts { allow read: if true; allow write: if isAdmin(); }
 
-    // ------------------------------------------------------------ Live vehicles
+    // ----------------------------------------------------------------- Vehicles
+    // Vehicle records carry owner and driver names and phone numbers. Visitors
+    // get a sanitised copy from the web server (/api/lorries), never these.
+    function ownVehicle() { return isDriver() && resource.data.get('driverId', '') == driverId(); }
+
+    match /lorries_registry/{id} {
+      allow read: if isAdmin() || ownVehicle();
+      allow write: if isAdmin();
+    }
+
     // A driver may broadcast only documents carrying their own Driver ID
     function driverBroadcast() {
       return isDriver()
         && request.resource.data.get('driverId', '') == driverId()
-        && (resource == null || resource.data.get('driverId', driverId()) == driverId());
+        // An unassigned record (empty ID) may be taken over by its new driver
+        && (resource == null || resource.data.get('driverId', '') in ['', driverId()]);
     }
     match /lorries/{id} {
-      allow read: if true;
+      allow read: if isAdmin() || ownVehicle();
       allow create, update: if isAdmin() || driverBroadcast();
       allow delete: if isAdmin();
     }
     match /lorries_live/{id} {
-      allow read: if true;
+      allow read: if isAdmin() || ownVehicle();
       allow create, update: if isAdmin() || driverBroadcast();
       allow delete: if isAdmin() || (isDriver() && resource.data.get('driverId', '') == driverId());
     }

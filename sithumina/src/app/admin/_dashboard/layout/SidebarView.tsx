@@ -7,8 +7,8 @@ export default function SidebarView({ admin }: { admin: Admin }) {
     activeNav,
     completedBookings,
     customersWithMetrics,
-    drivers,
-    fleetVehicles,
+    companyDrivers,
+    companyVehicles,
     handleOpenManualModal,
     handleSignOut,
     inquiries,
@@ -389,7 +389,7 @@ export default function SidebarView({ admin }: { admin: Admin }) {
             </div>
             <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono ${activeNav === "fleet" ? "bg-[#111827] text-white" : "bg-white/15 text-white/80"
               }`}>
-              {loadingFleet ? "..." : fleetVehicles.length}
+              {loadingFleet ? "..." : companyVehicles.length}
             </span>
           </button>
           {/* Riders & Drivers */}
@@ -414,7 +414,7 @@ export default function SidebarView({ admin }: { admin: Admin }) {
             </div>
             <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono ${activeNav === "riders" ? "bg-[#111827] text-white" : "bg-white/15 text-white/80"
               }`}>
-              {loadingDrivers ? "..." : drivers.length}
+              {loadingDrivers ? "..." : companyDrivers.length}
             </span>
           </button>
           {/* Settings */}

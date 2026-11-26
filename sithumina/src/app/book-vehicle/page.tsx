@@ -7,7 +7,7 @@ import { useSearchParams } from "next/navigation";
 import { useLanguage } from "@/context/LanguageContext";
 import { useAuth } from "@/context/AuthContext";
 import { Lorry } from "@/lib/mock-lorries";
-import { Booking, subscribeFleetVehicles } from "@/lib/db-services";
+import { Booking, subscribePublicFleet } from "@/lib/db-services";
 import {
   createBookingAction,
   trackBookingAction,
@@ -444,10 +444,10 @@ function BookVehicleContent() {
   const [trackLoading, setTrackLoading] = useState(false);
   const [trackError, setTrackError] = useState("");
 
-  // Real-time Fleet Subscription from Firestore
+  // Registered vehicles (public details only)
   useEffect(() => {
     let mounted = true;
-    const unsubscribe = subscribeFleetVehicles((vehicles) => {
+    const unsubscribe = subscribePublicFleet((vehicles) => {
       if (!mounted) return;
       setFleet(vehicles);
       setFleetLoading(false);
@@ -593,9 +593,6 @@ function BookVehicleContent() {
         notes: form.notes,
         assignedPlate: selectedVehicle.plate,
         assignedLorryId: selectedVehicle.id,
-        assignedDriverId: selectedVehicle.driverId,
-        assignedDriverName: selectedVehicle.driverName,
-        assignedDriverPhone: selectedVehicle.driverPhone,
         pickupLat: pickupPin?.lat ?? gpsCoords?.lat,
         pickupLng: pickupPin?.lng ?? gpsCoords?.lng,
         pickupPinned: Boolean(pickupPin || gpsCoords),

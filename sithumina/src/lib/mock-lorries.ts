@@ -38,6 +38,7 @@ export interface Lorry {
   isOnline?: boolean;
   isLive?: boolean;
   isOutsideLorry?: boolean;
+  isAvailable?: boolean;
   ownershipType?: "company" | "outside";
 }
 

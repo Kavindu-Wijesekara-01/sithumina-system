@@ -2,11 +2,7 @@
 
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { Lorry, LorryStatus } from "@/lib/mock-lorries";
-import {
-  subscribeLorries,
-  updateLorryStatus,
-  updateLorryLocation,
-} from "@/lib/db-services";
+import { subscribeLorries } from "@/lib/db-services";
 import { db } from "@/lib/firebase";
 import { collection, onSnapshot } from "firebase/firestore";
 import { normalizeVehicleKey } from "@/lib/trip-state";
@@ -32,13 +28,11 @@ export interface UseLiveLorriesReturn {
   filterStatus: LorryStatus | "all";
   setFilterStatus: (status: LorryStatus | "all") => void;
   filteredLorries: Lorry[];
-  toggleLorryStatus: (id: string, currentStatus: LorryStatus) => Promise<void>;
-  updateLocation: (id: string, lat: number, lng: number) => Promise<void>;
 }
 
 /**
- * Hook to retrieve and subscribe to live lorry locations in Firebase Firestore.
- * Receives real-time updates from Firebase and provides functions to mutate status.
+ * Live lorry locations for public pages, refreshed every few seconds from the
+ * sanitised vehicle API.
  */
 export function useLiveLorries({
   pollingIntervalMs = 4000,
@@ -69,7 +63,7 @@ export function useLiveLorries({
   const [selectedLorryId, setSelectedLorryId] = useState<string | null>(null);
   const [filterStatus, setFilterStatus] = useState<LorryStatus | "all">("all");
 
-  // Subscribe to real-time Firestore fleet updates directly
+  // Keep the vehicle list fresh
   useEffect(() => {
     let isSubscribed = true;
 
@@ -143,36 +137,6 @@ export function useLiveLorries({
     setSelectedLorryId(id);
   }, []);
 
-  const toggleLorryStatus = useCallback(
-    async (id: string, currentStatus: LorryStatus) => {
-      const nextStatus: LorryStatus = currentStatus === "empty" ? "on_trip" : "empty";
-      // Optimistic update
-      setLorries((prev) =>
-        prev.map((l) => (l.id === id ? { ...l, status: nextStatus } : l))
-      );
-      try {
-        await updateLorryStatus(id, nextStatus);
-      } catch (e) {
-        console.warn("Could not sync status change to Firebase:", e);
-      }
-    },
-    []
-  );
-
-  const updateLocation = useCallback(
-    async (id: string, lat: number, lng: number) => {
-      setLorries((prev) =>
-        prev.map((l) => (l.id === id ? { ...l, lat, lng } : l))
-      );
-      try {
-        await updateLorryLocation(id, lat, lng);
-      } catch (e) {
-        console.warn("Could not sync location to Firebase:", e);
-      }
-    },
-    []
-  );
-
   // Primary prototype shows 4 prominent lorries in the sidebar panel
   const nearbyLorries = useMemo(() => {
     return lorries.slice(0, 4);
@@ -207,7 +171,5 @@ export function useLiveLorries({
     filterStatus,
     setFilterStatus,
     filteredLorries,
-    toggleLorryStatus,
-    updateLocation,
   };
 }

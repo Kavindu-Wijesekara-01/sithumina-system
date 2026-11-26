@@ -116,7 +116,6 @@ export default function PerformancePanel({
   const [range, setRange] = useState<PeriodValue>({ period: "all", from: "", to: "" });
   const [selected, setSelected] = useState("");
   const [search, setSearch] = useState("");
-  const [fleet, setFleet] = useState<"company" | "external">("company");
   const [from, to] = periodRange(range.period, range.from, range.to);
   const ledger = useLedger();
   // The list covers the chosen period; the selected entry loads its whole history
@@ -155,7 +154,7 @@ export default function PerformancePanel({
         bookings: bookingsForDriver(bookings, { id, phone: d.phone, name: d.name }),
       };
     });
-  } else if (mode === "external" || fleet === "external") {
+  } else if (mode === "external") {
     items = ownerItems;
   } else {
     const seen = new Set<string>();
@@ -204,22 +203,6 @@ export default function PerformancePanel({
         <PeriodPicker value={range} onChange={setRange} />
       </div>
 
-      {mode === "vehicles" && (
-        <div className="flex gap-2">
-          {(["company", "external"] as const).map((id) => (
-            <button
-              key={id}
-              type="button"
-              aria-pressed={fleet === id}
-              onClick={() => { setFleet(id); setSelected(""); }}
-              className={`rounded-lg border px-3 py-1.5 text-sm cursor-pointer ${fleet === id ? "border-gray-900 bg-gray-900 text-white" : "border-gray-200 bg-white text-gray-700"}`}
-            >
-              {id === "company" ? "Company vehicles" : `External vehicles (${owners.length})`}
-            </button>
-          ))}
-        </div>
-      )}
-
       <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-4 items-start">
         <div className="rounded-xl border border-gray-200 bg-white">
           <input
@@ -256,9 +239,9 @@ export default function PerformancePanel({
           <div className="flex flex-col gap-4 min-w-0">
             {(period.loading || history.loading) && <p role="status" className="text-sm text-gray-500">Loading trip history...</p>}
             {(period.error || history.error) && <p role="alert" className="text-sm text-red-700">Some records could not be loaded; figures are incomplete.</p>}
-            {(mode === "drivers" || active.owner) && <DriverPassword key={active.key} driverId={active.key} />}
+            {(mode === "drivers" || active.owner) && <DriverPassword key={`password-${active.key}`} driverId={active.key} />}
             <TotalsGrid totals={active.totals} />
-            {active.owner && <Wallet key={active.owner.id} owner={active.owner} />}
+            {active.owner && <Wallet key={`wallet-${active.owner.id}`} owner={active.owner} />}
             <BankTable totals={active.totals} />
             <h3 className="text-sm font-semibold">Completed trips</h3>
             <TripGroupList groups={groupTrips(finished, bookings)} empty="No completed trips in this period." />

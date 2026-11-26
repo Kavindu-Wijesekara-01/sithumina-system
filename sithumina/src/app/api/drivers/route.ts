@@ -1,13 +1,9 @@
 import { authorize, deniedResponse, driverOwnsBooking, driverOwnsVehicle, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { NextResponse } from "next/server";
-import {
-  getAllStoredDrivers,
-  registerDriverInStore,
-  deleteDriverFromStore,
-} from "@/lib/server-store";
+import { getAllStoredDrivers } from "@/lib/server-store";
+import { RiderError, removeRider, saveRider } from "@/lib/riders";
 import { db } from "@/lib/fs-server";
-import { allocateDriverId } from "@/lib/driver-ids";
-import { collection, getDocs, doc, setDoc, deleteDoc } from "@/lib/fs-server";
+import { collection, getDocs } from "@/lib/fs-server";
 
 function resolveDriverLorryId(rawLorryId: unknown, plate: unknown, driverId: unknown): string {
   const cleanLorry = String(rawLorryId || "").trim().toLowerCase().replace(/\//g, "-");
@@ -52,64 +48,33 @@ export async function GET() {
   }
 }
 
+function failure(error: unknown, fallback: string) {
+  const known = error instanceof RiderError;
+  if (!known) console.error(fallback, error);
+  return NextResponse.json(
+    { success: false, error: known ? error.message : fallback },
+    { status: known ? 409 : 500 }
+  );
+}
+
 export async function POST(request: Request) {
   const auth = await authorize("admin");
   if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const body = await request.json();
-    const { name, phone, plate, vehicleNumber, vehicleType, route, driverId, nic, active } = body;
-    const finalPlate = (plate || vehicleNumber || "").toString().trim().toUpperCase();
-
-    if (!name || !phone || !finalPlate) {
-      return NextResponse.json(
-        { success: false, error: "Name, phone, and plate are required." },
-        { status: 400 }
-      );
-    }
-
-    const result = await registerDriverInStore({
-      name,
-      phone,
-      plate: finalPlate,
-      vehicleType: vehicleType || "Lorry Fleet",
-      route: route || "Island-wide Fleet",
-      driverId: driverId || (await allocateDriverId()),
+    const saved = await saveRider({
+      driverId: body.driverId,
+      name: body.name,
+      phone: body.phone,
+      nic: body.nic,
+      plate: body.plate || body.vehicleNumber,
+      vehicleType: body.vehicleType,
+      route: body.route,
+      active: body.active,
     });
-
-    const cleanId = result.driver.driverId.trim().toUpperCase();
-    try {
-      await setDoc(
-        doc(db, "drivers", cleanId),
-        {
-          driverId: cleanId,
-          name: result.driver.name,
-          phone: result.driver.phone,
-          nic: (nic || "").toString().trim(),
-          plate: result.driver.plate,
-          vehicleType: result.driver.vehicleType,
-          route: result.driver.route,
-          lorryId: result.driver.lorryId,
-          active: active !== false,
-          createdAt: result.driver.createdAt,
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      );
-    } catch (e) {
-      console.warn("Firestore sync notice for driver POST:", e);
-    }
-
-    return NextResponse.json({
-      success: true,
-      driver: result.driver,
-      lorry: result.lorry,
-    });
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed to register driver.";
-    return NextResponse.json(
-      { success: false, error: message },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: true, driver: { driverId: saved.driverId } });
+  } catch (error) {
+    return failure(error, "Failed to register driver.");
   }
 }
 
@@ -121,45 +86,12 @@ export async function DELETE(request: Request) {
     let id = searchParams.get("id");
     if (!id) {
       try {
-        const body = await request.json();
-        id = body?.id;
+        id = (await request.json())?.id;
       } catch {}
     }
-
-    if (!id) {
-      return NextResponse.json(
-        { success: false, error: "Driver ID is required." },
-        { status: 400 }
-      );
-    }
-
-    const cleanUpper = id.trim().toUpperCase();
-    await deleteDriverFromStore(id);
-
-    try {
-      await deleteDoc(doc(db, "drivers", cleanUpper));
-      if (id.trim() !== cleanUpper) {
-        await deleteDoc(doc(db, "drivers", id.trim()));
-      }
-      const snap = await getDocs(collection(db, "drivers"));
-      for (const d of snap.docs) {
-        const data = d.data();
-        const dId = String(data.driverId || d.id).toUpperCase();
-        const dPlate = String(data.plate || "").toUpperCase();
-        if (dId === cleanUpper || dPlate === cleanUpper) {
-          await deleteDoc(doc(db, "drivers", d.id));
-        }
-      }
-    } catch (e) {
-      console.warn("Firestore delete driver notice:", e);
-    }
-
+    await removeRider(id || "");
     return NextResponse.json({ success: true });
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Failed to delete driver.";
-    return NextResponse.json(
-      { success: false, error: message },
-      { status: 500 }
-    );
+  } catch (error) {
+    return failure(error, "Failed to delete driver.");
   }
 }

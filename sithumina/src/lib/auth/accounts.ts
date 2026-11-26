@@ -46,6 +46,30 @@ export async function upsertAccount(input: {
   return uid;
 }
 
+/** Sign this identifier out everywhere. Missing accounts are not an error. */
+export async function revokeSessions(identifier: string): Promise<void> {
+  const auth = adminAuth();
+  try {
+    const { uid } = await auth.getUserByEmail(loginEmail(identifier));
+    await auth.revokeRefreshTokens(uid);
+  } catch (e) {
+    if (errorCode(e) !== "auth/user-not-found") throw e;
+  }
+}
+
+/** Revoke every session and delete the sign-in. An Admin account is never touched. */
+export async function deleteAccount(identifier: string): Promise<void> {
+  const auth = adminAuth();
+  try {
+    const user = await auth.getUserByEmail(loginEmail(identifier));
+    if (user.customClaims?.role === "admin") return;
+    await auth.revokeRefreshTokens(user.uid);
+    await auth.deleteUser(user.uid);
+  } catch (e) {
+    if (errorCode(e) !== "auth/user-not-found") throw e;
+  }
+}
+
 export async function disableAccount(identifier: string): Promise<void> {
   const auth = adminAuth();
   try {

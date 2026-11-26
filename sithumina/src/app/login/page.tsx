@@ -12,7 +12,7 @@ import { phonesMatch, normalizePlate, normalizePhoneNumber } from "@/lib/phone-u
 import { formatTimeDurationLabel } from "@/lib/booking-schedule";
 import { db } from "@/lib/firebase";
 import { collection, onSnapshot, query, where } from "firebase/firestore";
-import { subscribeFleetVehicles, AdminDriverRecord } from "@/lib/db-services";
+import { subscribePublicFleet, AdminDriverRecord } from "@/lib/db-services";
 import {
   BankAccountSetting,
   subscribePaymentBankAccounts,
@@ -69,7 +69,7 @@ export default function CustomerPortalPage() {
       }
     }
 
-    const unsubFleet = subscribeFleetVehicles((vehicles) => {
+    const unsubFleet = subscribePublicFleet((vehicles) => {
       setFleetVehicles(vehicles);
     });
     const unsubBanks = subscribePaymentBankAccounts((accs) => {

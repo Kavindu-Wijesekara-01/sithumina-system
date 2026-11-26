@@ -220,7 +220,7 @@ export function createRenderBookingDispatchCard(admin: Stage3) {
                           ? {
                             ...item,
                             status: "in_transit",
-                            driverTripStatus: "in_transit",
+                            driverTripStatus: "accepted",
                             rideStartedAt: (res.data && res.data.rideStartedAt) || now,
                           }
                           : item

@@ -78,6 +78,16 @@ export async function deleteDoc(ref: Ref): Promise<void> {
   await target(ref).delete();
 }
 
+/** All-or-nothing group of writes sent in one round trip. */
+export function writeBatch(_db: unknown) {
+  const batch = adminDb().batch();
+  return {
+    set: (ref: Ref, data: object, options?: { merge?: boolean }) => void batch.set(target(ref), data as Data, options || {}),
+    delete: (ref: Ref) => void batch.delete(target(ref)),
+    commit: async () => void (await batch.commit()),
+  };
+}
+
 export interface Transaction {
   get: (ref: Ref) => Promise<ReturnType<typeof snapshot>>;
   set: (ref: Ref, data: object, options?: { merge?: boolean }) => void;

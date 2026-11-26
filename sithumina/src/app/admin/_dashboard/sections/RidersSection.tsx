@@ -7,7 +7,7 @@ export default function RidersSection({ admin }: { admin: Admin }) {
   const {
     activeNav,
     bookings,
-    drivers,
+    companyDrivers,
     filteredDrivers,
     fleetVehicles,
     handleDeleteRider,
@@ -26,7 +26,7 @@ export default function RidersSection({ admin }: { admin: Admin }) {
               <PerformancePanel
                 mode="drivers"
                 bookings={bookings}
-                drivers={drivers}
+                drivers={companyDrivers}
                 vehicles={fleetVehicles}
                 owners={outsideEmployees}
               />

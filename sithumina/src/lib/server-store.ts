@@ -16,7 +16,6 @@ import {
 } from "@/lib/fs-server";
 import { normalizePhoneNumber, phonesMatch, getCanonicalCustomerId } from "@/lib/phone-utils";
 import { createWithSequentialId } from "@/lib/sequence";
-import { allocateDriverId } from "@/lib/driver-ids";
 import { findOutsideOwnerByPlate } from "@/lib/outside-owners";
 import { todayYmd } from "@/lib/ledger";
 
@@ -403,47 +402,6 @@ export async function getAllStoredLorries(): Promise<StoredLorry[]> {
     .map((l, index) => normalizeLorry(l, index));
 }
 
-export async function registerDriverInStore(
-  input: {
-  name: string;
-  phone: string;
-  plate: string;
-  vehicleType: string;
-  route: string;
-  driverId?: string;
-}
-): Promise<{ driver: StoredDriver; lorry: StoredLorry }> {
-  const plate = input.plate.trim().toUpperCase();
-  const driverId = input.driverId || (await allocateDriverId());
-  const lorryId = `lorry-${slug(plate) || slug(driverId)}`;
-  const driver: StoredDriver = {
-    driverId,
-    name: input.name.trim(),
-    phone: input.phone.trim(),
-    plate,
-    vehicleType: input.vehicleType.trim() || "14ft Lorry",
-    route: input.route.trim() || "Colombo – Island-wide",
-    lorryId,
-    active: true,
-    createdAt: Date.now(),
-  };
-  const lorry = {
-    id: lorryId,
-    plate,
-    driverId,
-    driverName: driver.name,
-    driverPhone: driver.phone,
-    vehicleType: driver.vehicleType,
-    route: driver.route,
-    status: "empty",
-    updatedAt: Date.now(),
-  } as unknown as StoredLorry;
-
-  await setDoc(doc(db, "drivers", driverId), clean(driver), { merge: true });
-  await setDoc(doc(db, "lorries", lorryId), clean(lorry), { merge: true });
-  return { driver, lorry };
-}
-
 const lorryDocId = (identifier: string, meta?: AnyRecord) => {
   const raw = String(identifier || "").trim().toLowerCase().replace(/\//g, "-");
   return raw && raw !== "lorry-" ? raw : `lorry-${slug(meta?.plate || meta?.driverId) || Date.now()}`;
@@ -534,22 +492,6 @@ export async function updateLorryStatusInStore(
   const patch = { status, lastUpdated: "Just now", updatedAt: Date.now() };
   await Promise.all(matches.map((l) => updateDoc(doc(db, "lorries", l.id), patch)));
   return matches[0] ? ({ ...matches[0], ...patch } as unknown as StoredLorry) : null;
-}
-
-export async function deleteLorryFromStore(idOrPlate: string): Promise<boolean> {
-  let removed = false;
-  for (const name of ["lorries", "lorries_registry", "lorries_live"]) {
-    const matches = (await readAll<AnyRecord>(name)).filter((l) => matchesVehicle(l, idOrPlate));
-    await Promise.all(matches.map((l) => deleteDoc(doc(db, name, l.id))));
-    removed = removed || matches.length > 0;
-  }
-  return removed;
-}
-
-export async function deleteDriverFromStore(idOrPlate: string): Promise<boolean> {
-  const matches = (await readAll<AnyRecord>("drivers")).filter((d) => matchesVehicle(d, idOrPlate));
-  await Promise.all(matches.map((d) => deleteDoc(doc(db, "drivers", d.id))));
-  return matches.length > 0;
 }
 
 /* ============================================================

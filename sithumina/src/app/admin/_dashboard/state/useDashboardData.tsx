@@ -1,5 +1,6 @@
 "use client";
 
+import { normalizeVehicleKey } from "@/lib/trip-state";
 import { useCallback, useMemo } from "react";
 import { StoredBooking } from "@/lib/server-store";
 import { normalizePhoneNumber } from "@/lib/phone-utils";
@@ -369,7 +370,14 @@ export function useStage3(previous: Stage2) {
     isBookingPaymentPending,
     clockTick,
   ]);
-  const filteredFleet = fleetVehicles.filter((v) => {
+  // Outside owners and their vehicles are managed only under Outside Employees
+  const ownerPlates = new Set(outsideEmployees.map((o) => normalizeVehicleKey(o.plateNumber)));
+  const ownerIds = new Set(outsideEmployees.map((o) => o.id));
+  const companyVehicles = fleetVehicles.filter(
+    (v) => !v.isOutsideLorry && v.ownershipType !== "outside" && !ownerPlates.has(normalizeVehicleKey(v.plate))
+  );
+  const companyDrivers = drivers.filter((d) => !d.isOutsideDriver && !ownerIds.has(d.driverId));
+  const filteredFleet = companyVehicles.filter((v) => {
     if (!lorrySearch.trim()) return true;
     const q = lorrySearch.toLowerCase();
     return (
@@ -379,7 +387,7 @@ export function useStage3(previous: Stage2) {
       (v.driverName && v.driverName.toLowerCase().includes(q))
     );
   });
-  const filteredDrivers = drivers.filter((d) => {
+  const filteredDrivers = companyDrivers.filter((d) => {
     if (!riderSearch.trim()) return true;
     const q = riderSearch.toLowerCase();
     return (
@@ -786,6 +794,8 @@ export function useStage3(previous: Stage2) {
   };
   return {
     ...previous,
+    companyDrivers,
+    companyVehicles,
     StatusBadge,
     approvedRegistrationsCount,
     approvedTopupSlipsCount,

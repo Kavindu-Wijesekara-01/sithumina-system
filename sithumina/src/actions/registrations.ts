@@ -217,13 +217,12 @@ export async function approveRegistrationAndAddToFleetAction(
   if (!auth.ok) return auth.denied;
   try {
     const { employee, created } = await approveOwnerRegistration(id, route);
-    const updated = await updateRegistrationStatusInStore(id, "approved");
     revalidateOwnerPages();
 
     return {
       success: true,
       data: {
-        ...(updated || ({ id } as StoredRegistration)),
+        ...({ id } as StoredRegistration),
         status: "approved",
         outsideEmployeeId: employee.id,
       },

@@ -147,6 +147,7 @@ export function useStage1() {
     images: [],
   });
   const [lorrySubmitting, setLorrySubmitting] = useState(false);
+  const [lorryError, setLorryError] = useState("");
   // ---- Riders / Drivers State ----
   const [drivers, setDrivers] = useState<AdminDriverRecord[]>([]);
   const [loadingDrivers, setLoadingDrivers] = useState(true);
@@ -163,6 +164,7 @@ export function useStage1() {
     active: true,
   });
   const [riderSubmitting, setRiderSubmitting] = useState(false);
+  const [riderError, setRiderError] = useState("");
   // ---- Assign Modal ----
   const [assignModal, setAssignModal] = useState<AssignModalState | null>(null);
   // ---- Payment Quote, Slip Review, Manual Progress & Bank Settings State ----
@@ -870,10 +872,9 @@ export function useStage1() {
       showToast("Could not load older bookings.", "error");
     }
   };
-  const subscribeBookingsRealtime = useCallback(() => {
-    setLoadingBookings(true);
-    const feed = subscribeBookingFeed(
-      (docs) => {
+  type BookingDocs = Parameters<Parameters<typeof subscribeBookingFeed>[0]>[0];
+  const bookingDocsRef = useRef<BookingDocs | null>(null);
+  const showBookingDocs = (docs: BookingDocs) => {
         const snap = docs;
         const items: StoredBooking[] = [];
         const seenIds = new Set<string>();
@@ -986,6 +987,21 @@ export function useStage1() {
         items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
         setBookings(items);
         setLoadingBookings(false);
+  };
+  // Always the latest version, which sees the current fleet and owners
+  const showBookingDocsRef = useRef(showBookingDocs);
+  useEffect(() => {
+    showBookingDocsRef.current = showBookingDocs;
+  });
+  useEffect(() => {
+    if (bookingDocsRef.current) showBookingDocsRef.current(bookingDocsRef.current);
+  }, [fleetVehicles, outsideEmployees]);
+  const subscribeBookingsRealtime = useCallback(() => {
+    setLoadingBookings(true);
+    const feed = subscribeBookingFeed(
+      (docs) => {
+        bookingDocsRef.current = docs;
+        showBookingDocsRef.current(docs);
       },
       () => {
         // Offline / Firestore unavailable fallback ONLY
@@ -994,9 +1010,10 @@ export function useStage1() {
     );
     bookingFeedRef.current = feed;
     return feed.stop;
-  }, [loadBookingsFromStore, fleetVehicles]);
+  }, [loadBookingsFromStore]);
   useEffect(() => {
     if (!authed) {
+      bookingDocsRef.current = null;
       setBookings([]);
       setLoadingBookings(true);
       return;
@@ -1203,6 +1220,7 @@ export function useStage1() {
         assignment = { ...(assignment || {}), cancelReason: reason };
       }
       setActionLoading(id);
+      let undo = () => {};
       try {
         const existingBooking = bookings.find((b) => b.id === id);
         let effectiveAssignment = assignment;
@@ -1258,8 +1276,15 @@ export function useStage1() {
             assignedDriverPhone: outsideInfo.driverPhone,
           };
         }
+        // Show the change at once; the saved record replaces it, or it is undone
+        const optimistic = { status, ...(effectiveAssignment || {}), ...(paymentMeta || {}) };
+        setBookings((prev) => prev.map((b) => (b.id === id ? ({ ...b, ...optimistic } as StoredBooking) : b)));
+        undo = () => {
+          if (existingBooking) setBookings((prev) => prev.map((b) => (b.id === id ? existingBooking : b)));
+        };
         const actionRes = await updateBookingStatusAction(id, status, effectiveAssignment, paymentMeta);
         if (!actionRes.success) {
+          undo();
           showToast(actionRes.error || "Failed to update booking schedule.", "error");
           return false;
         }
@@ -1301,6 +1326,7 @@ export function useStage1() {
         );
         return true;
       } catch {
+        undo();
         showToast("Failed to update booking. Please retry.", "error");
         return false;
       } finally {
@@ -1441,6 +1467,8 @@ export function useStage1() {
     lorryForm,
     lorrySearch,
     lorrySubmitting,
+    lorryError,
+    setLorryError,
     manualAutoFilledNameRef,
     manualForm,
     manualRegisteringClient,
@@ -1477,6 +1505,8 @@ export function useStage1() {
     riderForm,
     riderSearch,
     riderSubmitting,
+    riderError,
+    setRiderError,
     savingBankSettings,
     scheduleDrafts,
     setActionLoading,

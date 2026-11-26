@@ -2,6 +2,9 @@
 
 import { authorize, driverOwnsBooking, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { revalidatePath } from "next/cache";
+import { after } from "next/server";
+import { findVehicleDocs, isOutsideRecord } from "@/lib/vehicle-docs";
+import { ensureDriverRecord } from "@/lib/riders";
 import {
   createBookingInStore,
   getStoredBooking,
@@ -10,13 +13,11 @@ import {
   deleteBookingFromStore,
   getAllStoredComplaints,
   recordComplaintInStore,
-  getAllStoredLorries,
   updateBookingInStore,
   updateLorryGpsInStore,
   updateLorryStatusInStore,
   StoredBooking,
   StoredComplaint,
-  StoredLorry,
   StoredOutsideEmployee,
   BookingStatusValue,
   PaymentSlipStatus,
@@ -147,75 +148,56 @@ async function resolveDriverMetadataForDispatch(
   lorryId?: string,
   plate?: string
 ): Promise<{ driverId?: string; driverName?: string; driverPhone?: string; resolvedPlate?: string; resolvedLorryId?: string }> {
-  const plateNorm = normalizePlate(plate);
   const idLower = String(lorryId || "").trim().toLowerCase();
+  const lookup = String(plate || "").trim() || idLower.replace(/^lorry-/, "");
+  if (!lookup) return {};
 
   try {
-    if (plateNorm || idLower) {
-      const [fleetSnap, driversSnap] = await Promise.all([
-        getDocs(collection(db, "lorries_registry")).catch(() => null),
-        getDocs(collection(db, "drivers")).catch(() => null),
-      ]);
+    const records = await findVehicleDocs("lorries_registry", lookup);
+    const vehicle = records.find((v) => v.id.toLowerCase() === idLower) || records[0];
+    const resolvedPlate = String(vehicle?.data.plate || plate || "").trim().toUpperCase();
+    let driverId = String(vehicle?.data.driverId || "").trim();
 
-      const driversById = new Map<string, { driverId: string; name: string; phone: string; plate: string }>();
-      const driversByPlate = new Map<string, { driverId: string; name: string; phone: string; plate: string }>();
-      if (driversSnap) {
-        for (const d of driversSnap.docs) {
-          const data = d.data();
-          const dId = String(data.driverId || d.id).trim();
-          const dName = isRealDriverName(data.name);
-          const dPhone = String(data.phone || "").trim();
-          const dPlate = String(data.plate || "").trim();
-          const entry = { driverId: dId, name: dName, phone: dPhone, plate: dPlate };
-          if (dId) driversById.set(dId.toUpperCase(), entry);
-          const pNorm = normalizePlate(dPlate);
-          if (pNorm) driversByPlate.set(pNorm, entry);
-        }
-      }
-
-      if (fleetSnap) {
-        for (const d of fleetSnap.docs) {
-          const data = d.data();
-          const dPlate = normalizePlate(data.plate || data.vehiclePlate || d.id.replace(/^lorry-/i, ""));
-          if ((idLower && d.id.toLowerCase() === idLower) || (plateNorm && dPlate === plateNorm)) {
-            const driverId = data.driverId ? String(data.driverId).trim() : "";
-            const matchedDrv =
-              (driverId ? driversById.get(driverId.toUpperCase()) : undefined) ||
-              (plateNorm ? driversByPlate.get(plateNorm) : undefined);
-            const driverName = isRealDriverName(data.driverName) || matchedDrv?.name || "";
-            const driverPhone = String(data.driverPhone || "").trim() || matchedDrv?.phone || "";
-            return {
-              driverId: driverId || matchedDrv?.driverId || undefined,
-              driverName: driverName || undefined,
-              driverPhone: driverPhone || undefined,
-              resolvedPlate: String(data.plate || plate || matchedDrv?.plate || "").trim() || undefined,
-              resolvedLorryId: d.id,
-            };
-          }
-        }
-      }
-
-      if (plateNorm && driversByPlate.has(plateNorm)) {
-        const matched = driversByPlate.get(plateNorm)!;
-        return {
-          driverId: matched.driverId || undefined,
-          driverName: matched.name || undefined,
-          driverPhone: matched.phone || undefined,
-          resolvedPlate: matched.plate || plate || undefined,
-          resolvedLorryId: idLower || `lorry-${plateNorm.toLowerCase()}`,
-        };
+    // The rider record is authoritative; fall back to whoever holds the plate
+    let driver = driverId ? (await getDoc(doc(db, "drivers", driverId.toUpperCase()))).data() : undefined;
+    if (!driver && resolvedPlate) {
+      const match = (
+        await getDocs(query(collection(db, "drivers"), where("plate", "==", resolvedPlate), limit(1)))
+      ).docs[0];
+      if (match) {
+        driver = match.data();
+        driverId = String(match.data().driverId || match.id);
       }
     }
+    return {
+      driverId: driverId || undefined,
+      driverName: isRealDriverName(vehicle?.data.driverName) || isRealDriverName(driver?.name) || undefined,
+      driverPhone: String(vehicle?.data.driverPhone || driver?.phone || "").trim() || undefined,
+      resolvedPlate: resolvedPlate || undefined,
+      resolvedLorryId: vehicle?.id,
+    };
   } catch {
     // non-blocking metadata enrichment
+    return {};
   }
-  return {};
+}
+
+/** Older outside vehicles flagged on the vehicle record but with no owner account. */
+async function findFlaggedOutsideVehicle(plate: string) {
+  const records = await findVehicleDocs("lorries", plate);
+  return records.find((v) => isOutsideRecord(v.data))?.data;
 }
 
 async function syncBookingDispatchDoc(
   booking: StoredBooking,
   status: string,
-  extra?: { driverId?: string; driverName?: string; driverPhone?: string; lorryId?: string; plate?: string }
+  extra?: { driverId?: string; driverName?: string; driverPhone?: string; lorryId?: string; plate?: string },
+  options: {
+    /** Editing details must not re-offer a job the driver declined. */
+    keepDeclined?: boolean;
+    /** Offer the job again whatever its previous state. */
+    reoffer?: boolean;
+  } = {}
 ): Promise<void> {
   const dispatchDocId = `dispatch-${booking.id}`;
 
@@ -250,9 +232,14 @@ async function syncBookingDispatchDoc(
     if (match) resolvedDriverId = String(match.data().driverId || match.id).toUpperCase();
   }
 
-  const existing = (await getDoc(doc(db, "dispatches", dispatchDocId))).data();
-  // Map pins live on the cloud record; the legacy local copy may not have them
-  const cloud = (await getDoc(doc(db, "bookings", booking.id))).data() || {};
+  // Map pins live on the cloud record, which is read back after the change was saved
+  const [existingSnap, cloudSnap, owner] = await Promise.all([
+    getDoc(doc(db, "dispatches", dispatchDocId)),
+    getDoc(doc(db, "bookings", booking.id)),
+    plate ? findOutsideOwnerByPlate(plate) : Promise.resolve(null),
+  ]);
+  const existing = existingSnap.data();
+  const cloud = cloudSnap.data() || {};
   const newDriverId = resolvedDriverId;
   // A different driver or vehicle means a fresh job that has to be accepted again
   const reassigned = Boolean(
@@ -268,6 +255,8 @@ async function syncBookingDispatchDoc(
   } else if (!reassigned && ["accepted", "goods_collected", "in_transit"].includes(existing?.status)) {
     targetDispatchStatus = existing!.status;
   }
+  if (options.keepDeclined && !reassigned && existing?.status === "declined") targetDispatchStatus = "declined";
+  if (options.reoffer) targetDispatchStatus = "pending_acceptance";
 
   // Tell the driver up front whether this attaches to a running trip
   let tripRole: "primary" | "return" = booking.tripRole || "primary";
@@ -314,7 +303,7 @@ async function syncBookingDispatchDoc(
       pickupLng: cloud.pickupLng ?? booking.pickupLng ?? pickupGuess?.[1] ?? null,
       // Only a customer pin or GPS fix is exact; other coordinates are town centres
       pickupFromGps: Boolean(cloud.pickupPinned),
-      externalFare: Boolean(await findOutsideOwnerByPlate(plate)),
+      externalFare: Boolean(owner),
       cashDue: outstandingAmount({ ...booking, ...cloud, id: booking.id, externalOwnerId: "" }),
       dropoffPinned: Boolean(cloud.dropoffPinned),
       tripRole,
@@ -353,19 +342,21 @@ async function syncBookingDispatchDoc(
       targetDispatchStatus === "pending_acceptance" &&
       (reassigned || existing?.status !== "pending_acceptance");
     if (isNewJob) {
-      try {
-        await sendDispatchPush({
+      // Sent after the response, so the Admin never waits on the push service
+      after(() =>
+        sendDispatchPush({
           id: dispatchDocId,
           driverId: newDriverId,
           assignedPlate: plate,
           pickupCity: booking.pickupCity,
           deliveryCity: booking.deliveryCity,
           tripRole,
-        });
-      } catch (e) {
-        console.warn("Dispatch push notification failed:", e);
-      }
+        }).catch((e) => console.warn("Dispatch push notification failed:", e))
+      );
     }
+  } else if (existing?.status === "pending_acceptance") {
+    // No driver any more: take the offer back
+    await updateDoc(doc(db, "dispatches", dispatchDocId), { status: "withdrawn", updatedAt: Date.now() });
   }
 
   // Sync any pre-existing dispatch docs referencing this bookingId (e.g. legacy auto-ID dispatches)
@@ -420,7 +411,8 @@ export async function createBookingAction(
   input: BookingActionInput
 ): Promise<ActionResult<{ id: string; trackingId: string; booking: StoredBooking }>> {
   const session = await getSession();
-  if (session?.role !== "admin") input = publicBookingInput(input);
+  const isAdmin = session?.role === "admin";
+  if (!isAdmin) input = publicBookingInput(input);
   try {
     // 1. Rigorous input validation
     const pickup = input.pickup?.trim();
@@ -529,9 +521,8 @@ export async function createBookingAction(
       finalAssignedDriverName = outsideOwnerForCreate.name;
       finalAssignedDriverPhone = outsideOwnerForCreate.phone;
     } else if (effectivePlateInput) {
-      const storeLorries = await getAllStoredLorries();
-      const matchedL = storeLorries.find((l: StoredLorry) => normalizePlate(l.plate) === normalizePlate(effectivePlateInput));
-      if (matchedL && (matchedL.isOutsideLorry || matchedL.ownershipType === "outside")) {
+      const matchedL = await findFlaggedOutsideVehicle(effectivePlateInput);
+      if (matchedL) {
         finalAssignedDriverId = matchedL.driverId || "";
         finalAssignedDriverName = matchedL.driverName || "";
         finalAssignedDriverPhone = matchedL.driverPhone || "";
@@ -592,7 +583,8 @@ export async function createBookingAction(
       } = {};
       if (
         (booking.assignedLorryId || booking.assignedPlate) &&
-        (booking.bookingType === "live_lorry" ||
+        (!isAdmin ||
+          booking.bookingType === "live_lorry" ||
           (booking.status === "assigned" && !resolvedInputDriverName))
       ) {
         resolvedDriverMeta = await resolveDriverMetadataForDispatch(
@@ -715,7 +707,10 @@ export async function createBookingAction(
       data: {
         id: booking.id,
         trackingId: booking.id,
-        booking,
+        // A visitor learns the driver only after signing in to their own booking
+        booking: isAdmin
+          ? booking
+          : { ...booking, assignedDriverId: "", assignedDriverName: "", assignedDriverPhone: "" },
       },
       message: "Booking confirmed successfully.",
     };
@@ -853,6 +848,9 @@ export interface LorryBookedDatesResult {
 export async function getLorryBookedDatesAction(
   lorryIdentifier: string
 ): Promise<ActionResult<LorryBookedDatesResult>> {
+  // The details include customer names and phone numbers
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const clean = lorryIdentifier?.trim().toUpperCase();
     const cleanPlateNorm = normalizePlate(lorryIdentifier);
@@ -1135,44 +1133,14 @@ export async function updateBookingStatusAction(
       await voidReversals(id);
     }
 
-    let updatedLocal = await updateBookingStatusInStore(id, status, sanitizedAssignment, paymentMeta);
-
-    // Backfill from Firestore if the booking existed in Firestore only and not yet in local store
-    if (!updatedLocal) {
-      try {
-        const directSnap = await getDoc(doc(db, "bookings", id));
-        let fsData: Record<string, any> | null = directSnap.exists() ? directSnap.data() : null;
-        if (!fsData) {
-          const legacySnap = await getDocs(
-            query(collection(db, "bookings"), where("trackingId", "==", id))
-          );
-          if (!legacySnap.empty) {
-            fsData = legacySnap.docs[0].data();
-          }
-        }
-        if (fsData) {
-          const mapped = mapFirestoreBooking(id, {
-            ...fsData,
-            status,
-            ...(sanitizedAssignment?.assignedLorryId ? { assignedLorryId: sanitizedAssignment.assignedLorryId } : {}),
-            ...(sanitizedAssignment?.assignedDriverId ? { assignedDriverId: sanitizedAssignment.assignedDriverId } : {}),
-            ...(sanitizedAssignment?.assignedDriverName ? { assignedDriverName: sanitizedAssignment.assignedDriverName } : {}),
-            ...(sanitizedAssignment?.assignedDriverPhone ? { assignedDriverPhone: sanitizedAssignment.assignedDriverPhone } : {}),
-            ...(sanitizedAssignment?.assignedPlate ? { assignedPlate: sanitizedAssignment.assignedPlate } : {}),
-            ...(sanitizedAssignment?.date ? { date: sanitizedAssignment.date } : {}),
-            ...(sanitizedAssignment?.dates ? { dates: sanitizedAssignment.dates } : {}),
-            ...(sanitizedAssignment?.daysNeeded ? { daysNeeded: sanitizedAssignment.daysNeeded } : {}),
-            ...(sanitizedAssignment?.startTime ? { startTime: sanitizedAssignment.startTime } : {}),
-            ...(sanitizedAssignment?.endTime ? { endTime: sanitizedAssignment.endTime } : {}),
-            ...(paymentMeta || {}),
-            updatedAt: Date.now(),
-          });
-          updatedLocal = await upsertBookingInStore(mapped);
-        }
-      } catch {
-        // fallback handled below
-      }
-    }
+    // What the booking will look like, used to resolve the driver before the single write
+    const planned = existingBooking
+      ? ({
+        ...existingBooking,
+        ...Object.fromEntries(Object.entries(sanitizedAssignment || {}).filter(([, v]) => v !== undefined && v !== "")),
+        status,
+      } as StoredBooking)
+      : null;
 
     // Enrich missing driver metadata from fleet registry / drivers ONLY when explicitly assigning driver
     // (or dispatching a live_lorry booking) — never prematurely during individual payment approval
@@ -1185,29 +1153,29 @@ export async function updateBookingStatusAction(
     } = {};
     const shouldEnrichDriver =
       ["assigned", "in_transit"].includes(status) ||
-      (status === "accepted" && updatedLocal?.bookingType === "live_lorry");
+      (status === "accepted" && planned?.bookingType === "live_lorry");
 
     if (shouldEnrichDriver) {
       enrichedDriverMeta = await resolveDriverMetadataForDispatch(
-        sanitizedAssignment?.assignedLorryId || updatedLocal?.assignedLorryId,
-        sanitizedAssignment?.assignedPlate || updatedLocal?.assignedPlate
+        sanitizedAssignment?.assignedLorryId || planned?.assignedLorryId,
+        sanitizedAssignment?.assignedPlate || planned?.assignedPlate
       );
     }
 
-    const existingValidDriver = isRealDriverName(updatedLocal?.assignedDriverName);
+    const existingValidDriver = isRealDriverName(planned?.assignedDriverName);
     const effectiveAssignment = shouldEnrichDriver
       ? {
         ...(sanitizedAssignment || {}),
-        ...(enrichedDriverMeta.resolvedLorryId && !(sanitizedAssignment?.assignedLorryId || updatedLocal?.assignedLorryId)
+        ...(enrichedDriverMeta.resolvedLorryId && !(sanitizedAssignment?.assignedLorryId || planned?.assignedLorryId)
           ? { assignedLorryId: enrichedDriverMeta.resolvedLorryId }
           : {}),
-        ...(enrichedDriverMeta.resolvedPlate && !(sanitizedAssignment?.assignedPlate || updatedLocal?.assignedPlate)
+        ...(enrichedDriverMeta.resolvedPlate && !(sanitizedAssignment?.assignedPlate || planned?.assignedPlate)
           ? { assignedPlate: enrichedDriverMeta.resolvedPlate }
           : {}),
         ...(enrichedDriverMeta.driverName && !(sanitizedAssignment?.assignedDriverName || existingValidDriver)
           ? { assignedDriverName: enrichedDriverMeta.driverName }
           : {}),
-        ...(enrichedDriverMeta.driverPhone && !(sanitizedAssignment?.assignedDriverPhone || updatedLocal?.assignedDriverPhone)
+        ...(enrichedDriverMeta.driverPhone && !(sanitizedAssignment?.assignedDriverPhone || planned?.assignedDriverPhone)
           ? { assignedDriverPhone: enrichedDriverMeta.driverPhone }
           : {}),
       }
@@ -1217,7 +1185,7 @@ export async function updateBookingStatusAction(
     const effectivePlate = (
       effectiveAssignment.assignedPlate ||
       sanitizedAssignment?.assignedPlate ||
-      updatedLocal?.assignedPlate ||
+      planned?.assignedPlate ||
       ""
     ).trim().toUpperCase();
     const outsideOwner = effectivePlate ? await findOutsideOwnerByPlate(effectivePlate) : null;
@@ -1227,9 +1195,8 @@ export async function updateBookingStatusAction(
       effectiveAssignment.assignedDriverPhone = outsideOwner.phone;
       effectiveAssignment.assignedPlate = outsideOwner.plateNumber;
     } else if (effectivePlate) {
-      const storeLorries = await getAllStoredLorries();
-      const matchedL = storeLorries.find((l: StoredLorry) => normalizePlate(l.plate) === normalizePlate(effectivePlate));
-      if (matchedL && (matchedL.isOutsideLorry || matchedL.ownershipType === "outside")) {
+      const matchedL = await findFlaggedOutsideVehicle(effectivePlate);
+      if (matchedL) {
         effectiveAssignment.assignedDriverId = matchedL.driverId || "";
         effectiveAssignment.assignedDriverName = matchedL.driverName || "";
         effectiveAssignment.assignedDriverPhone = matchedL.driverPhone || "";
@@ -1237,13 +1204,36 @@ export async function updateBookingStatusAction(
       }
     }
 
-    if (updatedLocal && (Object.keys(effectiveAssignment).length > 0 || paymentMeta)) {
-      updatedLocal =
-        await updateBookingStatusInStore(id, status, effectiveAssignment, paymentMeta) || updatedLocal;
+    let updatedLocal = await updateBookingStatusInStore(
+      id,
+      status,
+      Object.keys(effectiveAssignment).length > 0 ? effectiveAssignment : undefined,
+      paymentMeta
+    );
+
+    // A record saved only under its tracking ID is copied to its proper document
+    if (!updatedLocal) {
+      try {
+        const legacy = await getDocs(query(collection(db, "bookings"), where("trackingId", "==", id)));
+        if (!legacy.empty) {
+          updatedLocal = await upsertBookingInStore(
+            mapFirestoreBooking(id, {
+              ...legacy.docs[0].data(),
+              ...effectiveAssignment,
+              ...(paymentMeta || {}),
+              status,
+              updatedAt: Date.now(),
+            })
+          );
+        }
+      } catch {
+        // fallback handled below
+      }
     }
 
     // Authoritative awaited Firestore update (merge by doc ID + normalize any legacy trackingId doc)
     let firestoreOk = false;
+    let dispatchSync: Promise<void> = Promise.resolve();
     try {
       const updateFields: Record<string, any> = {
         id,
@@ -1322,6 +1312,9 @@ export async function updateBookingStatusAction(
         updateFields.parentBookingId = startPlan.parentBookingId;
         updateFields.rideStartedAt = Date.now();
         updateFields.rideEndedAt = 0;
+        // Started by the office: the driver continues from the Loaded step
+        updateFields.driverTripStatus = "accepted";
+        updateFields.acceptedAt = Date.now();
       }
       if (["delivered", "completed"].includes(status) && !existingBooking?.rideEndedAt) {
         updateFields.rideEndedAt = Date.now();
@@ -1335,42 +1328,30 @@ export async function updateBookingStatusAction(
       await setDoc(docRef, updateFields, { merge: true });
       firestoreOk = true;
 
-      // Sync slip doc review status if slip exists
-      if (
-        paymentMeta?.paymentSlipStatus &&
-        ["approved", "rejected"].includes(paymentMeta.paymentSlipStatus) &&
-        updatedLocal?.paymentSlipId
-      ) {
-        try {
-          await setDoc(
-            doc(db, "payment_slips", updatedLocal.paymentSlipId),
-            {
-              status: paymentMeta.paymentSlipStatus,
-              updatedAt: Date.now(),
-            },
-            { merge: true }
-          );
-        } catch {
-          // ignore if slip was already deleted
-        }
-      }
-
-      // Clean/sync any legacy doc created with random ID that holds trackingId == id
-      const legacySnap = await getDocs(query(collection(db, "bookings"), where("trackingId", "==", id)));
-      for (const d of legacySnap.docs) {
-        if (d.id !== id) {
-          await updateDoc(doc(db, "bookings", d.id), updateFields);
-        }
-      }
+      const slipId = updatedLocal?.paymentSlipId;
+      const review = paymentMeta?.paymentSlipStatus;
+      await Promise.all([
+        // Mirror the review result on the slip; it may already have been deleted
+        slipId && review && ["approved", "rejected"].includes(review)
+          ? setDoc(doc(db, "payment_slips", slipId), { status: review, updatedAt: Date.now() }, { merge: true })
+            .catch(() => { })
+          : null,
+        // Clean/sync any legacy doc created with random ID that holds trackingId == id
+        getDocs(query(collection(db, "bookings"), where("trackingId", "==", id))).then((legacy) =>
+          Promise.all(
+            legacy.docs.filter((d) => d.id !== id).map((d) => updateDoc(doc(db, "bookings", d.id), updateFields))
+          )
+        ),
+      ]);
 
       if (updatedLocal) {
-        await syncBookingDispatchDoc(updatedLocal, status, {
+        dispatchSync = syncBookingDispatchDoc(updatedLocal, status, {
           driverId: enrichedDriverMeta.driverId,
           driverName: finalDriverName || enrichedDriverMeta.driverName || isRealDriverName(updatedLocal.assignedDriverName),
           driverPhone: effectiveAssignment.assignedDriverPhone || enrichedDriverMeta.driverPhone || updatedLocal.assignedDriverPhone,
           lorryId: effectiveAssignment.assignedLorryId || updatedLocal.assignedLorryId,
           plate: effectiveAssignment.assignedPlate || updatedLocal.assignedPlate,
-        });
+        }).catch((e) => console.warn("Dispatch sync warning:", e));
       }
     } catch (e) {
       console.warn("Firestore updateBookingStatusAction warning:", e);
@@ -1398,13 +1379,14 @@ export async function updateBookingStatusAction(
         deletedBy: "Admin",
       };
       await recordComplaintInStore(record);
-      await setDoc(doc(db, "complaints", record.id), JSON.parse(JSON.stringify(record)));
     }
 
-    if (firestoreOk) {
-      await settleCommissionSafely(id);
-      await refreshTripsSafely(existingBooking?.assignedPlate, effectiveAssignment.assignedPlate);
-    }
+    // Independent follow-ups run together
+    await Promise.all([
+      dispatchSync,
+      firestoreOk ? settleCommissionSafely(id) : null,
+      firestoreOk ? refreshTripsSafely(existingBooking?.assignedPlate, effectiveAssignment.assignedPlate) : null,
+    ]);
 
     const resultBooking: StoredBooking = updatedLocal || {
       id,
@@ -1476,39 +1458,59 @@ export async function editBookingAction(
     const cleanId = (id || "").trim();
     if (!cleanId) return { success: false, error: "Booking ID is required." };
 
-    // Resolve outside vehicle driver lock
     const targetPlate = (updates.assignedPlate || "").trim().toUpperCase();
-    if (targetPlate) {
-      const outsideEmp = await findOutsideOwnerByPlate(targetPlate);
-      if (outsideEmp) {
-        updates.assignedDriverId = outsideEmp.driverId || outsideEmp.id;
-        updates.assignedDriverName = outsideEmp.name;
-        updates.assignedDriverPhone = outsideEmp.phone;
-      } else {
-        const storeLorries = await getAllStoredLorries();
-        const matchedL = storeLorries.find((l) => normalizePlate(l.plate) === normalizePlate(targetPlate));
-        if (matchedL && (matchedL.isOutsideLorry || matchedL.ownershipType === "outside")) {
-          updates.assignedDriverId = matchedL.driverId || "";
-          updates.assignedDriverName = matchedL.driverName || "";
-          updates.assignedDriverPhone = matchedL.driverPhone || "";
-        }
+    const [before, outsideEmp] = await Promise.all([
+      getStoredBooking(cleanId),
+      targetPlate ? findOutsideOwnerByPlate(targetPlate) : Promise.resolve(null),
+    ]);
+    if (!before) return { success: false, error: "Booking not found." };
+
+    // Resolve outside vehicle driver lock
+    if (outsideEmp) {
+      updates.assignedDriverId = outsideEmp.driverId || outsideEmp.id;
+      updates.assignedDriverName = outsideEmp.name;
+      updates.assignedDriverPhone = outsideEmp.phone;
+    } else if (targetPlate) {
+      const matchedL = await findFlaggedOutsideVehicle(targetPlate);
+      if (matchedL) {
+        updates.assignedDriverId = matchedL.driverId || "";
+        updates.assignedDriverName = matchedL.driverName || "";
+        updates.assignedDriverPhone = matchedL.driverPhone || "";
       }
     }
 
-    const updated = await updateBookingInStore(cleanId, updates);
-
-    // Sync to Firestore
-    try {
-      await updateDoc(doc(db, "bookings", cleanId), {
-        ...updates,
-        updatedAt: Date.now(),
-      });
-    } catch (e) {
-      console.warn("Firestore editBookingAction updateDoc notice:", e);
+    const changes: Record<string, any> = {
+      ...Object.fromEntries(Object.entries(updates).filter(([, v]) => v !== undefined)),
+      updatedAt: Date.now(),
+    };
+    // A renamed place invalidates its old map pin
+    if (updates.pickupCity && updates.pickupCity !== before.pickupCity) {
+      Object.assign(changes, { pickupLat: null, pickupLng: null, pickupPinned: false });
     }
+    if (updates.deliveryCity && updates.deliveryCity !== before.deliveryCity) {
+      Object.assign(changes, { deliveryLat: null, deliveryLng: null, dropoffPinned: false });
+    }
+    const driverChanged = Boolean(
+      (changes.assignedDriverId && changes.assignedDriverId !== before.assignedDriverId) ||
+      (targetPlate && normalizePlate(targetPlate) !== normalizePlate(before.assignedPlate))
+    );
+    // A different driver or vehicle has to accept the job afresh
+    if (driverChanged && ["accepted", "assigned", "booked"].includes(before.status) && before.driverTripStatus) {
+      changes.driverTripStatus = "pending_acceptance";
+    }
+    if (targetPlate && (outsideEmp || before.externalOwnerId)) changes.externalOwnerId = outsideEmp?.id || "";
 
-    // A changed fare or vehicle posts the commission difference
-    await settleCommissionSafely(cleanId);
+    await setDoc(doc(db, "bookings", cleanId), changes, { merge: true });
+    const updated = { ...before, ...mapFirestoreBooking(cleanId, { ...before, ...changes }) };
+
+    await Promise.all([
+      // The driver's job shows the new route, vehicle, driver and fare at once
+      syncBookingDispatchDoc(updated, updated.status, undefined, { keepDeclined: true })
+        .catch((e) => console.warn("Dispatch sync warning:", e)),
+      // A changed fare or vehicle posts the commission difference
+      settleCommissionSafely(cleanId),
+      driverChanged ? refreshTripsSafely(before.assignedPlate, updated.assignedPlate) : null,
+    ]);
 
     try {
       revalidatePath("/admin");
@@ -1518,7 +1520,7 @@ export async function editBookingAction(
 
     return {
       success: true,
-      data: updated || ({} as StoredBooking),
+      data: updated,
     };
   } catch (err: unknown) {
     console.error("editBookingAction error:", err);
@@ -1528,7 +1530,8 @@ export async function editBookingAction(
 
 /**
  * Server Action: Start Ride manually.
- * Transitions booking to in_transit and sets rideStartedAt.
+ * The office accepts the job on the driver's behalf through the same workflow as
+ * the Driver App, so the booking, dispatch, trip locks and live map agree.
  */
 export async function startRideAction(bookingId: string): Promise<ActionResult<StoredBooking>> {
   const auth = await authorize("admin");
@@ -1537,39 +1540,35 @@ export async function startRideAction(bookingId: string): Promise<ActionResult<S
     const cleanId = (bookingId || "").trim();
     if (!cleanId) return { success: false, error: "Booking ID required." };
 
-    const snap = await getDoc(doc(db, "bookings", cleanId));
-    if (!snap.exists()) return { success: false, error: "Booking not found." };
-    const current = mapFirestoreBooking(snap.id, snap.data());
-    const plan = await planTrip(current).catch((e) => (e instanceof TripError ? e : Promise.reject(e)));
-    if (plan instanceof TripError) return { success: false, error: plan.message };
-
-    const now = Date.now();
-    const updated = await updateBookingInStore(cleanId, {
-      status: "in_transit",
-      rideStartedAt: now,
-      driverTripStatus: "in_transit",
-      tripRole: plan.role,
-      parentBookingId: plan.parentBookingId,
-    });
-
-    const targetLorry = updated?.assignedLorryId || updated?.assignedPlate;
-    if (targetLorry) {
-      await updateLorryStatusInStore(targetLorry, "on_trip");
+    const raw = await getStoredBooking(cleanId);
+    if (!raw) return { success: false, error: "Booking not found." };
+    if (["cancelled", "delivered", "completed"].includes(raw.status)) {
+      return { success: false, error: `This booking is already ${raw.status}.` };
     }
+    const current = { ...raw, ...mapFirestoreBooking(cleanId, raw) };
 
-    try {
-      await updateDoc(doc(db, "bookings", cleanId), {
-        status: "in_transit",
-        rideStartedAt: now,
-        driverTripStatus: "in_transit",
-        tripRole: plan.role,
-        parentBookingId: plan.parentBookingId,
-        rideEndedAt: 0,
-        updatedAt: now,
-      });
-      await refreshTripsSafely(current.assignedPlate);
-    } catch (e) {
-      console.warn("Firestore startRideAction notice:", e);
+    const plate = (current.assignedPlate || "").trim().toUpperCase();
+    const owner = plate ? await findOutsideOwnerByPlate(plate) : null;
+    let driverId = String(owner?.driverId || owner?.id || current.assignedDriverId || "").toUpperCase();
+    if (!driverId && plate) {
+      driverId = String((await resolveDriverMetadataForDispatch(current.assignedLorryId, plate)).driverId || "").toUpperCase();
+    }
+    if (!driverId || !plate) {
+      return { success: false, error: "Assign a rider and vehicle before starting the ride." };
+    }
+    if (!(await ensureDriverRecord(driverId))) {
+      return { success: false, error: "The assigned rider no longer exists. Assign another rider." };
+    }
+    const booking = { ...current, assignedDriverId: driverId, assignedPlate: plate };
+    await planTrip(booking);
+
+    const running = isActiveTrip(booking);
+    await syncBookingDispatchDoc(booking, running ? "in_transit" : "assigned", { driverId, plate }, { reoffer: !running });
+    let patch: Record<string, any> = {};
+    if (!running) {
+      patch = (await performTripAction(`dispatch-${cleanId}`, "accept", { driverId })).bookingPatch;
+    } else {
+      await refreshTripsSafely(plate);
     }
 
     try {
@@ -1578,8 +1577,9 @@ export async function startRideAction(bookingId: string): Promise<ActionResult<S
       revalidatePath("/manage");
     } catch { }
 
-    return { success: true, data: updated || ({} as StoredBooking) };
+    return { success: true, data: { ...booking, ...patch } };
   } catch (err: unknown) {
+    if (err instanceof TripError) return { success: false, error: err.message };
     console.error("startRideAction error:", err);
     return { success: false, error: "Failed to start ride." };
   }
@@ -1970,53 +1970,32 @@ export async function deleteBookingAction(
       deletedBy: deletedBy || "Admin",
     };
 
-    await recordComplaintInStore(complaint);
-
     // If the audit record cannot be saved, the booking is not deleted
-    await setDoc(
-      doc(db, "complaints", complaintId),
-      JSON.parse(JSON.stringify(complaint))
-    );
+    await recordComplaintInStore(complaint);
 
     if (targetBooking) {
       // Money already received and commission already charged are reversed on record
-      await recordReversal(targetBooking, cleanReason);
-      await syncHireCommission(cleanId, "cancelled");
+      await Promise.all([
+        recordReversal(targetBooking, cleanReason),
+        syncHireCommission(cleanId, "cancelled"),
+      ]);
     }
 
-    // 3. Delete from local server file store
+    // Remove the booking, any legacy copies and its dispatches together
+    const removeMatching = async (name: "bookings" | "dispatches", field: string, primaryId: string) => {
+      try {
+        const matches = await getDocs(query(collection(db, name), where(field, "==", cleanId)));
+        const ids = new Set([primaryId, ...matches.docs.map((d) => d.id)]);
+        await Promise.all([...ids].map((docId) => deleteDoc(doc(db, name, docId))));
+      } catch (e) {
+        console.warn(`Firestore delete ${name} warning:`, e);
+      }
+    };
     await deleteBookingFromStore(cleanId);
-
-    // 4. Delete from Firestore bookings collection
-    try {
-      const docRef = doc(db, "bookings", cleanId);
-      await deleteDoc(docRef);
-
-      // Clean any legacy doc with random doc ID referencing trackingId == cleanId
-      const legacySnap = await getDocs(
-        query(collection(db, "bookings"), where("trackingId", "==", cleanId))
-      );
-      for (const d of legacySnap.docs) {
-        await deleteDoc(doc(db, "bookings", d.id));
-      }
-    } catch (fsErr) {
-      console.warn("Firestore delete booking warning:", fsErr);
-    }
-
-    // 5. Clean corresponding dispatch in dispatches collection
-    try {
-      const dispatchDocId = `dispatch-${cleanId}`;
-      await deleteDoc(doc(db, "dispatches", dispatchDocId));
-
-      const dispatchSnap = await getDocs(
-        query(collection(db, "dispatches"), where("bookingId", "==", cleanId))
-      );
-      for (const d of dispatchSnap.docs) {
-        await deleteDoc(doc(db, "dispatches", d.id));
-      }
-    } catch (dispErr) {
-      console.warn("Firestore delete dispatch warning:", dispErr);
-    }
+    await Promise.all([
+      removeMatching("bookings", "trackingId", cleanId),
+      removeMatching("dispatches", "bookingId", `dispatch-${cleanId}`),
+    ]);
 
     await refreshTripsSafely(targetBooking?.assignedPlate);
 
@@ -2104,7 +2083,10 @@ function publicBookingInput(input: BookingActionInput): BookingActionInput {
   const {
     status, quotedAmount, quoteNote, paymentMethod, paymentBankUsed, advanceAmount, pendingAmount,
     finalPaymentMethod, finalPaymentBankUsed, finalPaymentAt, paymentSlipStatus, paymentApprovedAt,
-    startTime, endTime, distanceKm, ...request
+    startTime, endTime, distanceKm,
+    // The server works out the driver from the chosen vehicle
+    assignedDriverId, assignedDriverName, assignedDriverPhone,
+    ...request
   } = input;
   return request;
 }

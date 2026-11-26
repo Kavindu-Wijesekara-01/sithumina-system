@@ -126,18 +126,20 @@ export async function createOutsideOwner(input: NewOwnerInput): Promise<StoredOu
 
   // Exact-value checks cover records older than the unique-key documents.
   // A failure here aborts registration.
-  for (const [field, value, label] of [
-    ["idNumber", input.idNumber, "NIC/ID"],
-    ["phone", input.phone, "Phone number"],
-    ["plateNumber", plate, "Vehicle number"],
-  ] as const) {
-    if (!value) continue;
-    const found = await getDocs(query(collection(db, OWNERS), where(field, "==", value), limit(1)));
-    if (!found.empty) {
-      const e = found.docs[0].data();
-      throw new OwnerError(`${label} already registered (${found.docs[0].id} - ${e.name}).`);
-    }
-  }
+  await Promise.all(
+    ([
+      ["idNumber", input.idNumber, "NIC/ID"],
+      ["phone", input.phone, "Phone number"],
+      ["plateNumber", plate, "Vehicle number"],
+    ] as const).map(async ([field, value, label]) => {
+      if (!value) return;
+      const found = await getDocs(query(collection(db, OWNERS), where(field, "==", value), limit(1)));
+      if (!found.empty) {
+        const e = found.docs[0].data();
+        throw new OwnerError(`${label} already registered (${found.docs[0].id} - ${e.name}).`);
+      }
+    })
+  );
 
   const highest = await scanHighestDriverNumber();
 
