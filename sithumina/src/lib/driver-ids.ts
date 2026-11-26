@@ -5,7 +5,7 @@
  * server instances can never hand out the same ID. Errors are deliberately NOT
  * swallowed: if Firestore cannot be reached, no ID is issued.
  */
-import { db } from "@/lib/fs-server";
+import { db, getDoc } from "@/lib/fs-server";
 import { collection, doc, getDocs, runTransaction, type Transaction } from "@/lib/fs-server";
 
 const COUNTER_PATH = ["counters", "driver_ids"] as const;
@@ -13,6 +13,9 @@ const FIRST_ID_NUMBER = 10;
 
 /** Highest D-number already present anywhere (covers records created before the counter existed). */
 export async function scanHighestDriverNumber(): Promise<number> {
+  const counter = await getDoc(doc(db, ...COUNTER_PATH));
+  if (counter.exists()) return Number(counter.data()!.last) || FIRST_ID_NUMBER - 1;
+
   let highest = FIRST_ID_NUMBER - 1;
   const snaps = await Promise.all(
     ["drivers", "outside_employees", "lorries_registry"].map((name) => getDocs(collection(db, name)))

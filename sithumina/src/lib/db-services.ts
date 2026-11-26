@@ -1,16 +1,4 @@
-import {
-  collection,
-  doc,
-  getDocs,
-  addDoc,
-  setDoc,
-  updateDoc,
-  deleteDoc,
-  onSnapshot,
-  query,
-  limit,
-  writeBatch,
-} from "firebase/firestore";
+import { collection, doc, getDocs, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, query, limit, writeBatch, where, orderBy } from "firebase/firestore";
 import { db } from "./firebase";
 import { Lorry, LorryStatus } from "./mock-lorries";
 import { StoredBooking } from "./server-store";
@@ -250,7 +238,7 @@ export function subscribeLorries(
   let unsubLorries = () => {};
 
   try {
-    const colLive = collection(db, "lorries_live");
+    const colLive = query(collection(db, "lorries_live"), where("isLive", "==", true));
     unsubLive = onSnapshot(
       colLive,
       (snapshot) => {
@@ -278,7 +266,7 @@ export function subscribeLorries(
   }
 
   try {
-    const colLorries = collection(db, "lorries");
+    const colLorries = query(collection(db, "lorries"), where("isLive", "==", true));
     unsubLorries = onSnapshot(
       colLorries,
       (snapshot) => {
@@ -874,7 +862,7 @@ export function subscribeBookings(
 
   let unsubFs = () => {};
   try {
-    const colRef = collection(db, BOOKINGS_COL);
+    const colRef = query(collection(db, BOOKINGS_COL), orderBy("createdAt", "desc"), limit(200));
     unsubFs = onSnapshot(
       colRef,
       (snapshot) => {
@@ -1016,7 +1004,7 @@ export async function createVehicleRegistration(
 export function subscribeVehicleRegistrations(
   callback: (regs: VehicleRegistration[]) => void
 ): () => void {
-  const colRef = collection(db, REGISTRATIONS_COL);
+  const colRef = query(collection(db, REGISTRATIONS_COL), orderBy("createdAt", "desc"), limit(300));
   return onSnapshot(
     colRef,
     (snapshot) => {
@@ -1106,7 +1094,7 @@ export async function seedInitialReviewsIfEmpty(): Promise<boolean> {
 }
 
 export function subscribeReviews(callback: (reviews: Review[]) => void): () => void {
-  const colRef = collection(db, REVIEWS_COL);
+  const colRef = query(collection(db, REVIEWS_COL), orderBy("createdAt", "desc"), limit(100));
   return onSnapshot(
     colRef,
     (snapshot) => {
@@ -1204,7 +1192,7 @@ export async function createInquiry(input: InquiryInput): Promise<string> {
 export function subscribeInquiries(
   callback: (inquiries: Inquiry[]) => void
 ): () => void {
-  const colRef = collection(db, INQUIRIES_COL);
+  const colRef = query(collection(db, INQUIRIES_COL), orderBy("createdAt", "desc"), limit(300));
   return onSnapshot(
     colRef,
     (snapshot) => {

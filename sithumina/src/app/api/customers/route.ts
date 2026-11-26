@@ -4,14 +4,14 @@ import {
   getAllStoredCustomers,
   upsertCustomerInStore,
 } from "@/lib/server-store";
-import { db } from "@/lib/fs-server";
+import { db, query, limit, where } from "@/lib/fs-server";
 import { collection, getDocs, doc, setDoc } from "@/lib/fs-server";
 
 export async function GET() {
   const auth = await authorize("admin");
   if (!auth.ok) return deniedResponse(auth.denied);
   try {
-    const snap = await getDocs(collection(db, "users"));
+    const snap = await getDocs(query(collection(db, "users"), where("role", "==", "customer"), limit(1000)));
     const customers = snap.docs
       .map((d) => {
         const data = d.data();

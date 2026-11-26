@@ -3,7 +3,9 @@
 import { useState } from "react";
 import { BankTable, PeriodPicker, TotalsGrid, type PeriodValue } from "./ui";
 import { formatRs } from "@/lib/commission";
-import { periodRange, revenueLines, summarise, todayYmd } from "@/lib/ledger";
+import { periodRange, revenueLines, summarise, todayYmd, withExternalOwners } from "@/lib/ledger";
+import { useBookingQuery } from "./useBookingQuery";
+import { fetchBookingsForPeriod } from "@/lib/booking-feed";
 import { useLedger } from "./useLedger";
 import type { StoredBooking } from "@/lib/server-store";
 
@@ -13,10 +15,18 @@ const csvCell = (v: unknown) => {
   return `"${(/^[=+\-@]/.test(s) ? `'${s}` : s).replace(/"/g, '""')}"`;
 };
 
-export default function RevenuePanel({ bookings }: { bookings: StoredBooking[] }) {
+export default function RevenuePanel({
+  bookings: live,
+  owners = [],
+}: {
+  bookings: StoredBooking[];
+  owners?: Array<{ id: string; plateNumber?: string }>;
+}) {
   const [range, setRange] = useState<PeriodValue>({ period: "today", from: "", to: "" });
   const [from, to] = periodRange(range.period, range.from, range.to);
   const ledger = useLedger();
+  const period = useBookingQuery(`${from}-${to}`, () => fetchBookingsForPeriod(from, to), live);
+  const bookings = withExternalOwners(period.bookings, owners);
   const totals = summarise(bookings, from, to, ledger);
 
   const byId = new Map(bookings.map((b) => [b.id, b]));
@@ -62,6 +72,8 @@ export default function RevenuePanel({ bookings }: { bookings: StoredBooking[] }
           Export CSV
         </button>
       </div>
+      {period.loading && <p role="status" className="text-sm text-gray-500">Loading this period...</p>}
+      {period.error && <p role="alert" className="text-sm text-red-700">Some records could not be loaded; totals are incomplete.</p>}
       <TotalsGrid totals={totals} />
       {ledger.error && (
         <p role="alert" className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-800">

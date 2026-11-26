@@ -343,12 +343,9 @@ export async function getAllTopupSlipsAction(): Promise<ActionResult<StoredTopup
   const auth = await authorize("admin", "driver");
   if (!auth.ok) return auth.denied;
   try {
-    const slips = await listTopupSlips();
     // Owners see only their own slips
-    return {
-      success: true,
-      data: auth.session.role === "admin" ? slips : slips.filter((s) => s.employeeId === auth.session.driverId),
-    };
+    const own = auth.session.role === "admin" ? undefined : auth.session.driverId;
+    return { success: true, data: await listTopupSlips(own) };
   } catch (err: unknown) {
     return failure("getAllTopupSlipsAction", err, "Failed to fetch top-up slips.");
   }

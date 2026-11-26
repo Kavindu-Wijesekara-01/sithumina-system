@@ -6,7 +6,7 @@ import {
   deleteLorryFromStore,
   upsertLorryInStore,
 } from "@/lib/server-store";
-import { db } from "@/lib/fs-server";
+import { db, query, where } from "@/lib/fs-server";
 import { collection, getDocs, doc, setDoc, deleteDoc } from "@/lib/fs-server";
 
 function mapFirestoreLorryDoc(d: any) {
@@ -101,8 +101,8 @@ export async function GET(request: Request) {
     const now = Date.now();
     const HEARTBEAT_STALE_MS = 180_000;
     const [liveSnap, lorriesSnap] = await Promise.all([
-      getDocs(collection(db, "lorries_live")),
-      getDocs(collection(db, "lorries")),
+      getDocs(query(collection(db, "lorries_live"), where("isLive", "==", true))),
+      getDocs(query(collection(db, "lorries"), where("isLive", "==", true))),
     ]);
 
     const merged = new Map<string, any>();

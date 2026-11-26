@@ -3,8 +3,7 @@
  * through the Expo push service.
  */
 import { db } from "@/lib/fs-server";
-import { collection, getDocs } from "@/lib/fs-server";
-import { normalizeVehicleKey } from "@/lib/trip-state";
+import { collection, doc, getDoc, getDocs, limit, query, where } from "@/lib/fs-server";
 
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 
@@ -16,15 +15,20 @@ export async function sendDispatchPush(dispatch: {
   deliveryCity?: string;
   tripRole?: string;
 }): Promise<void> {
-  const drivers = await getDocs(collection(db, "drivers"));
   const tokens = new Set<string>();
   const driverId = String(dispatch.driverId || "").toUpperCase();
-  const plate = normalizeVehicleKey(dispatch.assignedPlate);
+  const plate = String(dispatch.assignedPlate || "").trim().toUpperCase();
 
-  const all = drivers.docs.map((d) => ({ ...d.data(), id: d.id }) as Record<string, any> & { id: string });
   // Prefer the named driver; fall back to whoever is registered to the vehicle
-  let targets = all.filter((d) => driverId && String(d.driverId || d.id).toUpperCase() === driverId);
-  if (targets.length === 0) targets = all.filter((d) => plate && normalizeVehicleKey(d.plate) === plate);
+  let targets: Array<Record<string, any>> = [];
+  if (driverId) {
+    const snap = await getDoc(doc(db, "drivers", driverId));
+    if (snap.exists()) targets = [snap.data()!];
+  }
+  if (targets.length === 0 && plate) {
+    const snap = await getDocs(query(collection(db, "drivers"), where("plate", "==", plate), limit(5)));
+    targets = snap.docs.map((d) => d.data());
+  }
   for (const d of targets) if (d.expoPushToken) tokens.add(String(d.expoPushToken));
   if (tokens.size === 0) return;
 

@@ -8,7 +8,7 @@
  *  - The balance may go negative. A low balance never blocks a hire.
  *  - Deposits and top-ups are company revenue, recorded with their method.
  */
-import { db } from "@/lib/fs-server";
+import { db, limit, orderBy } from "@/lib/fs-server";
 import {
   collection,
   doc,
@@ -55,21 +55,31 @@ export async function listOutsideOwners(): Promise<StoredOutsideEmployee[]> {
 
 /** Look up by Driver ID or NIC. */
 export async function findOutsideOwner(key: string): Promise<StoredOutsideEmployee | null> {
-  const clean = (key || "").trim().toLowerCase();
-  if (!clean) return null;
-  const owners = await listOutsideOwners();
-  return (
-    owners.find((e) =>
-      [e.idNumber, e.id, e.driverId].some((v) => (v || "").trim().toLowerCase() === clean)
-    ) || null
-  );
+  const clean = (key || "").trim();
+  if (!clean || clean.includes("/")) return null;
+  const byId = await getDoc(doc(db, OWNERS, clean.toUpperCase()));
+  if (byId.exists()) return { ...(byId.data() as StoredOutsideEmployee), id: byId.id };
+  for (const value of new Set([clean, clean.toUpperCase()])) {
+    const found = await getDocs(query(collection(db, OWNERS), where("idNumber", "==", value), limit(1)));
+    if (!found.empty) return { ...(found.docs[0].data() as StoredOutsideEmployee), id: found.docs[0].id };
+  }
+  return null;
 }
 
 export async function findOutsideOwnerByPlate(plate: string): Promise<StoredOutsideEmployee | null> {
   const key = plateKey(plate);
   if (!key) return null;
-  const owners = await listOutsideOwners();
-  return owners.find((e) => plateKey(e.plateNumber) === key) || null;
+  // The unique-key document matches any spacing or dashes
+  const lock = await getDoc(doc(db, UNIQUE_KEYS, `plate_${key}`));
+  if (lock.exists()) {
+    const owner = await getDoc(doc(db, OWNERS, String(lock.data()!.employeeId)));
+    if (owner.exists()) {
+      const data = owner.data() as StoredOutsideEmployee;
+      if (plateKey(data.plateNumber) === key) return { ...data, id: owner.id };
+    }
+  }
+  const found = await getDocs(query(collection(db, OWNERS), where("plateNumber", "==", cleanPlate(plate)), limit(1)));
+  return found.empty ? null : { ...(found.docs[0].data() as StoredOutsideEmployee), id: found.docs[0].id };
 }
 
 export async function listOwnerTransactions(employeeId: string): Promise<StoredCommissionTransaction[]> {
@@ -114,18 +124,19 @@ export async function createOutsideOwner(input: NewOwnerInput): Promise<StoredOu
     { id: plateKey(plate) && `plate_${plateKey(plate)}`, label: "Vehicle number" },
   ].filter((k) => k.id);
 
-  // Records created before the unique-key documents existed. A failure here aborts registration.
-  const owners = await listOutsideOwners();
-  for (const e of owners) {
-    const clash =
-      nicKey(input.idNumber) && nicKey(e.idNumber) === nicKey(input.idNumber)
-        ? "NIC/ID"
-        : phoneKey(input.phone) && phoneKey(e.phone) === phoneKey(input.phone)
-          ? "Phone number"
-          : plateKey(e.plateNumber) === plateKey(plate)
-            ? "Vehicle number"
-            : "";
-    if (clash) throw new OwnerError(`${clash} already registered (${e.id} - ${e.name}).`);
+  // Exact-value checks cover records older than the unique-key documents.
+  // A failure here aborts registration.
+  for (const [field, value, label] of [
+    ["idNumber", input.idNumber, "NIC/ID"],
+    ["phone", input.phone, "Phone number"],
+    ["plateNumber", plate, "Vehicle number"],
+  ] as const) {
+    if (!value) continue;
+    const found = await getDocs(query(collection(db, OWNERS), where(field, "==", value), limit(1)));
+    if (!found.empty) {
+      const e = found.docs[0].data();
+      throw new OwnerError(`${label} already registered (${found.docs[0].id} - ${e.name}).`);
+    }
   }
 
   const highest = await scanHighestDriverNumber();
@@ -259,18 +270,23 @@ export async function approveOwnerRegistration(
   const plate = cleanPlate(String(reg.plateNumber || reg.vehicleNumber || ""));
   const idNumber = String(reg.idNumber || "").trim();
 
-  const existing = (await listOutsideOwners()).find(
-    (e) =>
-      e.registrationId === registrationId ||
-      (plateKey(e.plateNumber) === plateKey(plate) && nicKey(e.idNumber) === nicKey(idNumber))
+  const sameRegistration = await getDocs(
+    query(collection(db, OWNERS), where("registrationId", "==", registrationId), limit(1))
   );
+  const samePlate = sameRegistration.empty ? await findOutsideOwnerByPlate(plate) : null;
+  const existing = !sameRegistration.empty
+    ? { id: sameRegistration.docs[0].id }
+    : samePlate && nicKey(samePlate.idNumber) === nicKey(idNumber)
+      ? samePlate
+      : null;
   if (existing) {
     await setDoc(
       regRef,
       { status: "approved", outsideEmployeeId: existing.id, updatedAt: Date.now() },
       { merge: true }
     );
-    return { employee: existing, created: false };
+    const current = await getDoc(doc(db, OWNERS, existing.id));
+    return { employee: { ...(current.data() as StoredOutsideEmployee), id: existing.id }, created: false };
   }
 
   const name = String(reg.ownerName || "").trim();
@@ -449,8 +465,13 @@ export async function setOwnerAvailability(
 
 /* ------------------------------------------------------------ Top-up slips */
 
-export async function listTopupSlips(): Promise<StoredTopupSlip[]> {
-  const snap = await getDocs(collection(db, SLIPS));
+/** Newest slips, optionally for one owner. */
+export async function listTopupSlips(employeeId?: string): Promise<StoredTopupSlip[]> {
+  const snap = await getDocs(
+    employeeId
+      ? query(collection(db, SLIPS), where("employeeId", "==", employeeId))
+      : query(collection(db, SLIPS), orderBy("createdAt", "desc"), limit(200))
+  );
   return snap.docs
     .map((d) => ({ ...(d.data() as StoredTopupSlip), id: d.id }))
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));

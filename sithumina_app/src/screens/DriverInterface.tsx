@@ -355,7 +355,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     };
 
     const unsubFleet = onSnapshot(
-      collection(db, "lorries_registry"),
+      query(collection(db, "lorries_registry"), where("driverId", "==", driverIdUpper)),
       (snap) => {
         const nextIds = new Set<string>(matchedLorryIds);
         const nextPlates = new Set<string>(matchedPlates);

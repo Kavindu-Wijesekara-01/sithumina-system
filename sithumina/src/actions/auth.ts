@@ -12,7 +12,7 @@ import {
 } from "@/lib/server-store";
 import { normalizePhoneNumber, phonesMatch, getCanonicalCustomerId } from "@/lib/phone-utils";
 import { ActionResult } from "./types";
-import { db } from "@/lib/fs-server";
+import { db, query, where, limit } from "@/lib/fs-server";
 import { collection, deleteDoc, doc, getDocs, setDoc, updateDoc } from "@/lib/fs-server";
 
 async function fetchDriversAuthoritative(): Promise<StoredDriver[]> {
@@ -141,7 +141,9 @@ export async function deleteCustomerAction(input: {
         if (canonicalId) candidateIds.add(canonicalId);
       }
 
-      const usersSnap = await getDocs(collection(db, "users"));
+      const usersSnap = await getDocs(
+        query(collection(db, "users"), where("phone", "==", normalizePhoneNumber(cleanPhone)))
+      );
       const deletedDocIds = new Set<string>();
 
       for (const userDoc of usersSnap.docs) {
@@ -173,7 +175,9 @@ export async function deleteCustomerAction(input: {
 
       // 3. Either delete or archive customer directory link on existing bookings
       if (cleanPhone) {
-        const bookingsSnap = await getDocs(collection(db, "bookings"));
+        const bookingsSnap = await getDocs(
+          query(collection(db, "bookings"), where("customerPhone", "==", normalizePhoneNumber(cleanPhone)))
+        );
         const nowTs = Date.now();
         for (const bDoc of bookingsSnap.docs) {
           const bData = bDoc.data();
@@ -255,7 +259,7 @@ export async function getCustomersAction(): Promise<ActionResult<StoredCustomer[
     localCustomers.forEach(mergeEntry);
 
     try {
-      const snap = await getDocs(collection(db, "users"));
+      const snap = await getDocs(query(collection(db, "users"), where("role", "==", "customer"), limit(1000)));
       snap.docs.forEach((d) => {
         const data = d.data();
         if (data.role === "driver" || data.role === "admin") return;

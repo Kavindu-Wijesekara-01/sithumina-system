@@ -43,3 +43,6 @@ next-env.d.ts
 .vercel
 */.vercel
 scratch/
+
+# Legacy local data: never commit
+sithumina/data/fleet-store.json

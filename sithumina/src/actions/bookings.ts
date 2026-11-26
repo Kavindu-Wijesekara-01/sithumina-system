@@ -5,7 +5,6 @@ import { revalidatePath } from "next/cache";
 import {
   createBookingInStore,
   getStoredBooking,
-  getAllStoredBookings,
   updateBookingStatusInStore,
   upsertBookingInStore,
   deleteBookingFromStore,
@@ -26,7 +25,7 @@ import {
 import { findOutsideOwnerByPlate, listOutsideOwners, syncHireCommission } from "@/lib/outside-owners";
 import { closeDispatchesForBooking } from "@/lib/dispatch-sync";
 import { performTripAction, planTrip, refreshVehicleTripState, TripError } from "@/lib/trip-workflow";
-import { isActiveTrip, tripFields } from "@/lib/trip-state";
+import { isActiveTrip, tripFields, OPEN_STATUSES } from "@/lib/trip-state";
 import { sendDispatchPush } from "@/lib/push";
 import { recordReversal, voidReversals } from "@/lib/reversals";
 import { outstandingAmount, todayYmd } from "@/lib/ledger";
@@ -46,7 +45,7 @@ import {
   getDatesBetween,
 } from "@/lib/booking-schedule";
 import { ActionResult, BookingActionInput } from "./types";
-import { db } from "@/lib/fs-server";
+import { db, orderBy, limit, type Constraint } from "@/lib/fs-server";
 import {
   collection,
   deleteDoc,
@@ -246,8 +245,8 @@ async function syncBookingDispatchDoc(
   // The Driver App can only read jobs that name its driver
   let resolvedDriverId = String(extra?.driverId || booking.assignedDriverId || "").toUpperCase();
   if (!resolvedDriverId && plateNorm) {
-    const drivers = await getDocs(collection(db, "drivers"));
-    const match = drivers.docs.find((d) => normalizePlate(d.data().plate) === plateNorm);
+    const drivers = await getDocs(query(collection(db, "drivers"), where("plate", "==", plate.toUpperCase()), limit(1)));
+    const match = drivers.docs[0];
     if (match) resolvedDriverId = String(match.data().driverId || match.id).toUpperCase();
   }
 
@@ -393,117 +392,23 @@ async function syncBookingDispatchDoc(
   }
 }
 
-async function fetchBookingsAuthoritative(): Promise<StoredBooking[]> {
-  try {
-    const [snap, dispSnap, drvSnap] = await Promise.all([
-      getDocs(collection(db, "bookings")),
-      getDocs(collection(db, "dispatches")).catch(() => null),
-      getDocs(collection(db, "drivers")).catch(() => null),
-    ]);
-
-    const dispByBooking = new Map<
-      string,
-      { driverId: string; driverName: string; driverPhone: string; assignedPlate: string }
-    >();
-    if (dispSnap) {
-      dispSnap.forEach((d) => {
-        const dd = d.data();
-        const bid = String(
-          dd.bookingId || (d.id.startsWith("dispatch-") ? d.id.replace(/^dispatch-/, "") : "")
-        ).trim();
-        if (!bid) return;
-        const dName = isRealDriverName(dd.driverName);
-        const dPhone = String(dd.driverPhone || "").trim();
-        const prev = dispByBooking.get(bid);
-        dispByBooking.set(bid, {
-          driverId: String(dd.driverId || prev?.driverId || "").trim(),
-          driverName: dName || prev?.driverName || "",
-          driverPhone: dPhone || prev?.driverPhone || "",
-          assignedPlate: String(dd.assignedPlate || prev?.assignedPlate || "").trim(),
-        });
-      });
-    }
-
-    const driversById = new Map<string, { driverId: string; name: string; phone: string }>();
-    const driversByPlate = new Map<string, { driverId: string; name: string; phone: string }>();
-    if (drvSnap) {
-      drvSnap.forEach((d) => {
-        const dd = d.data();
-        const dName = isRealDriverName(dd.name);
-        const dPhone = String(dd.phone || "").trim();
-        const dId = String(dd.driverId || d.id).trim();
-        if (!dName && !dPhone) return;
-        const idKey = String(dd.driverId || d.id).trim().toUpperCase();
-        if (idKey) driversById.set(idKey, { driverId: dId, name: dName, phone: dPhone });
-        const pKey = normalizePlate(dd.plate);
-        if (pKey) driversByPlate.set(pKey, { driverId: dId, name: dName, phone: dPhone });
-      });
-    }
-
-    try {
-      const storeLorries = await getAllStoredLorries();
-      const storeOutside = await listOutsideOwners().catch(() => []);
-      storeLorries.forEach((l: StoredLorry) => {
-        if ((l.isOutsideLorry || l.ownershipType === "outside") && l.driverName && l.plate) {
-          const pKey = normalizePlate(l.plate);
-          if (pKey && !driversByPlate.has(pKey)) {
-            driversByPlate.set(pKey, { driverId: l.driverId || "", name: l.driverName, phone: l.driverPhone || "" });
-          }
-        }
-      });
-      storeOutside.forEach((o: StoredOutsideEmployee) => {
-        if (o.plateNumber && o.name) {
-          const pKey = normalizePlate(o.plateNumber);
-          if (pKey) {
-            driversByPlate.set(pKey, { driverId: o.driverId || o.id, name: o.name, phone: o.phone || "" });
-          }
-        }
-      });
-    } catch { }
-
-    const items: StoredBooking[] = [];
-    const seenIds = new Set<string>();
-    snap.forEach((d) => {
-      const data = d.data();
-      const resolvedId = String(data.id || data.trackingId || d.id);
-      if (seenIds.has(resolvedId)) return;
-      seenIds.add(resolvedId);
-      const mapped = mapFirestoreBooking(resolvedId, data);
-
-      const disp = dispByBooking.get(resolvedId);
-      const plateNorm = normalizePlate(mapped.assignedPlate || disp?.assignedPlate);
-      const matchedDrv =
-        (disp?.driverId ? driversById.get(disp.driverId.toUpperCase()) : undefined) ||
-        (plateNorm ? driversByPlate.get(plateNorm) : undefined);
-
-      if (!mapped.assignedPlate && disp?.assignedPlate) {
-        mapped.assignedPlate = disp.assignedPlate;
-      }
-      const isOutsideLorry = plateNorm ? Boolean(driversByPlate.get(plateNorm)) : false;
-      if (
-        ["assigned", "in_transit", "delivered"].includes(mapped.status) ||
-        mapped.bookingType === "live_lorry" ||
-        isOutsideLorry
-      ) {
-        if (!mapped.assignedDriverName) {
-          mapped.assignedDriverName = disp?.driverName || matchedDrv?.name || "";
-        }
-        if (!mapped.assignedDriverPhone) {
-          mapped.assignedDriverPhone = disp?.driverPhone || matchedDrv?.phone || "";
-        }
-        if (!mapped.assignedDriverId) {
-          mapped.assignedDriverId = disp?.driverId || matchedDrv?.driverId || "";
-        }
-      }
-
-      items.push(mapped);
-    });
-    items.sort((a, b) => (b.createdAt || b.updatedAt || 0) - (a.createdAt || a.updatedAt || 0));
-    return items;
-  } catch {
-    return await getAllStoredBookings();
-  }
+/** Run one targeted booking query. */
+async function loadBookings(...constraints: Constraint[]): Promise<StoredBooking[]> {
+  const snap = await getDocs(query(collection(db, "bookings"), ...constraints));
+  return snap.docs
+    .map((d) => mapFirestoreBooking(d.id, d.data()))
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 }
+
+/** Bookings that can still clash with a new schedule. */
+const loadOpenBookings = () => loadBookings(where("status", "in", OPEN_STATUSES));
+
+async function loadBooking(id: string): Promise<StoredBooking | null> {
+  const snap = await getDoc(doc(db, "bookings", id));
+  return snap.exists() ? mapFirestoreBooking(snap.id, snap.data()) : null;
+}
+
+const PAGE_SIZE = 500;
 
 /**
  * High-performance Server Action to create a freight booking.
@@ -587,13 +492,7 @@ export async function createBookingAction(
         };
       }
 
-      const [cloudBookings, storeBookings] = await Promise.all([
-        fetchBookingsAuthoritative().catch(() => [] as StoredBooking[]),
-        Promise.resolve([] as StoredBooking[]),
-      ]);
-      const combinedMap = new Map<string, StoredBooking>();
-      cloudBookings.forEach((b) => combinedMap.set(b.id, b));
-      storeBookings.forEach((b) => combinedMap.set(b.id, b));
+      const openBookings = await loadOpenBookings();
 
       const conflict = findBookingScheduleConflict(
         {
@@ -608,7 +507,7 @@ export async function createBookingAction(
           assignedDriverPhone: resolvedInputDriverPhone,
           bookingType,
         },
-        Array.from(combinedMap.values())
+        openBookings
       );
 
       if (conflict.hasConflict) {
@@ -843,23 +742,15 @@ export async function trackBookingAction(
       return { success: true, data: [] };
     }
 
-    const qLower = q.toLowerCase();
-    const cleanPhone = qLower.replace(/[^0-9]/g, "");
-    const all = await fetchBookingsAuthoritative();
-    const matches = all.filter((b) => {
-      const idMatch = String(b.id || "").toLowerCase().includes(qLower);
-      const plateMatch = String(b.assignedPlate || "").toLowerCase().includes(qLower);
-      const cityMatch =
-        String(b.pickupCity || "").toLowerCase().includes(qLower) ||
-        String(b.deliveryCity || "").toLowerCase().includes(qLower);
-      const bPhoneClean = String(b.customerPhone || "").replace(/[^0-9]/g, "");
-      const phoneMatch =
-        phonesMatch(b.customerPhone, q) ||
-        (cleanPhone.length >= 4 &&
-          bPhoneClean.length > 0 &&
-          (bPhoneClean.includes(cleanPhone) || cleanPhone.includes(bPhoneClean)));
-      return idMatch || plateMatch || cityMatch || phoneMatch;
-    });
+    let matches: StoredBooking[];
+    if (/^ST-/i.test(q)) {
+      const one = await loadBooking(q.toUpperCase());
+      matches = one ? [one] : [];
+    } else if (q.replace(/\D/g, "").length >= 9) {
+      matches = await loadBookings(where("customerPhone", "==", normalizePhoneNumber(q)));
+    } else {
+      matches = await loadBookings(where("assignedPlate", "==", q.toUpperCase()), limit(50));
+    }
 
     if (auth.session.role === "customer") {
       const own = (b: { customerPhone?: string }) => phonesMatch(b.customerPhone, auth.session.customerPhone);
@@ -892,10 +783,7 @@ export async function getCustomerBookingsAction(
       return { success: true, data: [] };
     }
 
-    const all = await fetchBookingsAuthoritative();
-    const bookings = all
-      .filter((b) => phonesMatch(b.customerPhone, phone))
-      .sort((a, b) => (b.createdAt || b.updatedAt || 0) - (a.createdAt || a.updatedAt || 0));
+    const bookings = await loadBookings(where("customerPhone", "==", normalizePhoneNumber(phone)));
     return {
       success: true,
       data: bookings,
@@ -912,11 +800,18 @@ export async function getCustomerBookingsAction(
 /**
  * Server Action to retrieve all bookings (for dispatch / admin).
  */
-export async function getAllBookingsAction(): Promise<ActionResult<StoredBooking[]>> {
+export async function getAllBookingsAction(
+  /** Cursor: createdAt of the oldest booking already loaded. */
+  before?: number
+): Promise<ActionResult<StoredBooking[]>> {
   const auth = await authorize("admin");
   if (!auth.ok) return auth.denied;
   try {
-    const bookings = await fetchBookingsAuthoritative();
+    const bookings = await loadBookings(
+      ...(before ? [where("createdAt", "<", before)] : []),
+      orderBy("createdAt", "desc"),
+      limit(PAGE_SIZE)
+    );
     return {
       success: true,
       data: bookings,
@@ -965,7 +860,12 @@ export async function getLorryBookedDatesAction(
       return { success: true, data: { bookedDates: [], bookingsByDate: {} } };
     }
 
-    const all = await fetchBookingsAuthoritative();
+    // This vehicle's bookings only, by plate or by lorry ID
+    const [byPlate, byId] = await Promise.all([
+      loadBookings(where("assignedPlate", "==", clean)),
+      loadBookings(where("assignedLorryId", "==", lorryIdentifier.trim())),
+    ]);
+    const all = Array.from(new Map([...byPlate, ...byId].map((b) => [b.id, b])).values());
     const bookingsByDate: Record<string, BookedDateDetail> = {};
     const bookedDates: string[] = [];
 
@@ -1100,13 +1000,9 @@ export async function updateBookingStatusAction(
       : undefined;
 
     // Fetch existing booking state (local store + Firestore) to validate time-slot & rider constraints before mutating
-    const [cloudBookings, storeBookings] = await Promise.all([
-      fetchBookingsAuthoritative().catch(() => [] as StoredBooking[]),
-      Promise.resolve([] as StoredBooking[]),
-    ]);
-    const combinedMap = new Map<string, StoredBooking>();
-    storeBookings.forEach((b) => combinedMap.set(b.id, b));
-    cloudBookings.forEach((b) => combinedMap.set(b.id, b));
+    const [openBookings, target] = await Promise.all([loadOpenBookings(), loadBooking(id)]);
+    const combinedMap = new Map<string, StoredBooking>(openBookings.map((b) => [b.id, b]));
+    if (target) combinedMap.set(id, target);
 
     const existingBooking = combinedMap.get(id);
     const isIndividual = (existingBooking?.bookingType || "individual_vehicle") !== "live_lorry";
@@ -1870,8 +1766,7 @@ export async function driverShareLiveGpsAction(
     }
 
     // 2. Automatically make ride Ongoing if not already ongoing
-    const store = await getAllStoredBookings();
-    const current = store.find((b) => b.id === cleanId);
+    const current = await loadBooking(cleanId);
     let needStart = Boolean(
       current &&
       current.status !== "in_transit" &&
@@ -2001,19 +1896,14 @@ export async function getDriverAssignedBookingsAction(
   if (auth.session.role === "driver") driverIdOrPlate = auth.session.driverId;
   try {
     const clean = (driverIdOrPlate || "").trim().toLowerCase();
-    const cleanPlateNorm = normalizePlate(clean);
     if (!clean) return { success: true, data: [] };
 
-    const store = await getAllStoredBookings();
-    const matched = store.filter((b) => {
-      const bDriverId = (b.assignedDriverId || "").trim().toLowerCase();
-      const bPlateNorm = normalizePlate(b.assignedPlate || b.selectedVehiclePlate);
-      return (
-        bDriverId === clean ||
-        (cleanPlateNorm && bPlateNorm === cleanPlateNorm) ||
-        (clean.length >= 9 && phonesMatch(b.assignedDriverPhone, clean))
-      );
-    });
+    const key = driverIdOrPlate.trim().toUpperCase();
+    const [byDriver, byPlate] = await Promise.all([
+      loadBookings(where("assignedDriverId", "==", key), orderBy("createdAt", "desc"), limit(100)),
+      loadBookings(where("assignedPlate", "==", key), orderBy("createdAt", "desc"), limit(100)),
+    ]);
+    const matched = Array.from(new Map([...byDriver, ...byPlate].map((b) => [b.id, b])).values());
 
     matched.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     return { success: true, data: matched };
@@ -2166,7 +2056,7 @@ export async function getAllComplaintsAction(): Promise<ActionResult<StoredCompl
     localComplaints.forEach((c) => map.set(c.id, c));
 
     try {
-      const snap = await getDocs(collection(db, "complaints"));
+      const snap = await getDocs(query(collection(db, "complaints"), orderBy("deletedAt", "desc"), limit(300)));
       snap.docs.forEach((d) => {
         const data = d.data() as StoredComplaint;
         map.set(d.id, {

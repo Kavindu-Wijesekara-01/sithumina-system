@@ -38,7 +38,7 @@ import {
   updateDriverInDb,
   deleteDriverFromDb,
 } from "../services/database";
-import { AdminAnalytics, useCollection } from "./AdminAnalytics";
+import { AdminAnalytics, useCollection, useTodayBookings } from "./AdminAnalytics";
 import {
   periodRange,
   summarise,
@@ -196,7 +196,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   // Filter and secondary states
   const [reqTab, setReqTab] = useState<"p" | "a" | "r">("p");
   const [revFilterStar, setRevFilterStar] = useState<number>(0);
-  const ledgerBookings = useCollection("bookings");
+  const ledgerBookings = useTodayBookings();
   const ledgerWallet = useCollection("commission_transactions");
   const ledgerReversals = useCollection("payment_reversals");
   const ledgerOwners = useCollection("outside_employees");

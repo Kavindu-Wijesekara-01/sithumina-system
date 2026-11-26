@@ -16,12 +16,12 @@ import {
   hasAssignedRider,
   validateTimeRange,
 } from "@/lib/booking-schedule";
-import { db } from "@/lib/fs-server";
+import { db, orderBy, limit } from "@/lib/fs-server";
 import { closeDispatchesForBooking } from "@/lib/dispatch-sync";
 import { deleteBookingAction, updateBookingStatusAction } from "@/actions/bookings";
 import { syncHireCommission } from "@/lib/outside-owners";
 import { refreshVehicleTripState } from "@/lib/trip-workflow";
-import { tripFields } from "@/lib/trip-state";
+import { tripFields, OPEN_STATUSES } from "@/lib/trip-state";
 import { todayYmd } from "@/lib/ledger";
 import { collection, getDocs, getDoc, doc, setDoc, updateDoc, deleteDoc, query, where } from "@/lib/fs-server";
 
@@ -31,28 +31,17 @@ function isRealDriverName(val: unknown): string {
 }
 
 async function getCombinedBookingsForSchedule() {
-  const byId = new Map<string, any>();
-  for (const b of await getAllStoredBookings()) {
-    byId.set(b.id, b);
-  }
-  try {
-    const snap = await getDocs(collection(db, "bookings"));
-    snap.docs.forEach((d) => {
-      const data = d.data();
-      const id = String(data.id || data.trackingId || d.id);
-      const prev = byId.get(id);
-      byId.set(id, {
-        ...(prev || {}),
-        ...data,
-        id,
-        date: data.date || (Array.isArray(data.dates) && data.dates[0]) || prev?.date || "",
-        dates: Array.isArray(data.dates) && data.dates.length > 0 ? data.dates : prev?.dates || (data.date ? [data.date] : []),
-      });
-    });
-  } catch {
-    // Fallback to local store when Firestore is unavailable
-  }
-  return Array.from(byId.values());
+  // Only bookings that are still open can clash with a schedule
+  const snap = await getDocs(query(collection(db, "bookings"), where("status", "in", OPEN_STATUSES)));
+  return snap.docs.map((d) => {
+    const data = d.data() as any;
+    return {
+      ...data,
+      id: d.id,
+      date: data.date || (Array.isArray(data.dates) && data.dates[0]) || "",
+      dates: Array.isArray(data.dates) && data.dates.length > 0 ? data.dates : data.date ? [data.date] : [],
+    };
+  });
 }
 
 export async function GET(request: Request) {
@@ -63,68 +52,18 @@ export async function GET(request: Request) {
     auth.session.role === "customer" ? auth.session.customerPhone : searchParams.get("phone")?.trim() || "";
 
   try {
-    const [snap, dispSnap, drvSnap] = await Promise.all([
-      getDocs(collection(db, "bookings")),
-      getDocs(collection(db, "dispatches")).catch(() => null),
-      getDocs(collection(db, "drivers")).catch(() => null),
-    ]);
-
-    const dispByBooking = new Map<string, { driverId: string; driverName: string; driverPhone: string; assignedPlate: string }>();
-    if (dispSnap) {
-      dispSnap.forEach((d) => {
-        const dd = d.data();
-        const bid = String(dd.bookingId || (d.id.startsWith("dispatch-") ? d.id.replace(/^dispatch-/, "") : "")).trim();
-        if (!bid) return;
-        const dName = isRealDriverName(dd.driverName);
-        const dPhone = String(dd.driverPhone || "").trim();
-        const prev = dispByBooking.get(bid);
-        dispByBooking.set(bid, {
-          driverId: String(dd.driverId || prev?.driverId || "").trim(),
-          driverName: dName || prev?.driverName || "",
-          driverPhone: dPhone || prev?.driverPhone || "",
-          assignedPlate: String(dd.assignedPlate || prev?.assignedPlate || "").trim(),
-        });
-      });
-    }
-
-    const driversById = new Map<string, { driverId: string; name: string; phone: string }>();
-    const driversByPlate = new Map<string, { driverId: string; name: string; phone: string }>();
-    if (drvSnap) {
-      drvSnap.forEach((d) => {
-        const dd = d.data();
-        const dName = isRealDriverName(dd.name);
-        const dPhone = String(dd.phone || "").trim();
-        const dId = String(dd.driverId || d.id).trim();
-        if (!dName && !dPhone) return;
-        const idKey = String(dd.driverId || d.id).trim().toUpperCase();
-        if (idKey) driversById.set(idKey, { driverId: dId, name: dName, phone: dPhone });
-        const pKey = String(dd.plate || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-        if (pKey) driversByPlate.set(pKey, { driverId: dId, name: dName, phone: dPhone });
-      });
-    }
-
-    try {
-      const { getAllStoredLorries } = await import("@/lib/server-store");
-      const { listOutsideOwners } = await import("@/lib/outside-owners");
-      const storeLorries = await getAllStoredLorries();
-      const storeOutside = await listOutsideOwners().catch(() => []);
-      storeLorries.forEach((l: any) => {
-        if ((l.isOutsideLorry || l.ownershipType === "outside") && l.driverName && l.plate) {
-          const pKey = l.plate.toUpperCase().replace(/[^A-Z0-9]/g, "");
-          if (pKey && !driversByPlate.has(pKey)) {
-            driversByPlate.set(pKey, { driverId: l.driverId || "", name: l.driverName, phone: l.driverPhone || "" });
-          }
-        }
-      });
-      storeOutside.forEach((o: any) => {
-        if (o.plateNumber && o.name) {
-          const pKey = o.plateNumber.toUpperCase().replace(/[^A-Z0-9]/g, "");
-          if (pKey) {
-            driversByPlate.set(pKey, { driverId: o.driverId || o.id, name: o.name, phone: o.phone || "" });
-          }
-        }
-      });
-    } catch {}
+    // A customer's own bookings, or one page (newest first) for the office
+    const before = Number(searchParams.get("before")) || 0;
+    const snap = await getDocs(
+      phone
+        ? query(collection(db, "bookings"), where("customerPhone", "==", normalizePhoneNumber(phone)))
+        : query(
+            collection(db, "bookings"),
+            ...(before ? [where("createdAt", "<", before)] : []),
+            orderBy("createdAt", "desc"),
+            limit(500)
+          )
+    );
 
     const byId = new Map<string, any>();
 
@@ -149,30 +88,12 @@ export async function GET(request: Request) {
           ? [resolvedDate]
           : [];
 
-      const disp = dispByBooking.get(resolvedId);
-      const rawPlate = String(data.assignedPlate || data.selectedVehiclePlate || disp?.assignedPlate || "").trim();
-      const plateKey = rawPlate.toUpperCase().replace(/[^A-Z0-9]/g, "");
-      const matchedDrv =
-        (disp?.driverId ? driversById.get(disp.driverId.toUpperCase()) : undefined) ||
-        (plateKey ? driversByPlate.get(plateKey) : undefined);
-
-      const statusVal = String(data.status || "pending");
+      const statusVal = data.status || "pending";
+      const cleanDrvId = String(data.assignedDriverId || "").trim();
+      const cleanDrvName = isRealDriverName(data.assignedDriverName);
+      const cleanDrvPhone = String(data.assignedDriverPhone || "").trim();
+      const rawPlate = data.assignedPlate || data.selectedVehiclePlate || "";
       const bookingTypeVal = data.bookingType || "individual_vehicle";
-      const isOutsideLorry = plateKey ? Boolean(driversByPlate.get(plateKey)) : false;
-      const allowDriverFallback =
-        ["assigned", "in_transit", "delivered"].includes(statusVal) ||
-        bookingTypeVal === "live_lorry" ||
-        isOutsideLorry;
-
-      const cleanDrvName =
-        isRealDriverName(data.assignedDriverName) ||
-        (allowDriverFallback ? disp?.driverName || matchedDrv?.name || "" : "");
-      const cleanDrvPhone =
-        String(data.assignedDriverPhone || "").trim() ||
-        (allowDriverFallback ? disp?.driverPhone || matchedDrv?.phone || "" : "");
-      const cleanDrvId =
-        String(data.assignedDriverId || "").trim() ||
-        (allowDriverFallback ? disp?.driverId || matchedDrv?.driverId || "" : "");
 
       byId.set(resolvedId, {
         id: resolvedId,

@@ -9,7 +9,7 @@ import {
   StoredInquiry,
 } from "@/lib/server-store";
 import { ActionResult, InquiryActionInput } from "./types";
-import { db } from "@/lib/fs-server";
+import { db, query, orderBy, limit } from "@/lib/fs-server";
 import { collection, doc, getDocs, setDoc } from "@/lib/fs-server";
 
 /**
@@ -95,7 +95,7 @@ export async function getAllInquiriesAction(): Promise<ActionResult<StoredInquir
   if (!auth.ok) return auth.denied;
   try {
     try {
-      const snap = await getDocs(collection(db, "inquiries"));
+      const snap = await getDocs(query(collection(db, "inquiries"), orderBy("createdAt", "desc"), limit(300)));
       const inquiries: StoredInquiry[] = snap.docs
         .map((d) => {
           const data = d.data();

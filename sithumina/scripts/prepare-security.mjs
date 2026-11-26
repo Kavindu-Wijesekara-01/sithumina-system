@@ -9,6 +9,8 @@
  *     can read their own records.
  *  2. Removes owners' NIC numbers from the publicly readable vehicle records.
  *  3. Gives open driver jobs the Driver ID the app needs to read them.
+ *  4. Creates lookup documents for existing external owners, and adds a creation
+ *     time to old bookings so that they appear in paged lists.
  */
 import { cert, initializeApp } from "firebase-admin/app";
 import { FieldValue, getFirestore } from "firebase-admin/firestore";
@@ -63,5 +65,40 @@ for (const doc of (await db.collection("dispatches").get()).docs) {
   const match = drivers.find((d) => plateKey(d.data().plate) && plateKey(d.data().plate) === plateKey(job.assignedPlate));
   if (match) await change("add driver ID", doc.ref, { driverId: match.data().driverId || match.id });
   else console.log(`  no driver found for ${doc.ref.path}; reassign it from the dashboard`);
+}
+for (const doc of (await db.collection("outside_employees").get()).docs) {
+  const owner = doc.data();
+  const keys = [
+    ["nic", plateKey(owner.idNumber)],
+    ["phone", String(owner.phone || "").replace(/\D/g, "").slice(-9)],
+    ["plate", plateKey(owner.plateNumber)],
+  ];
+  for (const [kind, value] of keys) {
+    if (!value) continue;
+    const ref = db.doc(`outside_owner_keys/${kind}_${value}`);
+    if ((await ref.get()).exists) continue;
+    console.log(`  ${apply ? "create" : "would create"} ${ref.path}`);
+    if (apply) await ref.set({ employeeId: doc.id, createdAt: Date.now() });
+  }
+}
+
+for (const doc of (await db.collection("bookings").get()).docs) {
+  const data = doc.data();
+  if (typeof data.createdAt !== "number") {
+    const createdAt = data.createdAt?.toMillis?.() ?? (Number(data.updatedAt) || doc.createTime.toMillis());
+    await change("add creation time", doc.ref, { createdAt });
+  }
+}
+// Lists are ordered by these fields; a record without one would not be listed
+for (const [name, field] of [
+  ["vehicle_registrations", "createdAt"], ["inquiries", "createdAt"], ["reviews", "createdAt"],
+  ["outside_topup_slips", "createdAt"], ["complaints", "deletedAt"],
+]) {
+  for (const doc of (await db.collection(name).get()).docs) {
+    const value = doc.data()[field];
+    if (typeof value !== "number") {
+      await change(`add ${field}`, doc.ref, { [field]: value?.toMillis?.() ?? doc.createTime.toMillis() });
+    }
+  }
 }
 console.log("Done.");

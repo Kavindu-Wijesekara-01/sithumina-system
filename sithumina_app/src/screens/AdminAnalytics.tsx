@@ -4,7 +4,16 @@
  */
 import React, { useEffect, useState } from "react";
 import { View, Text, TextInput, TouchableOpacity, StyleSheet } from "react-native";
-import { collection, onSnapshot } from "firebase/firestore";
+import {
+  collection,
+  getDocs,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  where,
+  type QueryConstraint,
+} from "firebase/firestore";
 import { db } from "../config/firebase";
 import {
   bookingsForDriver,
@@ -49,6 +58,46 @@ export function useCollection(name: string): { rows: Row[]; loading: boolean; er
     [name]
   );
   return state;
+}
+
+/** Only the bookings this screen needs: the period, plus the selected history. */
+function useBookings(from: number, to: number, driverId: string, plate: string) {
+  const [state, setState] = useState({ rows: [] as Booking[], loading: true, error: false });
+  useEffect(() => {
+    let current = true;
+    setState((s0) => ({ ...s0, loading: true }));
+    const source = collection(db, "bookings");
+    const run = async (...constraints: QueryConstraint[]) =>
+      (await getDocs(query(source, ...constraints))).docs.map((d) => ({ ...d.data(), id: d.id }) as Booking);
+    const allTime = from <= 0 && to >= Number.MAX_SAFE_INTEGER;
+    const queries = allTime
+      ? [run(orderBy("createdAt", "desc"), limit(1000))]
+      : ["rideEndedAt", "paymentApprovedAt", "finalPaymentAt"].map((field) =>
+          run(where(field, ">=", Math.max(1, from)), where(field, "<", to))
+        );
+    if (driverId) queries.push(run(where("assignedDriverId", "==", driverId)));
+    if (plate) queries.push(run(where("assignedPlate", "==", plate)));
+    // Unpaid completed trips count towards outstanding amounts
+    queries.push(run(where("status", "==", "delivered")));
+    Promise.all(queries)
+      .then((lists) => {
+        const rows = Array.from(new Map(lists.flat().map((b) => [b.id, b])).values());
+        if (current) setState({ rows, loading: false, error: false });
+      })
+      .catch((e) => {
+        console.warn("Booking figures query failed:", e);
+        if (current) setState({ rows: [], loading: false, error: true });
+      });
+    return () => {
+      current = false;
+    };
+  }, [from, to, driverId, plate]);
+  return state;
+}
+
+export function useTodayBookings() {
+  const [from, to] = periodRange("today");
+  return useBookings(from, to, "", "");
 }
 
 const Stat = ({ label, value }: { label: string; value: string }) => (
@@ -176,7 +225,6 @@ const PERIODS: Array<[Period, string]> = [
 const isDate = (v: string) => /^\d{4}-\d{2}-\d{2}$/.test(v);
 
 export const AdminAnalytics: React.FC = () => {
-  const bookingsState = useCollection("bookings");
   const drivers = useCollection("drivers").rows;
   const vehicles = useCollection("lorries_registry").rows;
   const owners = useCollection("outside_employees").rows;
@@ -186,14 +234,19 @@ export const AdminAnalytics: React.FC = () => {
   const [toText, setTo] = useState("");
   const [selected, setSelected] = useState("");
 
+  const [from, to] = periodRange(period, isDate(fromText) ? fromText : "", isDate(toText) ? toText : "");
   const walletState = useCollection("commission_transactions");
   const reversalState = useCollection("payment_reversals");
-  const bookings = withExternalOwners(bookingsState.rows as unknown as Booking[], owners);
+  const selectedPlate =
+    owners.find((o) => o.id === selected)?.plateNumber ||
+    vehicles.find((v) => plateKey(v.plate) === selected)?.plate ||
+    "";
+  const bookingsState = useBookings(from, to, view === "drivers" ? selected : "", view === "drivers" ? "" : selectedPlate);
+  const bookings = withExternalOwners(bookingsState.rows, owners);
   const ledger: LedgerContext = {
     wallet: walletState.rows as unknown as WalletEntry[],
     reversals: reversalState.rows as unknown as Reversal[],
   };
-  const [from, to] = periodRange(period, isDate(fromText) ? fromText : "", isDate(toText) ? toText : "");
 
   const ownerPlates = new Set(owners.map((o) => plateKey(o.plateNumber)));
   let items: Array<{ key: string; title: string; subtitle: string; trips: Booking[]; wallet?: Row }> = [];
@@ -254,7 +307,7 @@ export const AdminAnalytics: React.FC = () => {
     </TouchableOpacity>
   );
 
-  if (bookingsState.loading) return <Text style={s.muted}>Loading figures...</Text>;
+  if (bookingsState.loading && bookingsState.rows.length === 0) return <Text style={s.muted}>Loading figures...</Text>;
   if (bookingsState.error || walletState.error || reversalState.error) return <Text style={s.due}>Figures could not be loaded. Check your connection.</Text>;
 
   return (
@@ -268,6 +321,7 @@ export const AdminAnalytics: React.FC = () => {
         </View>
       )}
 
+      {period === "all" && <Text style={s.muted}>All time shows the newest 1,000 bookings. Use the web for older history.</Text>}
       {view === "revenue" ? (
         <TotalsView t={summarise(bookings, from, to, ledger)} />
       ) : active ? (

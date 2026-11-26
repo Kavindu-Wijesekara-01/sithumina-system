@@ -2,7 +2,7 @@
  * Server data layer. Firestore is the only store: nothing is written to disk,
  * so every server instance (including on Vercel) sees the same records.
  */
-import { db } from "@/lib/fs-server";
+import { db, orderBy, limit } from "@/lib/fs-server";
 import {
   collection,
   deleteDoc,
@@ -314,6 +314,12 @@ async function readAll<T>(name: string): Promise<T[]> {
   return snap.docs.map((d) => ({ ...(d.data() as AnyRecord), id: d.id }) as T);
 }
 
+/** The newest records only; older ones are reached by paging. */
+async function readLatest<T>(name: string, field: string, count: number): Promise<T[]> {
+  const snap = await getDocs(query(collection(db, name), orderBy(field, "desc"), limit(count)));
+  return snap.docs.map((d) => ({ ...(d.data() as AnyRecord), id: d.id }) as T);
+}
+
 const newestFirst = <T extends { createdAt?: number }>(list: T[]): T[] =>
   list.sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0));
 
@@ -611,7 +617,7 @@ export async function archiveCustomerBookingsInStore(phone: string): Promise<num
  * ============================================================ */
 
 export async function getAllStoredBookings(): Promise<StoredBooking[]> {
-  return newestFirst(await readAll<StoredBooking>("bookings"));
+  return readLatest<StoredBooking>("bookings", "createdAt", 500);
 }
 
 export async function getStoredBooking(id: string): Promise<StoredBooking | null> {
@@ -620,8 +626,10 @@ export async function getStoredBooking(id: string): Promise<StoredBooking | null
 }
 
 export async function getBookingsByCustomerPhone(phone: string): Promise<StoredBooking[]> {
-  if (!(phone || "").trim()) return [];
-  return (await getAllStoredBookings()).filter((b) => phonesMatch(b.customerPhone, phone));
+  const key = normalizePhoneNumber(phone);
+  if (!key) return [];
+  const snap = await getDocs(query(collection(db, "bookings"), where("customerPhone", "==", key)));
+  return newestFirst(snap.docs.map((d) => ({ ...(d.data() as AnyRecord), id: d.id }) as StoredBooking));
 }
 
 export async function upsertBookingInStore(booking: StoredBooking): Promise<StoredBooking> {
@@ -946,28 +954,12 @@ export async function updateBookingInStore(
   return next;
 }
 
-export async function findBookingsInStore(searchQuery: string): Promise<StoredBooking[]> {
-  const q = searchQuery.trim().toLowerCase();
-  const digits = q.replace(/[^0-9]/g, "");
-  return (await getAllStoredBookings()).filter((b) => {
-    const phone = String(b.customerPhone || "").replace(/[^0-9]/g, "");
-    return (
-      String(b.id || "").toLowerCase().includes(q) ||
-      Boolean(b.assignedPlate?.toLowerCase().includes(q)) ||
-      String(b.pickupCity || "").toLowerCase().includes(q) ||
-      String(b.deliveryCity || "").toLowerCase().includes(q) ||
-      phonesMatch(b.customerPhone, searchQuery) ||
-      (digits.length >= 4 && phone.length > 0 && (phone.includes(digits) || digits.includes(phone)))
-    );
-  });
-}
-
 /* ============================================================
  * COMPLAINTS & DELETION REASONS
  * ============================================================ */
 
 export async function getAllStoredComplaints(): Promise<StoredComplaint[]> {
-  return (await readAll<StoredComplaint>("complaints")).sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
+  return readLatest<StoredComplaint>("complaints", "deletedAt", 300);
 }
 
 export async function recordComplaintInStore(complaint: StoredComplaint): Promise<StoredComplaint> {
@@ -980,7 +972,7 @@ export async function recordComplaintInStore(complaint: StoredComplaint): Promis
  * ============================================================ */
 
 export async function getAllStoredRegistrations(): Promise<StoredRegistration[]> {
-  return newestFirst(await readAll<StoredRegistration>("vehicle_registrations"));
+  return readLatest<StoredRegistration>("vehicle_registrations", "createdAt", 300);
 }
 
 export async function addRegistrationInStore(
@@ -1043,7 +1035,7 @@ export async function updateRegistrationStatusInStore(
  * ============================================================ */
 
 export async function getAllStoredInquiries(): Promise<StoredInquiry[]> {
-  return newestFirst(await readAll<StoredInquiry>("inquiries"));
+  return readLatest<StoredInquiry>("inquiries", "createdAt", 300);
 }
 
 export async function addInquiryInStore(
@@ -1079,7 +1071,7 @@ export async function updateInquiryStatusInStore(
 }
 
 export async function getAllStoredReviews(): Promise<StoredReview[]> {
-  return newestFirst(await readAll<StoredReview>("reviews"));
+  return readLatest<StoredReview>("reviews", "createdAt", 100);
 }
 
 export async function addReviewInStore(

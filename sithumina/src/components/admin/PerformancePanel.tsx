@@ -7,7 +7,9 @@ import { db } from "@/lib/firebase";
 import { BankTable, PeriodPicker, Stat, TotalsGrid, type PeriodValue } from "./ui";
 import TripGroupList from "./TripGroupList";
 import { formatRs, REGISTRATION_DEPOSIT } from "@/lib/commission";
-import { bookingsForDriver, bookingsForVehicle, isTripFinished, periodRange, summarise, type LedgerContext } from "@/lib/ledger";
+import { bookingsForDriver, bookingsForVehicle, isTripFinished, periodRange, summarise, withExternalOwners, type LedgerContext } from "@/lib/ledger";
+import { useBookingQuery } from "./useBookingQuery";
+import { fetchBookingsForDriver, fetchBookingsForPeriod, fetchBookingsForVehicle } from "@/lib/booking-feed";
 import { useLedger } from "./useLedger";
 import DriverPassword from "./DriverPassword";
 import { WalletPayments } from "./WalletPayments";
@@ -100,7 +102,7 @@ function Wallet({ owner }: { owner: StoredOutsideEmployee }) {
 
 export default function PerformancePanel({
   mode,
-  bookings,
+  bookings: live,
   drivers = [],
   vehicles = [],
   owners = [],
@@ -117,6 +119,18 @@ export default function PerformancePanel({
   const [fleet, setFleet] = useState<"company" | "external">("company");
   const [from, to] = periodRange(range.period, range.from, range.to);
   const ledger = useLedger();
+  // The list covers the chosen period; the selected entry loads its whole history
+  const period = useBookingQuery(`${from}-${to}`, () => fetchBookingsForPeriod(from, to), live);
+  const selectedPlate =
+    owners.find((o) => o.id === selected)?.plateNumber ||
+    vehicles.find((v) => normalizeVehicleKey(v.plate) === selected)?.plate ||
+    "";
+  const history = useBookingQuery(
+    selected ? `${mode}-${selected}` : "",
+    () => (mode === "drivers" ? fetchBookingsForDriver(selected) : fetchBookingsForVehicle(selectedPlate)),
+    period.bookings
+  );
+  const bookings = withExternalOwners(history.bookings, owners);
 
   const ownerPlates = new Set(owners.map((o) => normalizeVehicleKey(o.plateNumber)));
   const isExternal = (v: PerfVehicle) =>
@@ -240,6 +254,8 @@ export default function PerformancePanel({
 
         {active ? (
           <div className="flex flex-col gap-4 min-w-0">
+            {(period.loading || history.loading) && <p role="status" className="text-sm text-gray-500">Loading trip history...</p>}
+            {(period.error || history.error) && <p role="alert" className="text-sm text-red-700">Some records could not be loaded; figures are incomplete.</p>}
             {(mode === "drivers" || active.owner) && <DriverPassword key={active.key} driverId={active.key} />}
             <TotalsGrid totals={active.totals} />
             {active.owner && <Wallet key={active.owner.id} owner={active.owner} />}

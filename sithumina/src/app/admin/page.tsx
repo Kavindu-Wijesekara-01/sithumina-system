@@ -78,19 +78,7 @@ import {
 
 import { db } from "@/lib/firebase";
 
-import {
-
-  collection,
-
-  onSnapshot,
-
-  doc,
-
-  setDoc,
-
-  deleteDoc,
-
-} from "firebase/firestore";
+import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, orderBy, limit } from "firebase/firestore";
 
 import {
 
@@ -176,6 +164,8 @@ import TripDetails from "@/components/TripDetails";
 import { groupTrips, isActiveTrip, tripFields } from "@/lib/trip-state";
 import { isTripFinished, outstandingAmount, paymentEntries, periodRange, revenueLines, summarise, todayYmd, withExternalOwners } from "@/lib/ledger";
 import { useLedger } from "@/components/admin/useLedger";
+import { useBookingQuery } from "@/components/admin/useBookingQuery";
+import { fetchBookingsForPeriod, subscribeBookingFeed, type BookingFeed } from "@/lib/booking-feed";
 import DeclineAlerts from "@/components/admin/DeclineAlerts";
 import { PaidIntoSelect } from "@/components/admin/WalletPayments";
 import TripGroupList from "@/components/admin/TripGroupList";
@@ -2188,7 +2178,7 @@ export default function MasterAdminDashboard() {
 
     const unsubUsers = onSnapshot(
 
-      collection(db, "users"),
+      query(collection(db, "users"), where("role", "==", "customer"), limit(1000)),
 
       (snap) => {
 
@@ -2278,7 +2268,7 @@ export default function MasterAdminDashboard() {
 
     const unsubRegistrations = onSnapshot(
 
-      collection(db, "vehicle_registrations"),
+      query(collection(db, "vehicle_registrations"), orderBy("createdAt", "desc"), limit(300)),
 
       (snap) => {
 
@@ -2360,7 +2350,7 @@ export default function MasterAdminDashboard() {
 
     const unsubInquiries = onSnapshot(
 
-      collection(db, "inquiries"),
+      query(collection(db, "inquiries"), orderBy("createdAt", "desc"), limit(300)),
 
       (snap) => {
 
@@ -2424,7 +2414,7 @@ export default function MasterAdminDashboard() {
 
     const unsubComplaints = onSnapshot(
 
-      collection(db, "complaints"),
+      query(collection(db, "complaints"), orderBy("deletedAt", "desc"), limit(300)),
 
       (snap) => {
 
@@ -2540,7 +2530,7 @@ export default function MasterAdminDashboard() {
 
     const unsubTopupSlips = onSnapshot(
 
-      collection(db, "outside_topup_slips"),
+      query(collection(db, "outside_topup_slips"), orderBy("createdAt", "desc"), limit(200)),
 
       (snap) => {
 
@@ -2630,17 +2620,25 @@ export default function MasterAdminDashboard() {
 
 
 
+  const bookingFeedRef = useRef<BookingFeed | null>(null);
+  const [olderBookings, setOlderBookings] = useState<"more" | "loading" | "end">("more");
+  const loadOlderBookings = async () => {
+    setOlderBookings("loading");
+    try {
+      setOlderBookings((await bookingFeedRef.current?.loadOlder()) ? "more" : "end");
+    } catch {
+      setOlderBookings("more");
+      showToast("Could not load older bookings.", "error");
+    }
+  };
+
   const subscribeBookingsRealtime = useCallback(() => {
 
     setLoadingBookings(true);
 
-    const colRef = collection(db, "bookings");
-
-    return onSnapshot(
-
-      colRef,
-
-      (snap) => {
+    const feed = subscribeBookingFeed(
+      (docs) => {
+        const snap = docs;
 
         const items: StoredBooking[] = [];
 
@@ -2875,11 +2873,10 @@ export default function MasterAdminDashboard() {
         // Offline / Firestore unavailable fallback ONLY
 
         loadBookingsFromStore();
-
       }
-
     );
-
+    bookingFeedRef.current = feed;
+    return feed.stop;
   }, [loadBookingsFromStore, fleetVehicles]);
 
 
@@ -6872,15 +6869,25 @@ export default function MasterAdminDashboard() {
 
 
   const ledger = useLedger();
+  const monthRange = periodRange("month");
+  const monthQuery = useBookingQuery(
+    authed ? `month-${monthRange[0]}` : "",
+    () => fetchBookingsForPeriod(...monthRange),
+    storedBookings
+  );
+  const revenueBookings = useMemo(
+    () => withExternalOwners(monthQuery.bookings, outsideEmployees),
+    [monthQuery.bookings, outsideEmployees]
+  );
   const revenueData = useMemo(() => {
     const [start, end] = periodRange("today", "", "", clockTick);
     return {
       todayDateStr: getSriLankaDateStr(clockTick),
-      todayRevenue: summarise(bookings, start, end, ledger).received,
-      todayBookingsCount: revenueLines(bookings, ledger).filter((l) => l.at >= start && l.at < end).length,
-      thisMonthRevenue: summarise(bookings, ...periodRange("month", "", "", clockTick), ledger).received,
+      todayRevenue: summarise(revenueBookings, start, end, ledger).received,
+      todayBookingsCount: revenueLines(revenueBookings, ledger).filter((l) => l.at >= start && l.at < end).length,
+      thisMonthRevenue: summarise(revenueBookings, ...periodRange("month", "", "", clockTick), ledger).received,
     };
-  }, [bookings, clockTick, ledger.wallet, ledger.reversals]);
+  }, [revenueBookings, clockTick, ledger.wallet, ledger.reversals]);
 
 
 
@@ -13508,6 +13515,16 @@ export default function MasterAdminDashboard() {
                           )}
                           empty="No completed trips match these filters."
                         />
+                        {olderBookings !== "end" && (
+                          <button
+                            type="button"
+                            disabled={olderBookings === "loading"}
+                            onClick={loadOlderBookings}
+                            className="mt-3 self-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm disabled:opacity-50 cursor-pointer"
+                          >
+                            {olderBookings === "loading" ? "Loading..." : "Load older bookings"}
+                          </button>
+                        )}
 
                       </div>
 
@@ -17928,7 +17945,7 @@ export default function MasterAdminDashboard() {
 
           {/* ========================================================= */}
 
-          {activeNav === "revenue" && <RevenuePanel bookings={bookings} />}
+          {activeNav === "revenue" && <RevenuePanel bookings={bookings} owners={outsideEmployees} />}
 
 
 

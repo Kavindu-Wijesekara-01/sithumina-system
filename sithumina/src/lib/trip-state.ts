@@ -16,6 +16,12 @@ export interface TripLike {
   rideEndedAt?: number;
 }
 
+/** Statuses of bookings that still need work. "delivered" means payment is due. */
+export const OPEN_STATUSES = [
+  "pending", "awaiting_payment", "payment_submitted", "accepted", "booked",
+  "assigned", "goods_collected", "in_transit", "delivered",
+];
+
 const FINISHED = ["delivered", "completed", "cancelled"];
 const ON_ROAD = ["in_transit", "goods_collected"];
 

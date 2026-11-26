@@ -12,7 +12,7 @@ import {
   StoredDriver,
 } from "@/lib/server-store";
 import { ActionResult, DriverRegistrationInput } from "./types";
-import { db } from "@/lib/fs-server";
+import { db, query, where } from "@/lib/fs-server";
 import { allocateDriverId } from "@/lib/driver-ids";
 import { collection, doc, getDocs, setDoc, deleteDoc } from "@/lib/fs-server";
 
@@ -25,8 +25,8 @@ export async function getLorriesAction(): Promise<ActionResult<StoredLorry[]>> {
       const now = Date.now();
       const HEARTBEAT_STALE_MS = 180_000;
       const [liveSnap, lorriesSnap] = await Promise.all([
-        getDocs(collection(db, "lorries_live")),
-        getDocs(collection(db, "lorries")),
+        getDocs(query(collection(db, "lorries_live"), where("isLive", "==", true))),
+        getDocs(query(collection(db, "lorries"), where("isLive", "==", true))),
       ]);
       const merged = new Map<string, StoredLorry>();
 

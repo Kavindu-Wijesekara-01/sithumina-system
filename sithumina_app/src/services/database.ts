@@ -2,19 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { apiFetch } from "../config/api";
 import { db } from "../config/firebase";
 import { SRI_LANKA_CITIES } from "../data/sri-lanka-cities";
-import {
-  doc,
-  setDoc,
-  deleteDoc,
-  runTransaction,
-  getDoc,
-  getDocs,
-  collection,
-  query,
-  where,
-  onSnapshot,
-  updateDoc,
-} from "firebase/firestore";
+import { doc, setDoc, deleteDoc, runTransaction, getDoc, getDocs, collection, query, where, onSnapshot, updateDoc, orderBy, limit } from "firebase/firestore";
 
 /**
  * Recursively strips undefined keys so Firestore setDoc / updateDoc never fails with
@@ -336,13 +324,16 @@ export interface RegisterDriverInput {
  */
 /** Reserve the next Driver ID (D-10, D-11 ...) using the same counter as the web. */
 export async function generateUniqueDriverId(): Promise<string> {
-  const existing = await getDocs(collection(db, "drivers"));
-  let highest = 9;
-  existing.forEach((d) => {
-    const match = d.id.match(/^D-(\d+)$/i);
-    if (match) highest = Math.max(highest, Number(match[1]));
-  });
   const counterRef = doc(db, "counters", "driver_ids");
+  let highest = 9;
+  // Only needed before the counter exists
+  if (!(await getDoc(counterRef)).exists()) {
+    const existing = await getDocs(collection(db, "drivers"));
+    existing.forEach((d) => {
+      const match = d.id.match(/^D-(\d+)$/i);
+      if (match) highest = Math.max(highest, Number(match[1]));
+    });
+  }
   return runTransaction(db, async (tx) => {
     let next = Math.max(Number((await tx.get(counterRef)).data()?.last) || 0, highest) + 1;
     while (
@@ -1121,7 +1112,7 @@ export function subscribeAdminLorries(
 
   try {
     unsubLive = onSnapshot(
-      collection(db, "lorries_live"),
+      query(collection(db, "lorries_live"), where("isLive", "==", true)),
       (snapshot) => {
         liveMap.clear();
         snapshot.forEach((d) => {
@@ -1146,7 +1137,7 @@ export function subscribeAdminLorries(
 
   try {
     unsubLorries = onSnapshot(
-      collection(db, "lorries"),
+      query(collection(db, "lorries"), where("isLive", "==", true)),
       (snapshot) => {
         fallbackMap.clear();
         snapshot.forEach((d) => {
@@ -1294,7 +1285,7 @@ export function subscribeAdminBookings(
 
   let unsubscribeFs = () => {};
   try {
-    const colRef = collection(db, "bookings");
+    const colRef = query(collection(db, "bookings"), orderBy("createdAt", "desc"), limit(200));
     unsubscribeFs = onSnapshot(
       colRef,
       (snapshot) => {
@@ -1402,7 +1393,7 @@ export function subscribeAdminRegistrations(
 
   let unsubscribeFs = () => {};
   try {
-    const colRef = collection(db, "vehicle_registrations");
+    const colRef = query(collection(db, "vehicle_registrations"), orderBy("createdAt", "desc"), limit(200));
     unsubscribeFs = onSnapshot(
       query(colRef),
       (snapshot) => {
@@ -1524,7 +1515,7 @@ export function subscribeAdminReviews(
   let unsubscribeFs = () => {};
 
   try {
-    const colRef = collection(db, "reviews");
+    const colRef = query(collection(db, "reviews"), orderBy("createdAt", "desc"), limit(100));
     unsubscribeFs = onSnapshot(
       query(colRef),
       (snapshot) => {
@@ -2004,7 +1995,7 @@ export function subscribeAdminComplaints(
   let unsubscribeFs = () => {};
 
   try {
-    const colRef = collection(db, "complaints");
+    const colRef = query(collection(db, "complaints"), orderBy("deletedAt", "desc"), limit(200));
     unsubscribeFs = onSnapshot(
       query(colRef),
       (snapshot) => {

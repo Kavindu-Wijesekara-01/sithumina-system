@@ -5,14 +5,14 @@ import {
   addInquiryInStore,
   updateInquiryStatusInStore,
 } from "@/lib/server-store";
-import { db } from "@/lib/fs-server";
+import { db, query, orderBy, limit } from "@/lib/fs-server";
 import { collection, getDocs, doc, setDoc } from "@/lib/fs-server";
 
 export async function GET() {
   const auth = await authorize("admin");
   if (!auth.ok) return deniedResponse(auth.denied);
   try {
-    const snap = await getDocs(collection(db, "inquiries"));
+    const snap = await getDocs(query(collection(db, "inquiries"), orderBy("createdAt", "desc"), limit(300)));
     const inquiries = snap.docs
       .map((d) => {
         const data = d.data();
