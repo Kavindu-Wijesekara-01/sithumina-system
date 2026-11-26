@@ -6,7 +6,8 @@ import Constants from "expo-constants";
 const DEFAULT_LAN_IP = "10.150.41.72";
 
 // Production Vercel backend fallback
-const PRODUCTION_WEB_URL = "https://sithumina-system.vercel.app";
+// Must be the final domain: a redirect would drop the sign-in token from requests
+const PRODUCTION_WEB_URL = "https://www.sithuminatransport.lk";
 
 export function getBaseApiUrl(): string {
   // 1. Explicit environment variable takes top precedence
@@ -45,13 +46,14 @@ export function getBaseApiUrl(): string {
 }
 
 /**
- * Perform a resilient fetch to the backend server with an automatic 2-second timeout
+ * Perform a resilient fetch to the backend server with a timeout
  * so the UI NEVER hangs or buffers indefinitely.
  */
 export async function apiFetch<T = any>(
   endpoint: string,
   options: RequestInit = {},
-  timeoutMs: number = 2500
+  // Long enough for a server cold start
+  timeoutMs: number = 15000
 ): Promise<{ success: boolean; data?: T; error?: string }> {
   const baseUrl = getBaseApiUrl();
   const url = `${baseUrl}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
