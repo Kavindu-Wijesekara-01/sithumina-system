@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "486400018510",
+    "project_id": "sithumina-transport-f7759",
+    "storage_bucket": "sithumina-transport-f7759.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:486400018510:android:b69b508dbd0e49c63edb1f",
+        "android_client_info": {
+          "package_name": "com.sithumina.driver"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB_xPlPUdeUvcZkhMNDUqKEW6PbEFrtZR0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

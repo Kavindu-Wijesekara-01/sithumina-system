@@ -19,6 +19,7 @@
     },
     "android": {
       "package": "com.sithumina.driver",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#FFC20E",
         "foregroundImage": "./assets/android-icon-foreground.png"
@@ -73,7 +74,8 @@
           ],
           "color": "#FFC20E"
         }
-      ]
+      ],
+      "expo-asset"
     ],
     "extra": {
       "eas": {
