@@ -28,6 +28,9 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Matches the session cookie lifetime in app/api/auth/session
+const SESSION_MS = 5 * 24 * 60 * 60 * 1000;
+
 /** The server needs a cookie to recognise this browser in Server Actions and APIs. */
 async function startServerSession(user: User): Promise<boolean> {
   const res = await fetch("/api/auth/session", {
@@ -50,7 +53,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       onIdTokenChanged(auth, async (current) => {
         setUser(current);
         try {
-          const claims = current ? (await current.getIdTokenResult()).claims : null;
+          const token = current ? await current.getIdTokenResult() : null;
+          // The server cookie lasts five days; end the browser sign-in with it
+          if (token && Date.now() - Date.parse(token.authTime) > SESSION_MS) {
+            await endServerSession();
+            await signOut(auth);
+            return;
+          }
+          const claims = token?.claims;
           const role = claims?.role as Role | undefined;
           setProfile(
             current && role
