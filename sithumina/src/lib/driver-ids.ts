@@ -5,8 +5,8 @@
  * server instances can never hand out the same ID. Errors are deliberately NOT
  * swallowed: if Firestore cannot be reached, no ID is issued.
  */
-import { db } from "@/lib/firebase";
-import { collection, doc, getDocs, runTransaction, type Transaction } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { collection, doc, getDocs, runTransaction, type Transaction } from "@/lib/fs-server";
 
 const COUNTER_PATH = ["counters", "driver_ids"] as const;
 const FIRST_ID_NUMBER = 10;

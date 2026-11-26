@@ -1,5 +1,6 @@
 "use client";
 
+import SignInForm from "@/components/auth/SignInForm";
 import { todayYmd } from "@/lib/ledger";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
@@ -10,8 +11,8 @@ import { StoredBooking, PaymentSlipStatus } from "@/lib/server-store";
 import { phonesMatch, normalizePlate, normalizePhoneNumber } from "@/lib/phone-utils";
 import { formatTimeDurationLabel } from "@/lib/booking-schedule";
 import { db } from "@/lib/firebase";
-import { collection, onSnapshot } from "firebase/firestore";
-import { subscribeFleetVehicles, subscribeAdminDrivers, AdminDriverRecord } from "@/lib/db-services";
+import { collection, onSnapshot, query, where } from "firebase/firestore";
+import { subscribeFleetVehicles, AdminDriverRecord } from "@/lib/db-services";
 import {
   BankAccountSetting,
   subscribePaymentBankAccounts,
@@ -32,7 +33,7 @@ function isRealDriverName(val: unknown): string {
 
 export default function CustomerPortalPage() {
   const { locale } = useLanguage();
-  const { profile, loginWithPhone, logout } = useAuth();
+  const { profile, logout } = useAuth();
   const { lorries } = useLiveLorries();
 
   const [fleetVehicles, setFleetVehicles] = useState<Lorry[]>([]);
@@ -66,27 +67,16 @@ export default function CustomerPortalPage() {
       if (urlTab === "employee") {
         setAccountMode("employee");
       }
-      const urlPhone = sp.get("phone");
-      if (urlPhone) {
-        setPhone(urlPhone);
-        if (!profile?.phone) {
-          void loginWithPhone(urlPhone, "1234", "customer");
-        }
-      }
     }
 
     const unsubFleet = subscribeFleetVehicles((vehicles) => {
       setFleetVehicles(vehicles);
-    });
-    const unsubDrivers = subscribeAdminDrivers((drivers) => {
-      setDriversList(drivers);
     });
     const unsubBanks = subscribePaymentBankAccounts((accs) => {
       setBankAccounts(accs);
     });
     return () => {
       unsubFleet();
-      unsubDrivers();
       unsubBanks();
     };
   }, []);
@@ -207,7 +197,8 @@ export default function CustomerPortalPage() {
       })();
 
       try {
-        const colRef = collection(db, "bookings");
+        // Rules allow a customer to read only their own bookings
+        const colRef = query(collection(db, "bookings"), where("customerPhone", "==", customerPhone));
         const unsub = onSnapshot(
           colRef,
           (snap) => {
@@ -331,46 +322,14 @@ export default function CustomerPortalPage() {
           );
           return;
         }
-        const exact =
-          res.data.find((b) => String(b.id || "").toUpperCase() === upper) ||
-          res.data[0];
-        if (!exact?.customerPhone) {
-          setLookupError(
-            locale === "en"
-              ? "This booking does not have a customer phone number attached."
-              : "මෙම වෙන්කිරීමට දුරකථන අංකයක් සම්බන්ධ කර නොමැත."
-          );
-          return;
-        }
-        const ok = await loginWithPhone(exact.customerPhone, "1234", "customer", {
-          name: exact.customerName || undefined,
-        });
-        if (ok) {
-          setLookupInput("");
-          setShowLookupForm(false);
-        }
+        setLookupInput("");
+        setShowLookupForm(false);
       } else {
-        const digits = raw.replace(/[^0-9]/g, "");
-        if (digits.length < 8) {
-          setLookupError(
-            locale === "en"
-              ? "Enter a valid phone number (at least 9 digits) or Booking ID (e.g. ST-BK-6602)."
-              : "කරුණාකර වලංගු දුරකථන අංකයක් හෝ Booking ID (උදා: ST-BK-6602) ඇතුළත් කරන්න."
-          );
-          return;
-        }
-        const normalized = normalizePhoneNumber(raw) || raw;
-        const ok = await loginWithPhone(normalized, "1234", "customer");
-        if (ok) {
-          setLookupInput("");
-          setShowLookupForm(false);
-        } else {
-          setLookupError(
-            locale === "en"
-              ? "Could not switch account. Please retry."
-              : "ගිණුම මාරු කිරීමට නොහැකි විය. නැවත උත්සාහ කරන්න."
-          );
-        }
+        setLookupError(
+          locale === "en"
+            ? "Enter a booking ID. To see another number's bookings, sign out and sign in with that number."
+            : "Booking ID එකක් ඇතුළත් කරන්න. වෙනත් අංකයක වෙන්කිරීම් බැලීමට එම අංකයෙන් පිවිසෙන්න."
+        );
       }
     } catch {
       setLookupError(
@@ -403,47 +362,6 @@ export default function CustomerPortalPage() {
   const isBookingsLoading =
     Boolean(profile?.phone) &&
     (loadingBookings || loadedPhoneKey !== profile?.phone);
-
-  const handleCustomerLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!phone.trim()) {
-      setErrorMessage(
-        locale === "en"
-          ? "Please enter your mobile phone number."
-          : "කරුණාකර ඔබගේ ජංගම දුරකථන අංකය ඇතුළත් කරන්න."
-      );
-      return;
-    }
-
-    const cleanIdNumber = idNumber.trim();
-    if (!cleanIdNumber) {
-      setErrorMessage(
-        locale === "en"
-          ? "Please enter your National ID Number (NIC)."
-          : "කරුණාකර ඔබගේ ජාතික හැඳුනුම්පත් අංකය (NIC) ඇතුළත් කරන්න."
-      );
-      return;
-    }
-
-    setIsSubmitting(true);
-    setErrorMessage(null);
-    try {
-      const cleanName = name.trim();
-      const success = await loginWithPhone(phone, "1234", "customer", {
-        name: cleanName || undefined,
-        idNumber: cleanIdNumber,
-      });
-      if (!success) {
-        setErrorMessage(
-          locale === "en"
-            ? "Could not sign in. Please verify your connection."
-            : "ලොග් වීමට නොහැකි විය. කරුණාකර නැවත උත්සාහ කරන්න."
-        );
-      }
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
 
   const handleSignOut = async () => {
     unsubRef.current?.();
@@ -1023,150 +941,8 @@ export default function CustomerPortalPage() {
       ) : (
         <>
       {/* STATE 1: NOT LOGGED IN */}
-      {!mounted || !profile ? (
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-5 sm:gap-6 items-start">
-          <div className="md:col-span-7 bg-[var(--card)] rounded-2xl border border-[var(--line)] p-5 sm:p-7 shadow-xs">
-            <div className="flex items-center gap-3.5 mb-6">
-              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-[#FFC20E] to-[#E5AA00] flex items-center justify-center shadow-xs flex-shrink-0">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#26231B" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
-                </svg>
-              </div>
-              <div>
-                <h2 className="text-base sm:text-lg font-black text-[var(--ink)]">
-                  {locale === "en" ? "Customer Sign In" : "පාරිභෝගික ගිණුමට පිවිසෙන්න"}
-                </h2>
-                <p className="text-xs text-[var(--mut)] mt-0.5">
-                  {locale === "en"
-                    ? "Enter the phone number used for your booking"
-                    : "වෙන්කිරීම සිදු කළ ඔබගේ දුරකථන අංකය ඇතුළත් කරන්න"}
-                </p>
-              </div>
-            </div>
-
-            {errorMessage && (
-              <div className="p-3.5 mb-4 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 font-bold">
-                {errorMessage}
-              </div>
-            )}
-
-            <form onSubmit={handleCustomerLogin} className="flex flex-col gap-4">
-              <div>
-                <label className="block text-xs font-extrabold text-[var(--ink)] mb-1.5">
-                  {locale === "en" ? "Your Name (Optional)" : "ඔබගේ නම (විකල්ප)"}
-                </label>
-                <input
-                  suppressHydrationWarning
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] focus:outline-none focus:border-[var(--ink)] transition-colors"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-extrabold text-[var(--ink)] mb-1.5">
-                  {locale === "en" ? "National ID Number (NIC) *" : "ජාතික හැඳුනුම්පත් අංකය (NIC) *"}
-                  <span className="text-red-600 ml-1 font-bold">({locale === "en" ? "Mandatory" : "අනිවාර්යයි"})</span>
-                </label>
-                <input
-                  suppressHydrationWarning
-                  type="text"
-                  value={idNumber}
-                  onChange={(e) => setIdNumber(e.target.value)}
-                  required
-                  placeholder={locale === "en" ? "e.g. 199012345678 or 901234567V" : "උදා: 199012345678 හෝ 901234567V"}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] font-mono uppercase focus:outline-none focus:border-[var(--ink)] transition-colors"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-extrabold text-[var(--ink)] mb-1.5">
-                  {locale === "en" ? "Mobile Phone Number *" : "ජංගම දුරකථන අංකය *"}
-                </label>
-                <input
-                  suppressHydrationWarning
-                  type="tel"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  required
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] font-mono focus:outline-none focus:border-[var(--ink)] transition-colors"
-                />
-                <p className="text-[11px] text-[var(--mut)] mt-1.5">
-                  {locale === "en"
-                    ? "All pending and approved bookings for this phone number load live."
-                    : "මෙම දුරකථන අංකයට අදාළ සියලුම Pending සහ අනුමත කළ වෙන්කිරීම් සජීවීව පෙන්වනු ඇත."}
-                </p>
-              </div>
-
-              <button
-                type="submit"
-                disabled={isSubmitting}
-                className="mt-2 w-full py-3 rounded-xl bg-[var(--y)] hover:bg-[#f0b400] text-[#26231B] text-sm font-black border-0 cursor-pointer active:scale-[0.99] transition-all flex items-center justify-center gap-2 shadow-xs"
-              >
-                {isSubmitting ? (
-                  <span>{locale === "en" ? "Signing In..." : "පිවිසෙමින්..."}</span>
-                ) : (
-                  <span>{locale === "en" ? "Sign In / View My Bookings" : "ඇතුල් වන්න / මගේ වෙන්කිරීම් බලන්න"}</span>
-                )}
-              </button>
-            </form>
-
-            <div className="mt-6 pt-5 border-t border-[var(--line)] flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--mut)]">
-              <span>{locale === "en" ? "Want to book an individual vehicle?" : "නව වාහනයක් වෙන්කරගැනීමට අවශ්‍යද?"}</span>
-              <Link href="/book-vehicle" className="font-extrabold text-[#5B4300] hover:underline no-underline">
-                {locale === "en" ? "Book Vehicle →" : "වෙන්කරන්න →"}
-              </Link>
-            </div>
-          </div>
-
-          <div className="md:col-span-5 rounded-2xl bg-gradient-to-br from-[#FFFDF6] to-[#FFF6D6]/60 border border-[var(--line)] p-5 sm:p-6 flex flex-col gap-4 shadow-xs">
-            <span className="text-[11px] font-black uppercase tracking-wider text-[#7A5600]">
-              {locale === "en" ? "What You Can Manage" : "ගිණුමෙන් සිදු කළ හැකි දේ"}
-            </span>
-            <div className="flex flex-col gap-3.5 text-xs">
-              <div className="flex items-start gap-3">
-                <span className="w-7 h-7 rounded-lg bg-[#FFC20E]/25 text-[#5B4300] flex items-center justify-center font-black flex-shrink-0">1</span>
-                <div>
-                  <p className="font-extrabold text-[var(--ink)]">
-                    {locale === "en" ? "Live Quotes & Payment Slips" : "මිල ගණන් සහ Slip Upload කිරීම"}
-                  </p>
-                  <p className="text-[var(--mut)] mt-0.5 leading-relaxed">
-                    {locale === "en"
-                      ? "Check Head Office transport quotes and submit your bank transfer slip directly."
-                      : "ප්‍රධාන කාර්යාලය එවන මිල ගණන් බලා ගෙවීම් slip එක මෙතැනින්ම යොමු කරන්න."}
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-start gap-3">
-                <span className="w-7 h-7 rounded-lg bg-[#E6F4EA] text-[#137333] flex items-center justify-center font-black flex-shrink-0">2</span>
-                <div>
-                  <p className="font-extrabold text-[var(--ink)]">
-                    {locale === "en" ? "Locked Calendar & Progress" : "දින වෙන්වීම සහ ප්‍රගතිය"}
-                  </p>
-                  <p className="text-[var(--mut)] mt-0.5 leading-relaxed">
-                    {locale === "en"
-                      ? "Track approval milestones in real time as your vehicle reservation is confirmed."
-                      : "ඔබේ වෙන්කිරීම අනුමත වී දිනය ස්ථිර වන ආකාරය සජීවීව බලාගන්න."}
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-start gap-3">
-                <span className="w-7 h-7 rounded-lg bg-white border border-[var(--line)] text-[var(--ink)] flex items-center justify-center font-black flex-shrink-0">3</span>
-                <div>
-                  <p className="font-extrabold text-[var(--ink)]">
-                    {locale === "en" ? "Direct Driver Contact" : "රියදුරු දුරකථන අංකය"}
-                  </p>
-                  <p className="text-[var(--mut)] mt-0.5 leading-relaxed">
-                    {locale === "en"
-                      ? "View assigned lorry plate and call your driver in one tap once dispatched."
-                      : "රියදුරු වෙන් කළ පසු ඔහුගේ අංකයට එක ක්ලික් එකකින් ඇමතීමට හැකිය."}
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+      {!mounted || profile?.role !== "customer" ? (
+        <SignInForm role="customer" />
       ) : (
         /* STATE 2: LOGGED IN ACCOUNT DASHBOARD */
         <div className="flex flex-col gap-5 sm:gap-6">

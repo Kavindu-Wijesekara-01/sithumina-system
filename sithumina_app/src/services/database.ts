@@ -236,8 +236,27 @@ export function resolveCityCoordinates(txt: string): [number, number] | null {
   return null;
 }
 
-export const ADMIN_SECRET_ID = "sithuminaadmin$";
 const LOCAL_DRIVERS_KEY = "@sithumina_local_drivers_cache";
+
+async function getCachedDrivers(): Promise<DriverRecord[]> {
+  try {
+    const raw = await AsyncStorage.getItem(LOCAL_DRIVERS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveCachedDriver(driver: DriverRecord): Promise<void> {
+  try {
+    const drivers = await getCachedDrivers();
+    const filtered = drivers.filter((d) => d.driverId !== driver.driverId && d.plate !== driver.plate);
+    filtered.unshift(driver);
+    await AsyncStorage.setItem(LOCAL_DRIVERS_KEY, JSON.stringify(filtered));
+  } catch (err) {
+    console.warn("Could not cache driver locally:", err);
+  }
+}
 
 /**
  * Guarantee a valid single-segment Firestore document ID for "lorries" collection.
@@ -337,40 +356,8 @@ export async function generateUniqueDriverId(): Promise<string> {
   });
 }
 
-/**
- * Helper to get locally cached drivers from AsyncStorage
- */
-async function getCachedDrivers(): Promise<DriverRecord[]> {
-  try {
-    const raw = await AsyncStorage.getItem(LOCAL_DRIVERS_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
 
-/**
- * Helper to save drivers to local AsyncStorage
- */
-async function saveCachedDriver(driver: DriverRecord): Promise<void> {
-  try {
-    const drivers = await getCachedDrivers();
-    const filtered = drivers.filter(
-      (d) => d.driverId !== driver.driverId && d.plate !== driver.plate
-    );
-    filtered.unshift(driver);
-    await AsyncStorage.setItem(LOCAL_DRIVERS_KEY, JSON.stringify(filtered));
-  } catch (err) {
-    console.warn("Could not cache driver locally:", err);
-  }
-}
 
-/**
- * Check if the entered ID matches Admin format
- */
-export function isAdminId(id: string): boolean {
-  return id.trim() === ADMIN_SECRET_ID;
-}
 
 /**
  * Register a new Driver (Admin action)
@@ -619,141 +606,6 @@ export async function deleteDriverFromDb(driverId: string): Promise<boolean> {
   return true;
 }
 
-/**
- * Verify driver login with their generated Driver ID or plate
- * Online-authoritative (Firestore -> Central API) with offline-only cache fallback.
- */
-export async function verifyDriverLogin(
-  rawId: string
-): Promise<DriverRecord | null> {
-  const cleanId = rawId.trim().toUpperCase();
-  if (!cleanId) return null;
-  const cleanDigits = cleanId.replace(/[^0-9]/g, "");
-
-  let onlineResolved = false;
-
-  // 1. Authoritative Firestore query with 4s timeout
-  try {
-    const firestoreQuery = async (): Promise<{ resolved: boolean; driver: DriverRecord | null }> => {
-      try {
-        const directDoc = await getDoc(doc(db, "drivers", cleanId));
-        if (directDoc.exists()) {
-          const data = directDoc.data() as DriverRecord;
-          const resolvedDriverId = String(data.driverId || directDoc.id);
-          const resolvedLorryId = resolveSafeLorryDocId(data.lorryId, data.plate, resolvedDriverId);
-          if ((!data.lorryId || !String(data.lorryId).trim()) && resolvedLorryId) {
-            setDoc(doc(db, "drivers", directDoc.id), { lorryId: resolvedLorryId }, { merge: true }).catch(() => {});
-          }
-          const record: DriverRecord = {
-            ...data,
-            id: directDoc.id,
-            driverId: resolvedDriverId,
-            lorryId: resolvedLorryId,
-          };
-          return { resolved: true, driver: record };
-        }
-
-        const snap = await getDocs(collection(db, "drivers"));
-        let found: DriverRecord | null = null;
-        snap.forEach((d) => {
-          if (found) return;
-          const data = d.data() as DriverRecord;
-          const dId = String(data.driverId || d.id).trim().toUpperCase();
-          const dPlate = String(data.plate || "").trim().toUpperCase();
-          const dPhone = String(data.phone || "").replace(/\s+/g, "").toUpperCase();
-          const dPhoneDigits = String(data.phone || "").replace(/[^0-9]/g, "");
-          const match =
-            dId === cleanId ||
-            (dPlate && dPlate === cleanId) ||
-            (dPhone && dPhone === cleanId.replace(/\s+/g, "")) ||
-            (cleanDigits.length >= 7 && dPhoneDigits === cleanDigits);
-          if (match) {
-            const resolvedDriverId = String(data.driverId || d.id);
-            const resolvedLorryId = resolveSafeLorryDocId(data.lorryId, data.plate, resolvedDriverId);
-            if ((!data.lorryId || !String(data.lorryId).trim()) && resolvedLorryId) {
-              setDoc(doc(db, "drivers", d.id), { lorryId: resolvedLorryId }, { merge: true }).catch(() => {});
-            }
-            found = {
-              ...data,
-              id: d.id,
-              driverId: resolvedDriverId,
-              lorryId: resolvedLorryId,
-            };
-          }
-        });
-        return { resolved: true, driver: found };
-      } catch {
-        return { resolved: false, driver: null };
-      }
-    };
-
-    const timeoutPromise = new Promise<{ resolved: boolean; driver: DriverRecord | null }>((resolve) =>
-      setTimeout(() => resolve({ resolved: false, driver: null }), 4000)
-    );
-
-    const fsResult = await Promise.race([firestoreQuery(), timeoutPromise]);
-    if (fsResult.resolved) {
-      onlineResolved = true;
-      if (fsResult.driver) {
-        await saveCachedDriver(fsResult.driver);
-        return fsResult.driver;
-      }
-    }
-  } catch {
-    // Fall through to API check
-  }
-
-  // 2. Central Web Backend API (/api/drivers/[id]) check
-  try {
-    const apiRes = await apiFetch<{ driver: DriverRecord }>(
-      `/api/drivers/${encodeURIComponent(cleanId)}`
-    );
-    if (apiRes.success) {
-      onlineResolved = true;
-      if (apiRes.data?.driver) {
-        const d = apiRes.data.driver;
-        const normalizedDriver: DriverRecord = {
-          ...d,
-          lorryId: resolveSafeLorryDocId(d.lorryId, d.plate, d.driverId || d.id),
-        };
-        await saveCachedDriver(normalizedDriver);
-        return normalizedDriver;
-      }
-      // Explicitly null / not found online -> do NOT fall back to stale cache
-      return null;
-    }
-  } catch (err) {
-    console.warn("API driver query notice:", err);
-  }
-
-  // If Firestore succeeded and found no matching driver, reject deleted/nonexistent driver
-  if (onlineResolved) {
-    try {
-      const cached = await getCachedDrivers();
-      const filtered = cached.filter(
-        (d) =>
-          d.driverId.toUpperCase() !== cleanId &&
-          d.plate.toUpperCase() !== cleanId
-      );
-      await AsyncStorage.setItem(LOCAL_DRIVERS_KEY, JSON.stringify(filtered));
-    } catch {}
-    return null;
-  }
-
-  // 3. Offline-only local cache fallback when both Firestore and API are unreachable
-  const cachedDrivers = await getCachedDrivers();
-  const localMatch = cachedDrivers.find(
-    (d) =>
-      d.driverId.toUpperCase() === cleanId ||
-      d.plate.toUpperCase() === cleanId ||
-      (d.phone && d.phone.replace(/\s+/g, "") === cleanId.replace(/\s+/g, ""))
-  );
-  if (!localMatch) return null;
-  return {
-    ...localMatch,
-    lorryId: resolveSafeLorryDocId(localMatch.lorryId, localMatch.plate, localMatch.driverId || localMatch.id),
-  };
-}
 
 /**
  * Fetch all registered drivers for Admin dashboard

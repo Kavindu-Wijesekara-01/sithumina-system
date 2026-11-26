@@ -1,3 +1,4 @@
+import { authorize, deniedResponse, driverOwnsBooking, driverOwnsVehicle, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { NextResponse } from "next/server";
 import {
   getAllStoredBookings,
@@ -15,14 +16,14 @@ import {
   hasAssignedRider,
   validateTimeRange,
 } from "@/lib/booking-schedule";
-import { db } from "@/lib/firebase";
+import { db } from "@/lib/fs-server";
 import { closeDispatchesForBooking } from "@/lib/dispatch-sync";
 import { deleteBookingAction, updateBookingStatusAction } from "@/actions/bookings";
 import { syncHireCommission } from "@/lib/outside-owners";
 import { refreshVehicleTripState } from "@/lib/trip-workflow";
 import { tripFields } from "@/lib/trip-state";
 import { todayYmd } from "@/lib/ledger";
-import { collection, getDocs, getDoc, doc, setDoc, updateDoc, deleteDoc, query, where } from "firebase/firestore";
+import { collection, getDocs, getDoc, doc, setDoc, updateDoc, deleteDoc, query, where } from "@/lib/fs-server";
 
 function isRealDriverName(val: unknown): string {
   const s = String(val || "").trim();
@@ -55,8 +56,11 @@ async function getCombinedBookingsForSchedule() {
 }
 
 export async function GET(request: Request) {
+  const auth = await authorize("admin", "customer");
+  if (!auth.ok) return deniedResponse(auth.denied);
   const { searchParams } = new URL(request.url);
-  const phone = searchParams.get("phone")?.trim() || "";
+  const phone =
+    auth.session.role === "customer" ? auth.session.customerPhone : searchParams.get("phone")?.trim() || "";
 
   try {
     const [snap, dispSnap, drvSnap] = await Promise.all([
@@ -246,6 +250,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const auth = await authorize("admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const body = await request.json();
     const customerName = (body.customerName || body.name || "Customer").toString().trim();
@@ -395,6 +401,20 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return deniedResponse(auth.denied);
+  if (auth.session.role === "driver") {
+    // Drivers may only record the route of a trip that is theirs and in progress
+    const body = await request.clone().json().catch(() => ({}));
+    const permitted = ["id", "status", "driverTripStatus", "waypoints", "travelRoute"];
+    const limited =
+      body.status === "in_transit" &&
+      [undefined, "in_transit"].includes(body.driverTripStatus) &&
+      Object.keys(body).every((key) => permitted.includes(key));
+    if (!limited || !(await driverOwnsBooking(auth.session, String(body.id || "")))) {
+      return deniedResponse(FORBIDDEN);
+    }
+  }
   try {
     const body = await request.json();
     const {
@@ -636,6 +656,8 @@ export async function PATCH(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  const auth = await authorize("admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   const { searchParams } = new URL(request.url);
   const id = searchParams.get("id") || "";
   const reason = searchParams.get("reason") || "";

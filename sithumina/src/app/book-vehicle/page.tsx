@@ -317,7 +317,7 @@ function FleetVehicleCard({
 
 function BookVehicleContent() {
   const { locale } = useLanguage();
-  const { profile, loginWithPhone } = useAuth();
+  const { profile } = useAuth();
   const searchParams = useSearchParams();
 
   const queryPlate = searchParams.get("plate");
@@ -610,17 +610,6 @@ function BookVehicleContent() {
       });
 
       if (res.success) {
-        // Connect customer session automatically so "My Account" Dashboard displays this booking live
-        if (!profile || profile.role !== "admin") {
-          const resolvedCustomerName =
-            form.customerName?.trim() ||
-            (profile?.name && profile.name !== "Valued Customer" ? profile.name : "") ||
-            undefined;
-          await loginWithPhone(cleanPhone, "1234", "customer", {
-            name: resolvedCustomerName,
-            idNumber: cleanIdNumber,
-          });
-        }
         setSubmittedBooking({
           id: res.data.id,
           trackingId: res.data.trackingId,

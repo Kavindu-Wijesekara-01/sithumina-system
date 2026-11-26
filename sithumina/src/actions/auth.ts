@@ -1,5 +1,6 @@
 "use server";
 
+import { authorize } from "@/lib/auth/server";
 import {
   upsertCustomerInStore,
   deleteCustomerFromStore,
@@ -11,115 +12,8 @@ import {
 } from "@/lib/server-store";
 import { normalizePhoneNumber, phonesMatch, getCanonicalCustomerId } from "@/lib/phone-utils";
 import { ActionResult } from "./types";
-import { db } from "@/lib/firebase";
-import { collection, deleteDoc, doc, getDocs, setDoc, updateDoc } from "firebase/firestore";
-
-/**
- * Server Action for Customer login or instant profile provisioning.
- */
-export async function loginCustomerAction(
-  phone: string,
-  name?: string,
-  idNumber?: string
-): Promise<ActionResult<StoredCustomer>> {
-  try {
-    const rawPhone = phone?.trim();
-    const canonicalPhone = normalizePhoneNumber(rawPhone);
-    if (!canonicalPhone || canonicalPhone.length < 8) {
-      return { success: false, error: "Please enter a valid phone number." };
-    }
-
-    const cleanInputName = name?.trim();
-    const cleanIdNumber = idNumber?.trim();
-    const isGenericName =
-      !cleanInputName ||
-      cleanInputName === "Valued Customer" ||
-      cleanInputName === "Customer";
-
-    // Preserve existing stored customer name from users or bookings when logging in with phone only
-    const isRealName = (n?: string) => {
-      const t = String(n || "").trim();
-      return Boolean(t && t !== "Valued Customer" && t !== "Customer" && !t.startsWith("Customer ("));
-    };
-
-    let matchedExistingName = "";
-    const existingCustomers = await getAllStoredCustomers();
-    const existingLocalCust = existingCustomers.find(
-      (c) => phonesMatch(c.phone, canonicalPhone) && isRealName(c.name)
-    );
-    if (existingLocalCust) {
-      matchedExistingName = existingLocalCust.name;
-    }
-
-    if (isGenericName && !matchedExistingName) {
-      try {
-        const usersSnap = await getDocs(collection(db, "users"));
-        for (const d of usersSnap.docs) {
-          const data = d.data();
-          if (phonesMatch(data.phone, canonicalPhone) && isRealName(data.name)) {
-            matchedExistingName = String(data.name).trim();
-            break;
-          }
-        }
-        if (!matchedExistingName) {
-          const bkSnap = await getDocs(collection(db, "bookings"));
-          for (const d of bkSnap.docs) {
-            const data = d.data();
-            if (
-              phonesMatch(data.customerPhone || data.phone, canonicalPhone) &&
-              isRealName(data.customerName || data.name)
-            ) {
-              matchedExistingName = String(data.customerName || data.name).trim();
-              break;
-            }
-          }
-        }
-      } catch {
-        // fallback to generic if Firestore lookup fails
-      }
-    }
-
-    const resolvedName = !isGenericName
-      ? cleanInputName
-      : matchedExistingName || "Valued Customer";
-
-    const customer = await upsertCustomerInStore({
-      phone: canonicalPhone,
-      name: resolvedName,
-      idNumber: cleanIdNumber,
-    });
-
-    try {
-      const docRef = doc(db, "users", customer.id);
-      await setDoc(
-        docRef,
-        {
-          uid: customer.id,
-          phone: customer.phone,
-          name: customer.name,
-          role: "customer",
-          idNumber: customer.idNumber || cleanIdNumber || "",
-          createdAt: customer.createdAt,
-          lastLoginAt: customer.lastLoginAt,
-        },
-        { merge: true }
-      );
-    } catch (cloudErr) {
-      console.warn("Customer Firestore sync notice:", cloudErr);
-    }
-
-    return {
-      success: true,
-      data: customer,
-    };
-  } catch (err: unknown) {
-    console.error("loginCustomerAction error:", err);
-    return {
-      success: false,
-      error: "Authentication error. Please retry.",
-    };
-  }
-}
+import { db } from "@/lib/fs-server";
+import { collection, deleteDoc, doc, getDocs, setDoc, updateDoc } from "@/lib/fs-server";
 
 async function fetchDriversAuthoritative(): Promise<StoredDriver[]> {
   try {
@@ -147,48 +41,6 @@ async function fetchDriversAuthoritative(): Promise<StoredDriver[]> {
 }
 
 /**
- * Server Action for Driver login authentication.
- */
-export async function loginDriverAction(
-  identifier: string,
-  _pin: string
-): Promise<ActionResult<StoredDriver>> {
-  try {
-    const clean = identifier?.trim().toUpperCase();
-    if (!clean) {
-      return { success: false, error: "Driver ID or Plate Number is required." };
-    }
-
-    const drivers = await fetchDriversAuthoritative();
-    const cleanCompact = clean.replace(/\s+/g, "");
-    const match = drivers.find(
-      (d) =>
-        d.driverId.toUpperCase() === clean ||
-        d.plate.toUpperCase() === clean ||
-        (d.phone && d.phone.replace(/\s+/g, "").toUpperCase() === cleanCompact)
-    );
-
-    if (!match) {
-      return {
-        success: false,
-        error: "Driver account not found. Please verify your Driver ID or registered Plate.",
-      };
-    }
-
-    return {
-      success: true,
-      data: match,
-    };
-  } catch (err: unknown) {
-    console.error("loginDriverAction error:", err);
-    return {
-      success: false,
-      error: "Driver login failed.",
-    };
-  }
-}
-
-/**
  * Server Action to register/save a customer profile cleanly (e.g. from Admin Manual Booking).
  */
 export async function registerCustomerAction(input: {
@@ -198,6 +50,8 @@ export async function registerCustomerAction(input: {
   city?: string;
   email?: string;
 }): Promise<ActionResult<StoredCustomer>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const rawPhone = String(input.phone || "").trim();
     const canonicalPhone = normalizePhoneNumber(rawPhone);
@@ -260,6 +114,8 @@ export async function deleteCustomerAction(input: {
   phone?: string;
   deleteBookings?: boolean;
 }): Promise<ActionResult<{ deletedUserDocs: number; affectedBookings: number }>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const cleanId = String(input.customerId || "").trim();
     const cleanPhone = String(input.phone || "").trim();
@@ -355,6 +211,8 @@ export async function deleteCustomerAction(input: {
  * Server Action to get all registered customers (merged Firestore + local store).
  */
 export async function getCustomersAction(): Promise<ActionResult<StoredCustomer[]>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const localCustomers = await getAllStoredCustomers();
     const byKey = new Map<string, StoredCustomer>();
@@ -433,6 +291,8 @@ export async function getCustomersAction(): Promise<ActionResult<StoredCustomer[
  * Server Action to get all registered drivers.
  */
 export async function getDriversAction(): Promise<ActionResult<StoredDriver[]>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const drivers = await fetchDriversAuthoritative();
     return {

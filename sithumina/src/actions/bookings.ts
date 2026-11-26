@@ -1,5 +1,6 @@
 "use server";
 
+import { authorize, driverOwnsBooking, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { revalidatePath } from "next/cache";
 import {
   createBookingInStore,
@@ -45,7 +46,7 @@ import {
   getDatesBetween,
 } from "@/lib/booking-schedule";
 import { ActionResult, BookingActionInput } from "./types";
-import { db } from "@/lib/firebase";
+import { db } from "@/lib/fs-server";
 import {
   collection,
   deleteDoc,
@@ -56,7 +57,7 @@ import {
   getDocs,
   query,
   where,
-} from "firebase/firestore";
+} from "@/lib/fs-server";
 
 function isRealDriverName(val: unknown): string {
   const s = String(val || "").trim();
@@ -242,10 +243,18 @@ async function syncBookingDispatchDoc(
     (plateNorm ? `lorry-${plateNorm.toLowerCase()}` : "")
   ).trim();
 
+  // The Driver App can only read jobs that name its driver
+  let resolvedDriverId = String(extra?.driverId || booking.assignedDriverId || "").toUpperCase();
+  if (!resolvedDriverId && plateNorm) {
+    const drivers = await getDocs(collection(db, "drivers"));
+    const match = drivers.docs.find((d) => normalizePlate(d.data().plate) === plateNorm);
+    if (match) resolvedDriverId = String(match.data().driverId || match.id).toUpperCase();
+  }
+
   const existing = (await getDoc(doc(db, "dispatches", dispatchDocId))).data();
   // Map pins live on the cloud record; the legacy local copy may not have them
   const cloud = (await getDoc(doc(db, "bookings", booking.id))).data() || {};
-  const newDriverId = String(extra?.driverId || booking.assignedDriverId || "").toUpperCase();
+  const newDriverId = resolvedDriverId;
   // A different driver or vehicle means a fresh job that has to be accepted again
   const reassigned = Boolean(
     existing &&
@@ -335,7 +344,7 @@ async function syncBookingDispatchDoc(
       updatedAt: Date.now(),
       createdAt: booking.createdAt || Date.now(),
     };
-    if (extra?.driverId) dispatchPayload.driverId = extra.driverId;
+    if (newDriverId) dispatchPayload.driverId = newDriverId;
     if (resolvedDriverName) dispatchPayload.driverName = resolvedDriverName;
     if (resolvedDriverPhone) dispatchPayload.driverPhone = resolvedDriverPhone;
 
@@ -505,6 +514,8 @@ async function fetchBookingsAuthoritative(): Promise<StoredBooking[]> {
 export async function createBookingAction(
   input: BookingActionInput
 ): Promise<ActionResult<{ id: string; trackingId: string; booking: StoredBooking }>> {
+  const session = await getSession();
+  if (session?.role !== "admin") input = publicBookingInput(input);
   try {
     // 1. Rigorous input validation
     const pickup = input.pickup?.trim();
@@ -824,6 +835,8 @@ export async function createBookingAction(
 export async function trackBookingAction(
   searchQuery: string
 ): Promise<ActionResult<StoredBooking[]>> {
+  const auth = await authorize("admin", "customer");
+  if (!auth.ok) return auth.denied;
   try {
     const q = searchQuery?.trim();
     if (!q) {
@@ -848,9 +861,12 @@ export async function trackBookingAction(
       return idMatch || plateMatch || cityMatch || phoneMatch;
     });
 
-    return {
-      success: true,
-      data: matches,
+    if (auth.session.role === "customer") {
+      const own = (b: { customerPhone?: string }) => phonesMatch(b.customerPhone, auth.session.customerPhone);
+      const found: any = matches;
+      if (Array.isArray(found) ? !found.every(own) : found && !own(found)) return FORBIDDEN;
+    }
+    return { success: true, data: matches,
     };
   } catch (err: unknown) {
     console.error("trackBookingAction error:", err);
@@ -867,6 +883,9 @@ export async function trackBookingAction(
 export async function getCustomerBookingsAction(
   customerPhone: string
 ): Promise<ActionResult<StoredBooking[]>> {
+  const auth = await authorize("admin", "customer");
+  if (!auth.ok) return auth.denied;
+  if (auth.session.role === "customer") customerPhone = auth.session.customerPhone;
   try {
     const phone = customerPhone?.trim();
     if (!phone) {
@@ -894,6 +913,8 @@ export async function getCustomerBookingsAction(
  * Server Action to retrieve all bookings (for dispatch / admin).
  */
 export async function getAllBookingsAction(): Promise<ActionResult<StoredBooking[]>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const bookings = await fetchBookingsAuthoritative();
     return {
@@ -1049,6 +1070,13 @@ export async function updateBookingStatusAction(
     paymentSlipDeletedAt?: number;
   }
 ): Promise<ActionResult<StoredBooking>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
+  if (auth.session.role === "driver") {
+    // A driver may only move their own trip forward, never touch money or assignment
+    const allowed = ["in_transit", "delivered"].includes(status) && !assignment && !paymentMeta;
+    if (!allowed || !(await driverOwnsBooking(auth.session, id))) return FORBIDDEN;
+  }
   try {
     if (!id) {
       return { success: false, error: "Booking ID is required." };
@@ -1546,6 +1574,8 @@ export async function editBookingAction(
     assignedDriverPhone?: string;
   }
 ): Promise<ActionResult<StoredBooking>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const cleanId = (id || "").trim();
     if (!cleanId) return { success: false, error: "Booking ID is required." };
@@ -1605,6 +1635,8 @@ export async function editBookingAction(
  * Transitions booking to in_transit and sets rideStartedAt.
  */
 export async function startRideAction(bookingId: string): Promise<ActionResult<StoredBooking>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const cleanId = (bookingId || "").trim();
     if (!cleanId) return { success: false, error: "Booking ID required." };
@@ -1666,6 +1698,9 @@ export async function startRideAction(bookingId: string): Promise<ActionResult<S
 export async function endRideAction(
   bookingId: string
 ): Promise<ActionResult<{ booking: StoredBooking; isPaymentPending: boolean }>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
+  if (auth.session.role === "driver" && !(await driverOwnsBooking(auth.session, bookingId))) return FORBIDDEN;
   try {
     const cleanId = (bookingId || "").trim();
     if (!cleanId) return { success: false, error: "Booking ID required." };
@@ -1747,6 +1782,9 @@ export async function driverAcceptBookingAction(
   bookingId: string,
   accept: boolean
 ): Promise<ActionResult<StoredBooking>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
+  if (auth.session.role === "driver" && !(await driverOwnsBooking(auth.session, bookingId))) return FORBIDDEN;
   try {
     const cleanId = (bookingId || "").trim();
     const dispatchId = `dispatch-${cleanId}`;
@@ -1778,6 +1816,9 @@ export async function driverUpdateTripRouteAction(
   waypoints: Array<{ name: string; lat: number; lng: number }>,
   actualDistanceKm: number
 ): Promise<ActionResult<StoredBooking>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
+  if (auth.session.role === "driver" && !(await driverOwnsBooking(auth.session, bookingId))) return FORBIDDEN;
   try {
     const cleanId = (bookingId || "").trim();
     const updated = await updateBookingInStore(cleanId, {
@@ -1816,6 +1857,9 @@ export async function driverShareLiveGpsAction(
   heading: number = 0,
   speedKmH: number = 0
 ): Promise<ActionResult<StoredBooking>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
+  if (auth.session.role === "driver" && !(await driverOwnsBooking(auth.session, bookingId))) return FORBIDDEN;
   try {
     const cleanId = (bookingId || "").trim();
     const now = Date.now();
@@ -1902,6 +1946,9 @@ export async function driverToggleEmptyReturnAction(
   returnDistanceKm?: number,
   returnRoute?: string
 ): Promise<ActionResult<StoredBooking>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
+  if (auth.session.role === "driver" && !(await driverOwnsBooking(auth.session, bookingId))) return FORBIDDEN;
   try {
     const cleanId = (bookingId || "").trim();
     const now = Date.now();
@@ -1948,6 +1995,10 @@ export async function driverToggleEmptyReturnAction(
 export async function getDriverAssignedBookingsAction(
   driverIdOrPlate: string
 ): Promise<ActionResult<StoredBooking[]>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
+  // Drivers can only ever ask for their own jobs
+  if (auth.session.role === "driver") driverIdOrPlate = auth.session.driverId;
   try {
     const clean = (driverIdOrPlate || "").trim().toLowerCase();
     const cleanPlateNorm = normalizePlate(clean);
@@ -1982,6 +2033,8 @@ export async function deleteBookingAction(
   requesterPhone?: string,
   deletedBy?: string
 ): Promise<ActionResult<{ deletedId: string; complaintId: string }>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const cleanId = (id || "").trim();
     if (!cleanId) {
@@ -2105,6 +2158,8 @@ export async function deleteBookingAction(
  * Server Action to fetch all recorded complaints and cancellation reasons.
  */
 export async function getAllComplaintsAction(): Promise<ActionResult<StoredComplaint[]>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const localComplaints = await getAllStoredComplaints();
     const map = new Map<string, StoredComplaint>();
@@ -2152,4 +2207,14 @@ async function refreshTripsSafely(...plates: Array<string | undefined>): Promise
       console.error(`Live trip state refresh failed for ${plate}:`, e);
     }
   }
+}
+
+/** Visitors may request a booking, but never set its status, price or payment. */
+function publicBookingInput(input: BookingActionInput): BookingActionInput {
+  const {
+    status, quotedAmount, quoteNote, paymentMethod, paymentBankUsed, advanceAmount, pendingAmount,
+    finalPaymentMethod, finalPaymentBankUsed, finalPaymentAt, paymentSlipStatus, paymentApprovedAt,
+    startTime, endTime, distanceKm, ...request
+  } = input;
+  return request;
 }

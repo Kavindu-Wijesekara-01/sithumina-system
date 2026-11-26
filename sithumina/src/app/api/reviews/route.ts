@@ -1,7 +1,8 @@
+import { authorize, deniedResponse, driverOwnsBooking, driverOwnsVehicle, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { NextResponse } from "next/server";
 import { addReviewInStore, deleteReviewFromStore } from "@/lib/server-store";
-import { db } from "@/lib/firebase";
-import { collection, getDocs, doc, setDoc, deleteDoc } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { collection, getDocs, doc, setDoc, deleteDoc } from "@/lib/fs-server";
 
 export async function GET() {
   try {
@@ -79,6 +80,8 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  const auth = await authorize("admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const { searchParams } = new URL(request.url);
     let id = searchParams.get("id");

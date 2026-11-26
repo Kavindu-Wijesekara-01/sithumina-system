@@ -2,8 +2,8 @@
  * Sends the "new job" push notification to the assigned driver's phone
  * through the Expo push service.
  */
-import { db } from "@/lib/firebase";
-import { collection, getDocs } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { collection, getDocs } from "@/lib/fs-server";
 import { normalizeVehicleKey } from "@/lib/trip-state";
 
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";

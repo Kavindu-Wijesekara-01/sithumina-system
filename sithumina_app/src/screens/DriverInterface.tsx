@@ -32,6 +32,8 @@ import {
   doc,
   setDoc,
   updateDoc,
+  query,
+  where,
 } from "firebase/firestore";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
@@ -390,8 +392,9 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     // Individual vehicle bookings are handled completely by Admin and never streamed to driver phones
     const unsubBookingsGuard = () => {};
 
+    // A driver can only read the jobs addressed to them
     const unsubDispatches = onSnapshot(
-      collection(db, "dispatches"),
+      query(collection(db, "dispatches"), where("driverId", "==", driverIdUpper)),
       (snap) => {
         latestSnapDocs = snap.docs.map((d) => ({
           id: d.id,

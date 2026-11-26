@@ -1,69 +1,145 @@
 rules_version = '2';
+
+/*
+ * Role-based access. Roles are custom claims set only by the server:
+ *   role: "admin" | "driver" | "customer"
+ *   driverId (drivers and external owners), customerPhone (customers)
+ *
+ * The web server uses the Admin SDK, which is not subject to these rules, so
+ * anything done through Server Actions or API routes needs no write rule here.
+ * Everything not listed is denied.
+ */
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Public Read Access for Fleet & Live Tracking
-    // Required so website visitors and customers can see available lorries & live GPS routes
-    match /lorries/{lorryId} {
+
+    function signedIn() { return request.auth != null; }
+    function isAdmin() { return signedIn() && request.auth.token.get('role', '') == 'admin'; }
+    function isDriver() { return signedIn() && request.auth.token.get('role', '') == 'driver'; }
+    function isCustomer() { return signedIn() && request.auth.token.get('role', '') == 'customer'; }
+    function driverId() { return request.auth.token.get('driverId', ''); }
+    function phone() { return request.auth.token.get('customerPhone', ''); }
+
+    // True for the signed-in driver's own record
+    function isSelf(id) { return isDriver() && id == driverId(); }
+
+    // Only these fields differ between the stored and the new document
+    function changesOnly(fields) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields);
+    }
+
+    // ---------------------------------------------------------- Public site data
+    match /lorries_registry/{id} {
       allow read: if true;
-      allow write: if true;
+      allow write: if isAdmin();
     }
-    
-    match /lorries_live/{lorryId} {
+    match /active_trips/{id} { allow read: if true; allow write: if false; }
+    match /reviews/{id}      { allow read: if true; allow write: if isAdmin(); }
+    match /banners/{id}      { allow read: if true; allow write: if isAdmin(); }
+    // Company bank accounts are shown to customers who need to pay
+    match /settings/payment_accounts { allow read: if true; allow write: if isAdmin(); }
+
+    // ------------------------------------------------------------ Live vehicles
+    // A driver may broadcast only documents carrying their own Driver ID
+    function driverBroadcast() {
+      return isDriver()
+        && request.resource.data.get('driverId', '') == driverId()
+        && (resource == null || resource.data.get('driverId', driverId()) == driverId());
+    }
+    match /lorries/{id} {
       allow read: if true;
-      allow write: if true;
+      allow create, update: if isAdmin() || driverBroadcast();
+      allow delete: if isAdmin();
     }
-
-    match /lorries_registry/{lorryId} {
+    match /lorries_live/{id} {
       allow read: if true;
-      allow write: if true;
+      allow create, update: if isAdmin() || driverBroadcast();
+      allow delete: if isAdmin() || (isDriver() && resource.data.get('driverId', '') == driverId());
     }
 
-    match /drivers/{driverId} {
-      allow read: if true;
-      allow write: if true;
+    // ----------------------------------------------------------------- Drivers
+    match /drivers/{id} {
+      allow read: if isAdmin() || isSelf(id);
+      allow create, delete: if isAdmin();
+      // Identity and vehicle can be changed only by the office
+      allow update: if isAdmin()
+        || (isSelf(id) && changesOnly(['expoPushToken', 'pushUpdatedAt', 'lorryId', 'updatedAt']));
     }
 
-    match /dispatches/{dispatchId} {
-      allow read: if true;
-      allow write: if true;
+    // ---------------------------------------------------------------- Bookings
+    function ownsBooking(data) { return isCustomer() && data.get('customerPhone', '') == phone(); }
+    function drivesBooking(data) { return isDriver() && data.get('assignedDriverId', '') == driverId(); }
+
+    // What a customer changes when uploading or removing their payment slip
+    function slipUpdate() {
+      return changesOnly([
+          'status', 'paymentMethod', 'paymentBankUsed', 'finalPaymentMethod', 'finalPaymentBankUsed',
+          'paymentSlipId', 'paymentSlipName', 'paymentSlipType', 'paymentSlipSize',
+          'paymentSlipUploadedAt', 'paymentSlipStatus', 'paymentRejectReason',
+          'paymentSlipDeletedAt', 'updatedAt'
+        ])
+        && (request.resource.data.status == resource.data.status
+            || (request.resource.data.status in ['payment_submitted', 'awaiting_payment']
+                && resource.data.status in ['pending', 'awaiting_payment', 'payment_submitted']))
+        // A customer can submit a slip for review but never approve it
+        && request.resource.data.get('paymentSlipStatus', '') in ['pending_review', 'deleted', 'none'];
     }
 
-    match /bookings/{bookingId} {
-      allow read, write: if true;
+    match /bookings/{id} {
+      allow read: if isAdmin() || ownsBooking(resource.data) || drivesBooking(resource.data);
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin()
+        || (ownsBooking(resource.data) && slipUpdate())
+        || (drivesBooking(resource.data) && changesOnly(['waypoints', 'travelRoute', 'updatedAt']));
     }
 
-    match /users/{userId} {
-      allow read, write: if true;
+    // -------------------------------------------------------------- Dispatches
+    match /dispatches/{id} {
+      allow read: if isAdmin() || (isDriver() && resource.data.get('driverId', '') == driverId());
+      allow create, delete: if isAdmin();
+      // Accept, Loaded and Dropped go through the server
+      allow update: if isAdmin()
+        || (isDriver() && resource.data.get('driverId', '') == driverId()
+            && changesOnly(['waypoints', 'travelRoute', 'updatedAt']));
     }
 
-    match /customers/{customerId} {
-      allow read, write: if true;
+    // ------------------------------------------------------------ Bank slips
+    match /payment_slips/{slipId} {
+      allow read: if isAdmin() || ownsBooking(resource.data);
+      allow create: if isAdmin()
+        || (ownsBooking(request.resource.data) && request.resource.data.status == 'pending_review');
+      allow update: if isAdmin();
+      allow delete: if isAdmin() || ownsBooking(resource.data);
+
+      match /chunks/{chunkId} {
+        function slip() { return get(/databases/$(database)/documents/payment_slips/$(slipId)).data; }
+        allow read, delete: if isAdmin() || ownsBooking(slip());
+        allow create: if isAdmin() || ownsBooking(slip());
+        allow update: if isAdmin();
+      }
     }
 
-    match /reviews/{reviewId} {
-      allow read: if true;
-      allow write: if true;
+    // ------------------------------------------------- Owner wallets and money
+    match /outside_employees/{id} {
+      allow read: if isAdmin() || isSelf(id);
+      allow write: if isAdmin();
     }
+    match /commission_transactions/{id} {
+      allow read: if isAdmin() || (isDriver() && resource.data.get('employeeId', '') == driverId());
+      allow write: if false;
+    }
+    match /outside_topup_slips/{id} {
+      allow read: if isAdmin() || (isDriver() && resource.data.get('employeeId', '') == driverId());
+      allow write: if false;
+    }
+    match /payment_reversals/{id} { allow read: if isAdmin(); allow write: if false; }
 
-    match /inquiries/{inquiryId} {
-      allow read, write: if true;
-    }
-
-    match /banners/{bannerId} {
-      allow read: if true;
-      allow write: if true;
-    }
-
-    match /registrations/{regId} {
-      allow read: if true;
-      allow write: if true;
-    }
-
-    // Default fallback
-    match /{document=**} {
-      allow read, write: if true;
-    }
+    // ------------------------------------------------------------- Office only
+    match /vehicle_registrations/{id} { allow read, write: if isAdmin(); }
+    match /inquiries/{id}             { allow read, write: if isAdmin(); }
+    match /users/{id}                 { allow read, write: if isAdmin(); }
+    // Audit records are permanent
+    match /complaints/{id}            { allow read: if isAdmin(); allow write: if false; }
+    // The admin app reserves Driver IDs
+    match /counters/driver_ids        { allow read, write: if isAdmin(); }
   }
 }
-

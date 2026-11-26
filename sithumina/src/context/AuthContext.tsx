@@ -1,270 +1,110 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useState } from "react";
-import {
-  User,
-  signInAnonymously,
-  signOut,
-  onAuthStateChanged,
-} from "firebase/auth";
-import { doc, getDoc, setDoc } from "firebase/firestore";
-import { auth, db } from "@/lib/firebase";
-import {
-  normalizePhoneNumber,
-  getCanonicalCustomerId,
-} from "@/lib/phone-utils";
+import { onIdTokenChanged, signInWithEmailAndPassword, signOut, type User } from "firebase/auth";
+import { auth } from "@/lib/firebase";
+import { loginEmail, type Role } from "@/lib/auth/identity";
 
-export type UserRole = "driver" | "customer" | "admin";
+export type UserRole = Role;
 
 export interface UserProfile {
   uid: string;
-  phone: string;
   role: UserRole;
   name: string;
+  /** Customers only, as stored on their bookings (0XXXXXXXXX). */
+  phone: string;
+  /** Drivers and external owners only. */
+  driverId: string;
   idNumber?: string;
-  plateNumber?: string;
-  assignedLorryId?: string;
-  createdAt: number;
 }
 
 interface AuthContextType {
   user: User | null;
   profile: UserProfile | null;
   loading: boolean;
-  role: UserRole;
-  loginWithPhone: (
-    phone: string,
-    pin: string,
-    role: UserRole,
-    extra?: { name?: string; plateNumber?: string; idNumber?: string }
-  ) => Promise<boolean>;
-  loginAsAdmin: () => Promise<boolean>;
+  signIn: (identifier: string, password: string) => Promise<{ ok: boolean; error?: string }>;
   logout: () => Promise<void>;
-  updateDriverLorry: (lorryId: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const LOCAL_STORAGE_PROFILE_KEY = "sithumina_user_profile";
+/** The server needs a cookie to recognise this browser in Server Actions and APIs. */
+async function startServerSession(user: User): Promise<boolean> {
+  const res = await fetch("/api/auth/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idToken: await user.getIdToken(true) }),
+  });
+  return res.ok;
+}
+
+const endServerSession = () => fetch("/api/auth/session", { method: "DELETE" }).catch(() => {});
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Listen to Firebase Auth state & hydrate localStorage safely on mount
-  useEffect(() => {
-    // 1. Hydrate cached profile from localStorage on client mount (safe after hydration)
-    const getSavedProfile = (): UserProfile | null => {
-      try {
-        const raw = localStorage.getItem(LOCAL_STORAGE_PROFILE_KEY);
-        if (!raw) return null;
-        const parsed = JSON.parse(raw) as UserProfile;
-        if (parsed && parsed.role === "customer" && parsed.phone) {
-          const canonicalPhone = normalizePhoneNumber(parsed.phone) || parsed.phone.trim();
-          const canonicalUid = getCanonicalCustomerId(canonicalPhone);
-          const normalizedProfile: UserProfile = {
-            ...parsed,
-            uid: parsed.uid?.startsWith("cust-") || !parsed.uid ? canonicalUid : parsed.uid,
-            phone: canonicalPhone,
-          };
-          if (normalizedProfile.uid !== parsed.uid || normalizedProfile.phone !== parsed.phone) {
-            localStorage.setItem(LOCAL_STORAGE_PROFILE_KEY, JSON.stringify(normalizedProfile));
-          }
-          return normalizedProfile;
-        }
-        return parsed;
-      } catch {
-        return null;
-      }
-    };
-
-    const initialSaved = getSavedProfile();
-    if (initialSaved) {
-      setProfile(initialSaved);
-    }
-
-    // 2. Listen to Firebase Auth state without overwriting an active customer's phone session
-    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
-      setUser(fbUser);
-      const activeSaved = getSavedProfile();
-
-      if (fbUser) {
-        // Never allow an anonymous/Firebase Auth UID to clobber a logged-in customer phone session
-        if (activeSaved && activeSaved.role === "customer" && activeSaved.uid !== fbUser.uid) {
-          setProfile(activeSaved);
-          setLoading(false);
-          return;
-        }
-
+  useEffect(
+    () =>
+      onIdTokenChanged(auth, async (current) => {
+        setUser(current);
         try {
-          const userDoc = await getDoc(doc(db, "users", fbUser.uid));
-          if (userDoc.exists()) {
-            const data = userDoc.data() as UserProfile;
-            if (data && (data.phone || data.role === "admin")) {
-              setProfile(data);
-              localStorage.setItem(LOCAL_STORAGE_PROFILE_KEY, JSON.stringify(data));
-            }
-          }
-        } catch (e) {
-          console.warn("Could not fetch user document:", e);
-        }
-      } else {
-        if (!activeSaved) {
-          setProfile(null);
-        } else {
-          setProfile(activeSaved);
-        }
-      }
-      setLoading(false);
-    });
-
-    return () => unsubscribe();
-  }, []);
-
-  const loginWithPhone = async (
-    phone: string,
-    _pin: string,
-    _selectedRole: UserRole,
-    extra?: { name?: string; plateNumber?: string; idNumber?: string }
-  ): Promise<boolean> => {
-    try {
-      const canonicalPhone = normalizePhoneNumber(phone) || phone.trim();
-      const canonicalUid = getCanonicalCustomerId(canonicalPhone);
-
-      // Helper so client login state transition never stalls on slow WebChannel/server latency
-      const withTimeout = <T,>(promise: Promise<T>, ms: number, fallback: T): Promise<T> =>
-        Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
-
-      // 1. Sync to Central Store & canonical users/{uid} via Server Action (bounded 3.5s)
-      let customerName = extra?.name?.trim() || "";
-      let customerIdNumber = extra?.idNumber?.trim() || "";
-      let resolvedUid = canonicalUid;
-      try {
-        const { loginCustomerAction } = await import("@/actions");
-        const res = await withTimeout(
-          loginCustomerAction(canonicalPhone, customerName || undefined, customerIdNumber || undefined),
-          3500,
-          null
-        );
-        if (res && res.success && res.data) {
-          if (res.data.name) customerName = res.data.name;
-          if (res.data.idNumber) customerIdNumber = res.data.idNumber;
-          if (res.data.id) resolvedUid = res.data.id;
-        }
-      } catch (e) {
-        console.warn("Server action customer login notice:", e);
-      }
-
-      if (!customerName || customerName === "Valued Customer" || customerName === "Customer") {
-        try {
-          const existingSnap = await withTimeout(
-            getDoc(doc(db, "users", resolvedUid)),
-            2000,
-            null
+          const claims = current ? (await current.getIdTokenResult()).claims : null;
+          const role = claims?.role as Role | undefined;
+          setProfile(
+            current && role
+              ? {
+                  uid: current.uid,
+                  role,
+                  name: current.displayName || String(claims?.driverId || claims?.customerPhone || "Admin"),
+                  phone: String(claims?.customerPhone || ""),
+                  driverId: String(claims?.driverId || ""),
+                }
+              : null
           );
-          if (existingSnap && existingSnap.exists()) {
-            const existingName = String(existingSnap.data()?.name || "").trim();
-            if (existingName && existingName !== "Valued Customer" && existingName !== "Customer") {
-              customerName = existingName;
-            }
-          }
         } catch {
-          // non-blocking
+          setProfile(null);
         }
-      }
+        setLoading(false);
+      }),
+    []
+  );
 
-      const newProfile: UserProfile = {
-        uid: resolvedUid,
-        phone: canonicalPhone,
-        role: "customer", // Web platform is exclusively for customers
-        name: customerName || "Valued Customer",
-        ...(customerIdNumber ? { idNumber: customerIdNumber } : {}),
-        ...(extra?.plateNumber ? { plateNumber: extra.plateNumber } : {}),
-        createdAt: Date.now(),
-      };
-
-      // Update React state & localStorage immediately without blocking on Firestore WebChannel commit ack
-      setProfile(newProfile);
-      localStorage.setItem(LOCAL_STORAGE_PROFILE_KEY, JSON.stringify(newProfile));
-
-      // Background client Firestore sync (Server Action also persists users/{resolvedUid})
-      void setDoc(doc(db, "users", resolvedUid), newProfile, { merge: true }).catch(() => {});
-      return true;
-    } catch (err) {
-      console.error("Login failed:", err);
-      return false;
-    }
-  };
-
-  const loginAsAdmin = async (): Promise<boolean> => {
+  const signIn = async (identifier: string, password: string) => {
+    const email = loginEmail(identifier);
+    if (!email || !password) return { ok: false, error: "Enter your phone number or ID, and your password." };
     try {
-      let fbUser = auth.currentUser;
-      if (!fbUser) {
-        const cred = await signInAnonymously(auth);
-        fbUser = cred.user;
+      const credential = await signInWithEmailAndPassword(auth, email, password);
+      if (!(await startServerSession(credential.user))) {
+        await signOut(auth);
+        return { ok: false, error: "Sign-in could not be verified. Please try again." };
       }
-      const adminProfile: UserProfile = {
-        uid: fbUser.uid,
-        phone: "0112984984",
-        role: "admin",
-        name: "Sithumina Dispatch Chief",
-        createdAt: Date.now(),
-      };
-      try {
-        await setDoc(doc(db, "users", fbUser.uid), adminProfile, { merge: true });
-      } catch (e) {
-        console.warn(e);
-      }
-      setProfile(adminProfile);
-      localStorage.setItem(LOCAL_STORAGE_PROFILE_KEY, JSON.stringify(adminProfile));
-      return true;
+      return { ok: true };
     } catch (e) {
-      console.error(e);
-      return false;
+      const code = String((e as { code?: string }).code || "");
+      if (code === "auth/too-many-requests") {
+        return { ok: false, error: "Too many attempts. Wait a few minutes and try again." };
+      }
+      if (code === "auth/network-request-failed") {
+        return { ok: false, error: "No connection. Please try again." };
+      }
+      return { ok: false, error: "The phone number or ID, or the password, is incorrect." };
     }
   };
 
   const logout = async () => {
+    await endServerSession();
+    await signOut(auth).catch(() => {});
     try {
-      await signOut(auth);
-    } catch {
-      // ignore
-    }
-    setUser(null);
-    setProfile(null);
-    localStorage.removeItem(LOCAL_STORAGE_PROFILE_KEY);
-  };
-
-  const updateDriverLorry = async (lorryId: string) => {
-    if (!profile) return;
-    const updated = { ...profile, assignedLorryId: lorryId };
-    setProfile(updated);
-    localStorage.setItem(LOCAL_STORAGE_PROFILE_KEY, JSON.stringify(updated));
-    if (user) {
-      try {
-        await setDoc(doc(db, "users", user.uid), { assignedLorryId: lorryId }, { merge: true });
-      } catch {
-        // ignore
-      }
-    }
+      // Remove data cached by the earlier phone-only sign-in
+      localStorage.removeItem("sithumina_user_profile");
+      localStorage.removeItem("sithumina_outside_employee_session");
+    } catch {}
   };
 
   return (
-    <AuthContext.Provider
-      value={{
-        user,
-        profile,
-        loading,
-        role: profile?.role || "customer",
-        loginWithPhone,
-        loginAsAdmin,
-        logout,
-        updateDriverLorry,
-      }}
-    >
-      {children}
-    </AuthContext.Provider>
+    <AuthContext.Provider value={{ user, profile, loading, signIn, logout }}>{children}</AuthContext.Provider>
   );
 }
 

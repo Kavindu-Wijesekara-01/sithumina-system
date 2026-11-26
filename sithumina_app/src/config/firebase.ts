@@ -1,5 +1,15 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Platform } from "react-native";
+import * as FirebaseAuth from "firebase/auth";
+import { getAuth, initializeAuth, type Auth } from "firebase/auth";
+
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
+
+// Provided by the React Native build of firebase/auth but absent from its typings
+const { getReactNativePersistence } = FirebaseAuth as unknown as {
+  getReactNativePersistence: (storage: unknown) => FirebaseAuth.Persistence;
+};
 
 // Sithumina Transport Firebase Configuration loaded securely from environment variables
 const firebaseConfig = {
@@ -17,3 +27,14 @@ export const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getA
 
 // Initialize Firestore
 export const db = getFirestore(app);
+
+// Keep the user signed in across app restarts
+function createAuth(): Auth {
+  if (Platform.OS === "web") return getAuth(app);
+  try {
+    return initializeAuth(app, { persistence: getReactNativePersistence(AsyncStorage) });
+  } catch {
+    return getAuth(app);
+  }
+}
+export const auth = createAuth();

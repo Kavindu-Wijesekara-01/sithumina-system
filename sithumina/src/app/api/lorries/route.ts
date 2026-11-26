@@ -1,3 +1,4 @@
+import { authorize, deniedResponse, driverOwnsBooking, driverOwnsVehicle, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { NextResponse } from "next/server";
 import {
   getAllStoredLorries,
@@ -5,8 +6,8 @@ import {
   deleteLorryFromStore,
   upsertLorryInStore,
 } from "@/lib/server-store";
-import { db } from "@/lib/firebase";
-import { collection, getDocs, doc, setDoc, deleteDoc } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { collection, getDocs, doc, setDoc, deleteDoc } from "@/lib/fs-server";
 
 function mapFirestoreLorryDoc(d: any) {
   const data = d.data();
@@ -136,6 +137,13 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return deniedResponse(auth.denied);
+  if (auth.session.role === "driver") {
+    const body = await request.clone().json().catch(() => ({}));
+    const vehicle = String(body.plate || body.lorryId || body.id || "");
+    if (!(await driverOwnsVehicle(auth.session, vehicle))) return deniedResponse(FORBIDDEN);
+  }
   try {
     const body = await request.json();
     const {
@@ -234,6 +242,8 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  const auth = await authorize("admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const { searchParams } = new URL(request.url);
     let id = searchParams.get("id");

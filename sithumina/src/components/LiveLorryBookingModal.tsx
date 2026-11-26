@@ -3,7 +3,6 @@
 import { todayYmd } from "@/lib/ledger";
 import React, { useState } from "react";
 import { useLanguage } from "@/context/LanguageContext";
-import { useAuth } from "@/context/AuthContext";
 import { Lorry } from "@/lib/mock-lorries";
 import { createBookingAction } from "@/actions";
 import LocationPicker, { type Pin } from "@/components/LocationPicker";
@@ -33,7 +32,6 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
   onSuccess,
 }) => {
   const { locale } = useLanguage();
-  const { loginWithPhone } = useAuth();
 
   const [customerName, setCustomerName] = useState("");
   const [phone, setPhone] = useState("");
@@ -128,11 +126,6 @@ export const LiveLorryBookingModal: React.FC<LiveLorryBookingModalProps> = ({
 
       if (res.success && res.data?.id) {
         setCreatedBookingId(res.data.id);
-        try {
-          await loginWithPhone(cPhone, "1234", "customer", { name: cName, idNumber: cIdNumber });
-        } catch {
-          // ignore auto-login failure
-        }
         if (onSuccess) onSuccess(res.data.id);
       } else {
         const errText = !res.success ? res.error : undefined;

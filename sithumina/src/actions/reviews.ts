@@ -1,5 +1,6 @@
 "use server";
 
+import { authorize } from "@/lib/auth/server";
 import { revalidatePath } from "next/cache";
 import {
   addReviewInStore,
@@ -8,8 +9,8 @@ import {
   StoredReview,
 } from "@/lib/server-store";
 import { ActionResult, ReviewActionInput } from "./types";
-import { db } from "@/lib/firebase";
-import { collection, doc, deleteDoc, getDocs, setDoc } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { collection, doc, deleteDoc, getDocs, setDoc } from "@/lib/fs-server";
 
 /**
  * Server Action to submit customer feedback and ratings.
@@ -122,6 +123,8 @@ export async function getAllReviewsAction(): Promise<ActionResult<StoredReview[]
  * Server Action to delete a review from Firestore and memory store.
  */
 export async function deleteReviewAction(id: string): Promise<ActionResult<boolean>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     if (!id) {
       return { success: false, error: "Review ID is required." };

@@ -8,7 +8,7 @@
  *  - The balance may go negative. A low balance never blocks a hire.
  *  - Deposits and top-ups are company revenue, recorded with their method.
  */
-import { db } from "@/lib/firebase";
+import { db } from "@/lib/fs-server";
 import {
   collection,
   doc,
@@ -20,7 +20,7 @@ import {
   updateDoc,
   deleteDoc,
   where,
-} from "firebase/firestore";
+} from "@/lib/fs-server";
 import { reserveDriverIdInTransaction, scanHighestDriverNumber } from "@/lib/driver-ids";
 import { commissionFor, formatRs, COMMISSION_PERCENT, REGISTRATION_DEPOSIT } from "@/lib/commission";
 import type {
@@ -188,7 +188,6 @@ export async function createOutsideOwner(input: NewOwnerInput): Promise<StoredOu
       route,
       isOutsideLorry: true,
       ownershipType: "outside",
-      ownerIdNumber: input.idNumber,
       isAvailable: input.isAvailable,
       status: input.isAvailable ? "empty" : "on_trip",
       updatedAt: now,

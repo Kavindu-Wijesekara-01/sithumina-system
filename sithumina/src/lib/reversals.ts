@@ -1,8 +1,8 @@
 /**
  * Refund records for money received on a booking that is cancelled or deleted.
  */
-import { db } from "@/lib/firebase";
-import { collection, doc, getDocs, query, setDoc, updateDoc, where } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { collection, doc, getDocs, query, setDoc, updateDoc, where } from "@/lib/fs-server";
 import { paymentEntries, isExternalBooking, type LedgerBooking } from "@/lib/ledger";
 import { findOutsideOwnerByPlate } from "@/lib/outside-owners";
 

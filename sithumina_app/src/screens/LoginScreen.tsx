@@ -11,28 +11,22 @@ import {
   Platform,
   ScrollView,
 } from "react-native";
-import {
-  isAdminId,
-  verifyDriverLogin,
-  DriverRecord,
-} from "../services/database";
+import { signIn, type AppSession } from "../services/session";
 
 interface LoginScreenProps {
-  onLoginSuccess: (session: {
-    role: "admin" | "driver";
-    driver?: DriverRecord;
-  }) => void;
+  onLoginSuccess: (session: AppSession) => void;
 }
 
 export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   const [loginId, setLoginId] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleLogin = async () => {
     const trimmed = loginId.trim();
-    if (!trimmed) {
-      setErrorMessage("Please enter your ID");
+    if (!trimmed || !password) {
+      setErrorMessage("Enter your ID and password");
       return;
     }
 
@@ -40,29 +34,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
     setErrorMessage(null);
 
     try {
-      // 1. Admin login verification
-      if (isAdminId(trimmed)) {
-        setLoading(false);
-        onLoginSuccess({ role: "admin" });
-        return;
-      }
-
-      // 2. Driver login verification
-      const driver = await verifyDriverLogin(trimmed);
-      if (driver) {
-        setLoading(false);
-        onLoginSuccess({ role: "driver", driver });
-        return;
-      }
-
-      // Neither matched
-      setLoading(false);
-      setErrorMessage("Invalid ID. Please check and try again.");
+      onLoginSuccess(await signIn(trimmed, password));
     } catch (err: any) {
+      setErrorMessage(err?.message || "Sign-in failed. Please try again.");
+    } finally {
       setLoading(false);
-      setErrorMessage(
-        err?.message || "Connection failed. Please check internet."
-      );
     }
   };
 
@@ -105,7 +81,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
             <View style={styles.inputContainer}>
               <TextInput
                 style={styles.textInput}
-                placeholder="Enter ID (e.g. D-10, R-10)"
+                placeholder="Driver ID or Admin ID"
                 placeholderTextColor="#7D5E06"
                 value={loginId}
                 onChangeText={(text) => {
@@ -115,6 +91,25 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                 autoCapitalize="characters"
                 autoCorrect={false}
                 editable={!loading}
+              />
+            </View>
+
+            <View style={styles.inputContainer}>
+              <TextInput
+                style={styles.textInput}
+                placeholder="Password"
+                placeholderTextColor="#7D5E06"
+                value={password}
+                onChangeText={(text) => {
+                  setPassword(text);
+                  if (errorMessage) setErrorMessage(null);
+                }}
+                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+                textContentType="password"
+                editable={!loading}
+                onSubmitEditing={handleLogin}
               />
             </View>
 

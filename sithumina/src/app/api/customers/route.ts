@@ -1,12 +1,15 @@
+import { authorize, deniedResponse, driverOwnsBooking, driverOwnsVehicle, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { NextResponse } from "next/server";
 import {
   getAllStoredCustomers,
   upsertCustomerInStore,
 } from "@/lib/server-store";
-import { db } from "@/lib/firebase";
-import { collection, getDocs, doc, setDoc } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { collection, getDocs, doc, setDoc } from "@/lib/fs-server";
 
 export async function GET() {
+  const auth = await authorize("admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const snap = await getDocs(collection(db, "users"));
     const customers = snap.docs
@@ -32,6 +35,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const auth = await authorize("admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const body = await request.json();
     const { name, phone, email, city } = body;

@@ -1,5 +1,6 @@
 "use server";
 
+import { authorize, driverOwnsVehicle, FORBIDDEN } from "@/lib/auth/server";
 import { revalidatePath } from "next/cache";
 import {
   getAllStoredLorries,
@@ -11,9 +12,9 @@ import {
   StoredDriver,
 } from "@/lib/server-store";
 import { ActionResult, DriverRegistrationInput } from "./types";
-import { db } from "@/lib/firebase";
+import { db } from "@/lib/fs-server";
 import { allocateDriverId } from "@/lib/driver-ids";
-import { collection, doc, getDocs, setDoc, deleteDoc } from "firebase/firestore";
+import { collection, doc, getDocs, setDoc, deleteDoc } from "@/lib/fs-server";
 
 /**
  * Server Action to fetch all actively LIVE lorries directly from Firestore.
@@ -86,6 +87,9 @@ export async function updateLorryStatusAction(
   identifier: string,
   status: "empty" | "on_trip"
 ): Promise<ActionResult<StoredLorry>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
+  if (auth.session.role === "driver" && !(await driverOwnsVehicle(auth.session, identifier))) return FORBIDDEN;
   try {
     if (!identifier) {
       return { success: false, error: "Vehicle identifier is required." };
@@ -162,6 +166,9 @@ export async function updateLorryLocationAction(
   heading: number = 0,
   speedKmH: number = 0
 ): Promise<ActionResult<StoredLorry>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
+  if (auth.session.role === "driver" && !(await driverOwnsVehicle(auth.session, identifier))) return FORBIDDEN;
   try {
     if (!identifier) {
       return { success: false, error: "Vehicle identifier is required." };
@@ -216,6 +223,8 @@ export async function updateLorryLocationAction(
 export async function registerDriverAndLorryAction(
   input: DriverRegistrationInput
 ): Promise<ActionResult<{ driver: StoredDriver; lorry: StoredLorry }>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const name = input.name?.trim();
     const phone = input.phone?.trim();
@@ -265,6 +274,8 @@ export async function registerDriverAndLorryAction(
  * Server Action to delete a lorry from the fleet.
  */
 export async function deleteLorryAction(id: string): Promise<ActionResult<boolean>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     if (!id) {
       return { success: false, error: "Lorry ID is required." };

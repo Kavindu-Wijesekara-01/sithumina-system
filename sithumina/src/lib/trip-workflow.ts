@@ -6,7 +6,7 @@
  * Lock documents are read and written inside a transaction so two simultaneous
  * accepts cannot both become primary.
  */
-import { db } from "@/lib/firebase";
+import { db } from "@/lib/fs-server";
 import {
   collection,
   deleteDoc,
@@ -17,7 +17,7 @@ import {
   runTransaction,
   setDoc,
   where,
-} from "firebase/firestore";
+} from "@/lib/fs-server";
 import { isActiveTrip, normalizeVehicleKey, type TripRole } from "@/lib/trip-state";
 import { findOutsideOwnerByPlate, syncHireCommission } from "@/lib/outside-owners";
 import { outstandingAmount } from "@/lib/ledger";

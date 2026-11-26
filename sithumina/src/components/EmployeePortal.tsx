@@ -1,5 +1,7 @@
 "use client";
 
+import SignInForm from "@/components/auth/SignInForm";
+import { useAuth } from "@/context/AuthContext";
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import {
@@ -23,7 +25,7 @@ import {
 } from "@/lib/server-store";
 import { SRI_LANKA_CITIES, resolveLocationCoordinates } from "@/lib/sri-lanka-routes";
 import { db } from "@/lib/firebase";
-import { collection, onSnapshot } from "firebase/firestore";
+import { collection, onSnapshot, query, where } from "firebase/firestore";
 import {
   BankAccountSetting,
   subscribePaymentBankAccounts,
@@ -52,6 +54,8 @@ const WAYPOINT_CITY_CHOICES = [
 ];
 
 export default function EmployeePortal({ locale }: EmployeePortalProps) {
+  const { profile, logout } = useAuth();
+  const signedInDriverId = profile?.role === "driver" ? profile.driverId : "";
   const [employee, setEmployee] = useState<StoredOutsideEmployee | null>(null);
   const [transactions, setTransactions] = useState<StoredCommissionTransaction[]>([]);
   const [slips, setSlips] = useState<StoredTopupSlip[]>([]);
@@ -93,17 +97,6 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
 
   // Hydrate session from localStorage
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(LOCAL_STORAGE_EMP_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved) as StoredOutsideEmployee;
-        if (parsed?.idNumber) {
-          setEmployee(parsed);
-          void refreshEmployeeData(parsed.idNumber);
-        }
-      }
-    } catch {}
-
     const unsub = subscribePaymentBankAccounts((accs) => {
       if (accs && accs.length > 0) {
         setBankAccounts(accs.filter((a) => a.active));
@@ -111,6 +104,16 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
     });
     return () => unsub();
   }, []);
+
+  // Load this owner's records once they are signed in
+  useEffect(() => {
+    if (signedInDriverId) void refreshEmployeeData(signedInDriverId);
+    else {
+      setEmployee(null);
+      setTransactions([]);
+      setSlips([]);
+    }
+  }, [signedInDriverId]);
 
   const refreshEmployeeData = async (idNum: string) => {
     try {
@@ -126,10 +129,7 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
       const slipsRes = await getAllTopupSlipsAction();
       if (slipsRes.success && slipsRes.data) {
         setSlips(
-          slipsRes.data.filter(
-            (s) =>
-              (s.idNumber || "").trim().toLowerCase() === idNum.trim().toLowerCase()
-          )
+          slipsRes.data
         );
       }
     } catch (e) {
@@ -179,7 +179,8 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
     void loadDriverBookings(cleanDriverId || cleanPlate);
 
     try {
-      const unsub = onSnapshot(collection(db, "bookings"), (snap) => {
+      const mine = query(collection(db, "bookings"), where("assignedDriverId", "==", signedInDriverId));
+      const unsub = onSnapshot(mine, (snap) => {
         const list: StoredBooking[] = [];
         snap.forEach((d) => {
           const data = d.data() as StoredBooking;
@@ -394,58 +395,8 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
     }
   };
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanNic = nicInput.trim();
-    if (!cleanNic) {
-      setLoginError(
-        locale === "en"
-          ? "Please enter your National ID Number (NIC)."
-          : "කරුණාකර ඔබගේ ජාතික හැඳුනුම්පත් අංකය ඇතුළත් කරන්න."
-      );
-      return;
-    }
-
-    setLoggingIn(true);
-    setLoginError(null);
-    try {
-      const res = await loginOutsideEmployeeAction(cleanNic);
-      if (res.success) {
-        if (res.data) {
-          setEmployee(res.data.employee);
-          setTransactions(res.data.transactions || []);
-          try {
-            localStorage.setItem(LOCAL_STORAGE_EMP_KEY, JSON.stringify(res.data.employee));
-          } catch {}
-          void refreshEmployeeData(cleanNic);
-        }
-      } else {
-        setLoginError(
-          res.error ||
-            (locale === "en"
-              ? "No registered outside vehicle owner found with this ID Number. Make sure your lorry registration is approved by Admin."
-              : "මෙම හැඳුනුම්පත් අංකයට අදාළ ලියාපදිංචියක් හමු නොවීය. කරුණාකර ඔබගේ වාහන ලියාපදිංචිය Admin විසින් අනුමත (Approve) කර ඇත්දැයි තහවුරු කරගන්න.")
-        );
-      }
-    } catch {
-      setLoginError(
-        locale === "en"
-          ? "Failed to log in. Please check your connection."
-          : "පිවිසීම අසාර්ථක විය. කරුණාකර නැවත උත්සාහ කරන්න."
-      );
-    } finally {
-      setLoggingIn(false);
-    }
-  };
-
   const handleLogout = () => {
-    setEmployee(null);
-    setTransactions([]);
-    setSlips([]);
-    setNicInput("");
-    try {
-      localStorage.removeItem(LOCAL_STORAGE_EMP_KEY);
-    } catch {}
+    void logout();
   };
 
   const handleToggleDuty = async () => {
@@ -553,141 +504,16 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
   // -------------------------------------------------------------
   // VIEW A: NOT LOGGED IN (Employee Login Form)
   // -------------------------------------------------------------
+  if (!signedInDriverId) return <SignInForm role="driver" />;
   if (!employee) {
     return (
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-5 sm:gap-6 items-start">
-        <div className="md:col-span-7 bg-[var(--card)] rounded-3xl border border-[var(--line)] p-6 sm:p-8 shadow-xs">
-          <div className="flex items-center gap-3.5 mb-6">
-            <div className="w-12 h-12 rounded-2xl bg-[#26231B] text-[#FFC20E] flex items-center justify-center shadow-xs flex-shrink-0">
-              <svg
-                width="22"
-                height="22"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <rect x="1" y="3" width="15" height="13" />
-                <polygon points="16,8 20,8 23,11 23,16 16,16 16,8" />
-                <circle cx="5.5" cy="18.5" r="2.5" />
-                <circle cx="18.5" cy="18.5" r="2.5" />
-              </svg>
-            </div>
-            <div>
-              <h2 className="text-base sm:text-lg font-black text-[var(--ink)]">
-                {locale === "en"
-                  ? "Employee & Outside Lorry Owner Sign In"
-                  : "සේවක / වාහන හිමිකරු පිවිසුම (Employee Login)"}
-              </h2>
-              <p className="text-xs text-[var(--mut)] mt-0.5">
-                {locale === "en"
-                  ? "Sign in using your National ID Number (NIC) registered with Sithumina"
-                  : "ලියාපදිංචි කිරීමේදී ලබාදුන් ජාතික හැඳුනුම්පත් අංකය (ID Number) ඇතුළත් කරන්න"}
-              </p>
-            </div>
-          </div>
-
-          {loginError && (
-            <div className="p-4 mb-4 rounded-2xl bg-red-50 border border-red-200 text-xs text-red-800 font-bold leading-relaxed">
-              {loginError}
-            </div>
-          )}
-
-          <form onSubmit={handleLogin} className="flex flex-col gap-4">
-            <div>
-              <label className="block text-xs font-extrabold text-[var(--ink)] mb-1.5 flex items-center justify-between">
-                <span>
-                  {locale === "en" ? "National ID (NIC) or Driver ID (e.g. D-10) *" : "ජාතික හැඳුනුම්පත් අංකය (NIC) හෝ Driver ID (උදා: D-10) *"}
-                </span>
-                <span className="text-[10px] text-amber-600 font-bold">Portal & Driver App Login</span>
-              </label>
-              <input
-                type="text"
-                required
-                placeholder={
-                  locale === "en"
-                    ? "e.g. D-10 or 199012345678"
-                    : "උදා: D-10 හෝ 199012345678"
-                }
-                value={nicInput}
-                onChange={(e) => setNicInput(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm text-[var(--ink)] font-mono uppercase focus:outline-none focus:border-[#FFC20E] transition-colors"
-              />
-              <p className="text-[11px] text-[var(--mut)] mt-1.5">
-                {locale === "en"
-                  ? "Enter your National ID (NIC) or your assigned Driver ID (e.g. D-10)."
-                  : "ඔබගේ ජාතික හැඳුනුම්පත් අංකය (NIC) හෝ පද්ධතියෙන් ලැබුණු Driver ID අංකය (උදා: D-10) ඇතුළත් කරන්න."}
-              </p>
-            </div>
-
-            <button
-              type="submit"
-              disabled={loggingIn}
-              className="mt-2 w-full py-3.5 rounded-xl bg-[#26231B] hover:bg-[#1a1813] text-[#FFC20E] text-sm font-black border-0 cursor-pointer active:scale-[0.99] transition-all flex items-center justify-center gap-2 shadow-xs disabled:opacity-50"
-            >
-              {loggingIn ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-[#FFC20E] border-t-transparent rounded-full animate-spin" />
-                  <span>{locale === "en" ? "Authenticating..." : "තහවුරු වෙමින් පවතී..."}</span>
-                </>
-              ) : (
-                <span>{locale === "en" ? "Sign In to Employee Portal" : "සේවක ගිණුමට ඇතුල් වන්න"}</span>
-              )}
-            </button>
-          </form>
-
-          <div className="mt-6 pt-5 border-t border-[var(--line)] flex flex-col gap-2 text-xs text-[var(--mut)]">
-            <span className="font-bold text-[var(--ink)]">
-              {locale === "en" ? "Haven't registered your outside lorry yet?" : "ඔබගේ ලොරිය තවමත් ලියාපදිංචි කර නැද්ද?"}
-            </span>
-            <p>
-              {locale === "en"
-                ? "Register your outside vehicle with a Rs. 5,000 security deposit to start receiving cargo bookings."
-                : "රු. 5,000 ආරම්භක තැන්පතුව සමඟ ඔබගේ ලොරිය පද්ධතියට එක් කර Bookings ලබාගන්න."}
-            </p>
-            <Link
-              href="/register-vehicle"
-              className="mt-1 inline-flex items-center gap-1.5 text-xs font-bold text-[#b8860b] hover:underline"
-            >
-              <span>{locale === "en" ? "Go to Vehicle Registration →" : "වාහන ලියාපදිංචි පෝරමය වෙත යන්න →"}</span>
-            </Link>
-          </div>
-        </div>
-
-        {/* Informational Side Card */}
-        <div className="md:col-span-5 bg-[var(--card)] rounded-3xl border border-[var(--line)] p-6 shadow-xs flex flex-col gap-4">
-          <h3 className="text-sm font-black text-[var(--ink)] uppercase tracking-wide">
-            {locale === "en" ? "Outside Lorry Operations" : "පිටින් සම්බන්ධ ලොරි ක්‍රමවේදය"}
-          </h3>
-          <div className="flex flex-col gap-3 text-xs text-[var(--mut)] leading-relaxed">
-            <div className="p-3.5 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-1">
-              <span className="font-bold text-[var(--ink)]">1. Rs. 5,000 Deposit</span>
-              <p>
-                {locale === "en"
-                  ? "Every partner starts with an initial deposit of Rs. 5,000 upon Admin approval."
-                  : "Admin විසින් අනුමත කළ පසු රු. 5,000 ආරම්භක ශේෂයක් ඔබගේ ගිණුමට ලැබේ."}
-              </p>
-            </div>
-            <div className="p-3.5 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-1">
-              <span className="font-bold text-[var(--ink)]">2. 20% Commission per Completed Hire</span>
-              <p>
-                {locale === "en"
-                  ? "When a hire is completed, You collect the fare from the customer. 20% of the hire amount is deducted from your balance. Your balance may go negative and hires are never blocked."
-                  : "Hire එකක් අවසන් වූ පසු එහි මුදලින් 20%ක් ශේෂයෙන් අඩු වේ. ශේෂය ඍණ වුවත් Hires නතර නොවේ."}
-              </p>
-            </div>
-            <div className="p-3.5 rounded-2xl bg-[var(--bg)] border border-[var(--line)] flex flex-col gap-1">
-              <span className="font-bold text-[var(--ink)]">3. Duty Availability Toggle</span>
-              <p>
-                {locale === "en"
-                  ? "Easily toggle Available / Unavailable anytime to stop or resume customer bookings."
-                  : "ඔබට ඕනෑම වේලාවක Available / Unavailable මාරු කර සේවය පාලනය කළ හැකිය."}
-              </p>
-            </div>
-          </div>
-        </div>
+      <div className="mx-auto w-full max-w-sm rounded-2xl border border-gray-200 bg-white p-6 text-center">
+        <p className="text-sm text-gray-700">
+          Loading your records. This page is for external vehicle owners; company drivers use the Driver App.
+        </p>
+        <button type="button" onClick={handleLogout} className="mt-4 rounded-lg bg-gray-900 px-4 py-2 text-sm font-semibold text-white cursor-pointer">
+          Sign out
+        </button>
       </div>
     );
   }

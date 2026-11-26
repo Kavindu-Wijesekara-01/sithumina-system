@@ -7,7 +7,6 @@ import { subscribePaymentBankAccounts, type BankAccountSetting } from "@/lib/pay
 import { formatRs } from "@/lib/commission";
 import type { StoredCommissionTransaction } from "@/lib/server-store";
 
-const ADMIN_PIN = process.env.NEXT_PUBLIC_ADMIN_PIN || "ST@2024";
 
 export const bankLabel = (a: BankAccountSetting) => `${a.bankName} - ${a.accountNumber}`;
 
@@ -72,7 +71,7 @@ export function WalletPayments({ employeeId, entries }: { employeeId: string; en
       return;
     }
     const saved = await run(() =>
-      recordWalletTopupAction({ adminPin: ADMIN_PIN, employeeId, amount: value, ...payment(paidInto) })
+      recordWalletTopupAction({ employeeId, amount: value, ...payment(paidInto) })
     );
     if (saved) {
       setAmount("");
@@ -106,7 +105,7 @@ export function WalletPayments({ employeeId, entries }: { employeeId: string; en
           <PaidIntoSelect
             value=""
             label="Choose"
-            onChange={(v) => v && run(() => setWalletEntryPaymentAction({ adminPin: ADMIN_PIN, entryId: e.id, ...payment(v) }))}
+            onChange={(v) => v && run(() => setWalletEntryPaymentAction({ entryId: e.id, ...payment(v) }))}
           />
         </div>
       ))}

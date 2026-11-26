@@ -5,8 +5,8 @@
  * is advanced in the same transaction that writes the record, so two requests
  * can never receive the same ID or overwrite an existing document.
  */
-import { db } from "@/lib/firebase";
-import { doc, runTransaction } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { doc, runTransaction } from "@/lib/fs-server";
 
 const FIRST = 10000;
 

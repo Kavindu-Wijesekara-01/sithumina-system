@@ -9,6 +9,7 @@ import TripGroupList from "./TripGroupList";
 import { formatRs, REGISTRATION_DEPOSIT } from "@/lib/commission";
 import { bookingsForDriver, bookingsForVehicle, isTripFinished, periodRange, summarise, type LedgerContext } from "@/lib/ledger";
 import { useLedger } from "./useLedger";
+import DriverPassword from "./DriverPassword";
 import { WalletPayments } from "./WalletPayments";
 import { groupTrips, normalizeVehicleKey } from "@/lib/trip-state";
 import type { StoredBooking, StoredCommissionTransaction, StoredOutsideEmployee } from "@/lib/server-store";
@@ -239,6 +240,7 @@ export default function PerformancePanel({
 
         {active ? (
           <div className="flex flex-col gap-4 min-w-0">
+            {(mode === "drivers" || active.owner) && <DriverPassword key={active.key} driverId={active.key} />}
             <TotalsGrid totals={active.totals} />
             {active.owner && <Wallet key={active.owner.id} owner={active.owner} />}
             <BankTable totals={active.totals} />

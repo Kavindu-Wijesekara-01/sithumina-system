@@ -2,6 +2,8 @@
 
 
 
+import SignInForm from "@/components/auth/SignInForm";
+import { useAuth } from "@/context/AuthContext";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 
 import {
@@ -180,7 +182,6 @@ import TripGroupList from "@/components/admin/TripGroupList";
 import RevenuePanel from "@/components/admin/RevenuePanel";
 import PerformancePanel from "@/components/admin/PerformancePanel";
 
-const ADMIN_PIN = process.env.NEXT_PUBLIC_ADMIN_PIN || "ST@2024";
 
 function stripSinhalaText(val?: string | null): string {
   if (!val || typeof val !== "string") return "";
@@ -878,29 +879,15 @@ export default function MasterAdminDashboard() {
 
   // ---- Auth Gate ----
 
-  const [authed, setAuthed] = useState(false);
+  const { profile: signedIn, logout: signOutAdmin } = useAuth();
+  const authed = signedIn?.role === "admin";
 
-  const [pin, setPin] = useState("");
 
-  const [pinError, setPinError] = useState("");
 
 
 
   // Persist admin authentication state during browser tab session
 
-  useEffect(() => {
-
-    try {
-
-      if (typeof window !== "undefined" && sessionStorage.getItem("st_admin_authed") === "true") {
-
-        setAuthed(true);
-
-      }
-
-    } catch { }
-
-  }, []);
 
 
 
@@ -2064,7 +2051,6 @@ export default function MasterAdminDashboard() {
     setSubmittingOutside(true);
     try {
       const res = await registerOutsideEmployeeManuallyAction({
-        adminPin: ADMIN_PIN,
         name: f.name,
         idNumber: f.idNumber,
         phone: f.phone,
@@ -2128,18 +2114,7 @@ export default function MasterAdminDashboard() {
     setLoadingInquiries(true);
 
     setLoadingUsers(true);
-
-    try {
-
-      if (typeof window !== "undefined") {
-
-        sessionStorage.removeItem("st_admin_authed");
-
-      }
-
-    } catch { }
-
-    setAuthed(false);
+    void signOutAdmin();
 
   };
 
@@ -8502,141 +8477,11 @@ export default function MasterAdminDashboard() {
   // ---- PIN Authentication Gate ----
 
   if (!authed) {
-
     return (
-
-      <main className="min-h-screen flex items-center justify-center p-4 bg-[#F7F5EE]">
-
-        <div className="w-full max-w-sm bg-white border border-[#E7E2D0] rounded-3xl p-8 shadow-sm">
-
-          <div className="mb-6">
-
-            <div className="w-14 h-14 rounded-2xl bg-[#FFC20E] flex items-center justify-center mb-4 shadow-sm border border-[#E7E2D0]">
-
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#26231B" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-
-                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-
-              </svg>
-
-            </div>
-
-            <h1 className="text-xl font-black text-[#26231B]">Head Office Admin Portal</h1>
-
-            <p className="text-xs text-[#6F6A5A] mt-1">
-
-              Sithumina Transport — Secure Command Center
-
-            </p>
-
-          </div>
-
-
-
-          {pinError && (
-
-            <div className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 font-semibold">
-
-              {pinError}
-
-            </div>
-
-          )}
-
-
-
-          <form
-
-            onSubmit={(e) => {
-
-              e.preventDefault();
-
-              if (pin === ADMIN_PIN) {
-
-                setAuthed(true);
-
-                setPinError("");
-
-                try {
-
-                  if (typeof window !== "undefined") {
-
-                    sessionStorage.setItem("st_admin_authed", "true");
-
-                  }
-
-                } catch { }
-
-              } else {
-
-                setPinError("Invalid PIN. Please check with Head Office.");
-
-              }
-
-            }}
-
-            className="flex flex-col gap-4"
-
-          >
-
-            <div>
-
-              <label className="block text-xs font-bold text-[#26231B] mb-1.5">
-
-                Admin Security PIN
-
-              </label>
-
-              <input
-
-                suppressHydrationWarning
-
-                type="password"
-
-
-
-                value={pin}
-
-                onChange={(e) => setPin(e.target.value)}
-
-                autoFocus
-
-                className="w-full px-4 py-3 rounded-xl border border-[#E7E2D0] bg-[#F7F5EE] text-sm font-mono text-[#26231B] focus:outline-none focus:border-[#26231B] tracking-widest text-center"
-
-              />
-
-            </div>
-
-            <button
-
-              type="submit"
-
-              className="w-full py-3.5 rounded-xl bg-[#FFC20E] text-[#26231B] text-sm font-black border-0 cursor-pointer hover:bg-[#e6ad00] transition-all shadow-sm"
-
-            >
-
-              Sign In to Command Center
-
-            </button>
-
-          </form>
-
-
-
-          <p className="text-center text-[11px] text-[#6F6A5A] mt-6">
-
-            Authorized personnel only. Direct fleet and booking dispatch controls.
-
-          </p>
-
-        </div>
-
+      <main className="min-h-screen flex items-center justify-center p-4 bg-gray-50">
+        <SignInForm role="admin" />
       </main>
-
     );
-
   }
 
 

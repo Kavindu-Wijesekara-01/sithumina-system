@@ -1,5 +1,6 @@
 "use server";
 
+import { authorize } from "@/lib/auth/server";
 import { revalidatePath } from "next/cache";
 import {
   addRegistrationInStore,
@@ -10,8 +11,8 @@ import {
   StoredTopupSlip,
 } from "@/lib/server-store";
 import { ActionResult, VehicleRegistrationActionInput } from "./types";
-import { db } from "@/lib/firebase";
-import { collection, doc, setDoc, updateDoc, getDocs } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { collection, doc, setDoc, updateDoc, getDocs } from "@/lib/fs-server";
 import {
   OwnerError,
   approveOwnerRegistration,
@@ -140,6 +141,8 @@ export async function registerVehicleAction(
  * Server Action to get all vehicle registrations directly from Firestore.
  */
 export async function getAllRegistrationsAction(): Promise<ActionResult<StoredRegistration[]>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const colRef = collection(db, "vehicle_registrations");
     const snap = await getDocs(colRef);
@@ -168,6 +171,8 @@ export async function updateRegistrationStatusAction(
   id: string,
   status: "pending" | "approved" | "rejected"
 ): Promise<ActionResult<StoredRegistration>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     if (!id) {
       return { success: false, error: "Registration ID is required." };
@@ -208,6 +213,8 @@ export async function approveRegistrationAndAddToFleetAction(
   id: string,
   route?: string
 ): Promise<ActionResult<StoredRegistration>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const { employee, created } = await approveOwnerRegistration(id, route);
     const updated = await updateRegistrationStatusInStore(id, "approved");
@@ -235,6 +242,9 @@ export async function approveRegistrationAndAddToFleetAction(
 export async function loginOutsideEmployeeAction(
   idNumber: string
 ): Promise<ActionResult<{ employee: StoredOutsideEmployee; transactions: StoredCommissionTransaction[] }>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
+  if (auth.session.role === "driver") idNumber = auth.session.driverId;
   try {
     if (!(idNumber || "").trim()) {
       return { success: false, error: "National ID Number (NIC) or Driver ID is required / හැඳුනුම්පත් අංකය හෝ Driver ID ඇතුළත් කරන්න." };
@@ -261,6 +271,9 @@ export async function toggleOutsideDutyAction(
   idNumber: string,
   isAvailable: boolean
 ): Promise<ActionResult<{ isAvailable: boolean }>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
+  if (auth.session.role === "driver") idNumber = auth.session.driverId;
   try {
     if (!(idNumber || "").trim()) return { success: false, error: "ID Number is required." };
     await setOwnerAvailability(idNumber, isAvailable);
@@ -286,6 +299,9 @@ export async function submitOutsideTopupSlipAction(input: {
   bankUsed?: string;
   slipUrl: string;
 }): Promise<ActionResult<StoredTopupSlip>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
+  if (auth.session.role === "driver") input = { ...input, idNumber: auth.session.driverId };
   try {
     const idNumber = (input.idNumber || "").trim();
     const amount = Number(input.amount || 0);
@@ -311,6 +327,8 @@ export async function submitOutsideTopupSlipAction(input: {
  * Server Action to fetch all outside employees for Admin.
  */
 export async function getAllOutsideEmployeesAction(): Promise<ActionResult<StoredOutsideEmployee[]>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     return { success: true, data: await listOutsideOwners() };
   } catch (err: unknown) {
@@ -322,8 +340,15 @@ export async function getAllOutsideEmployeesAction(): Promise<ActionResult<Store
  * Server Action to fetch all topup slips for Admin.
  */
 export async function getAllTopupSlipsAction(): Promise<ActionResult<StoredTopupSlip[]>> {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return auth.denied;
   try {
-    return { success: true, data: await listTopupSlips() };
+    const slips = await listTopupSlips();
+    // Owners see only their own slips
+    return {
+      success: true,
+      data: auth.session.role === "admin" ? slips : slips.filter((s) => s.employeeId === auth.session.driverId),
+    };
   } catch (err: unknown) {
     return failure("getAllTopupSlipsAction", err, "Failed to fetch top-up slips.");
   }
@@ -335,6 +360,8 @@ export async function getAllTopupSlipsAction(): Promise<ActionResult<StoredTopup
 export async function approveTopupSlipAction(
   slipId: string
 ): Promise<ActionResult<{ slip: StoredTopupSlip }>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     const slip = await approveTopup(slipId);
     revalidateOwnerPages();
@@ -348,6 +375,8 @@ export async function approveTopupSlipAction(
  * Server Action to delete/reject topup slip.
  */
 export async function deleteTopupSlipAction(slipId: string): Promise<ActionResult<boolean>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     await removeTopupSlip(slipId);
     revalidateOwnerPages();
@@ -358,7 +387,6 @@ export async function deleteTopupSlipAction(slipId: string): Promise<ActionResul
 }
 
 export interface ManualOutsideEmployeeInput {
-  adminPin: string;
   name: string;
   idNumber: string;
   phone: string;
@@ -374,15 +402,13 @@ export interface ManualOutsideEmployeeInput {
 
 /**
  * Server Action (Admin only) - manually register an Outside Employee.
- * Admin is verified with the same PIN the dashboard login uses.
  */
 export async function registerOutsideEmployeeManuallyAction(
   input: ManualOutsideEmployeeInput
 ): Promise<ActionResult<StoredOutsideEmployee>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
-    if (!isAdminPin(input?.adminPin)) {
-      return { success: false, error: "Unauthorized: Admin access required.", code: "UNAUTHORIZED" };
-    }
 
     const name = (input.name || "").trim();
     const idNumber = (input.idNumber || "").trim();
@@ -452,21 +478,17 @@ function failure(context: string, err: unknown, fallback: string): { success: fa
   return { success: false, error: err instanceof OwnerError ? err.message : fallback };
 }
 
-function isAdminPin(pin?: string): boolean {
-  const expected = process.env.ADMIN_PIN || process.env.NEXT_PUBLIC_ADMIN_PIN || "ST@2024";
-  return Boolean(pin) && pin === expected;
-}
 
 /** Admin only: record a cash or bank payment into an owner's wallet. */
 export async function recordWalletTopupAction(input: {
-  adminPin: string;
   employeeId: string;
   amount: number;
   method: "cash" | "bank";
   bank?: string;
 }): Promise<ActionResult<boolean>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
-    if (!isAdminPin(input.adminPin)) return { success: false, error: "Unauthorized: Admin access required." };
     await recordWalletTopup({ ...input, amount: Number(input.amount) });
     revalidateOwnerPages();
     return { success: true, data: true };
@@ -477,13 +499,13 @@ export async function recordWalletTopupAction(input: {
 
 /** Admin only: set how an earlier deposit or top-up was paid. */
 export async function setWalletEntryPaymentAction(input: {
-  adminPin: string;
   entryId: string;
   method: "cash" | "bank";
   bank?: string;
 }): Promise<ActionResult<boolean>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
-    if (!isAdminPin(input.adminPin)) return { success: false, error: "Unauthorized: Admin access required." };
     await setWalletEntryPayment(input.entryId, input.method, input.bank);
     revalidateOwnerPages();
     return { success: true, data: true };

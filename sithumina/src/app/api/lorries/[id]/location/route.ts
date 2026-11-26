@@ -1,12 +1,18 @@
+import { authorize, deniedResponse, driverOwnsBooking, driverOwnsVehicle, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { NextResponse } from "next/server";
 import { updateLorryGpsInStore } from "@/lib/server-store";
-import { db } from "@/lib/firebase";
-import { doc, setDoc } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { doc, setDoc } from "@/lib/fs-server";
 
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return deniedResponse(auth.denied);
+  if (auth.session.role === "driver" && !(await driverOwnsVehicle(auth.session, (await params).id))) {
+    return deniedResponse(FORBIDDEN);
+  }
   try {
     const { id } = await params;
     const body = await request.json();

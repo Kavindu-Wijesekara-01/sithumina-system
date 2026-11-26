@@ -1,3 +1,4 @@
+import { auth } from "./firebase";
 import { Platform } from "react-native";
 import Constants from "expo-constants";
 
@@ -59,12 +60,15 @@ export async function apiFetch<T = any>(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    // The server identifies the caller from their Firebase ID token
+    const token = await auth.currentUser?.getIdToken();
     const res = await fetch(url, {
       ...options,
       signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(options.headers || {}),
       },
     });

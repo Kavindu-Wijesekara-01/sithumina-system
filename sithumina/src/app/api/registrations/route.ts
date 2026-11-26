@@ -1,14 +1,17 @@
+import { authorize, deniedResponse, driverOwnsBooking, driverOwnsVehicle, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { NextResponse } from "next/server";
 import {
   getAllStoredRegistrations,
   addRegistrationInStore,
   updateRegistrationStatusInStore,
 } from "@/lib/server-store";
-import { db } from "@/lib/firebase";
+import { db } from "@/lib/fs-server";
 import { OwnerError, approveOwnerRegistration } from "@/lib/outside-owners";
-import { collection, getDocs, doc, setDoc } from "firebase/firestore";
+import { collection, getDocs, doc, setDoc } from "@/lib/fs-server";
 
 export async function GET() {
+  const auth = await authorize("admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const colRef = collection(db, "vehicle_registrations");
     const snap = await getDocs(colRef);
@@ -76,6 +79,8 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
+  const auth = await authorize("admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const body = await request.json();
     const { id, status } = body;

@@ -1,8 +1,8 @@
 /**
  * Keeps Driver App dispatch documents in step with the booking lifecycle.
  */
-import { db } from "@/lib/firebase";
-import { collection, doc, getDoc, getDocs, query, updateDoc, where } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { collection, doc, getDoc, getDocs, query, updateDoc, where } from "@/lib/fs-server";
 
 const FINISHED = ["delivered", "completed"];
 const NOT_YET_DISPATCHABLE = ["pending", "awaiting_payment", "payment_submitted"];

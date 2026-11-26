@@ -1,3 +1,4 @@
+import { authorize, deniedResponse, driverOwnsBooking, driverOwnsVehicle, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { NextResponse } from "next/server";
 import { revalidatePath } from "next/cache";
 import { performTripAction, TripError, type TripAction } from "@/lib/trip-workflow";
@@ -6,6 +7,8 @@ const ACTIONS: TripAction[] = ["accept", "decline", "loaded", "collect_cash", "c
 
 /** Driver App trip actions. */
 export async function POST(request: Request) {
+  const auth = await authorize("driver", "admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const body = await request.json();
     const action = body?.action as TripAction;
@@ -13,7 +16,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: "Unknown trip action." }, { status: 400 });
     }
     const result = await performTripAction(String(body.dispatchId || ""), action, {
-      driverId: String(body.driverId || ""),
+      // A driver acts only as themselves, whatever the request says
+      driverId: auth.session.role === "driver" ? auth.session.driverId : String(body.driverId || ""),
       plate: body.plate ? String(body.plate) : undefined,
     });
 

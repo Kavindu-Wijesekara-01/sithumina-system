@@ -1,125 +1,50 @@
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { StatusBar } from "expo-status-bar";
-import { StyleSheet } from "react-native";
+import { ActivityIndicator, StyleSheet } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-
+import { onAuthStateChanged } from "firebase/auth";
 import { LoginScreen } from "./src/screens/LoginScreen";
 import { AdminDashboard } from "./src/screens/AdminDashboard";
 import { DriverInterface } from "./src/screens/DriverInterface";
-import {
-  DriverRecord,
-  verifyDriverLogin,
-  resolveSafeLorryDocId,
-} from "./src/services/database";
-
-const SESSION_STORAGE_KEY = "sithumina_driver_app_session";
-
-type AppScreen = "login" | "admin" | "driver";
-
-interface AppSession {
-  role: "admin" | "driver";
-  driver?: DriverRecord;
-}
+import { auth } from "./src/config/firebase";
+import { endSession, loadSession, type AppSession } from "./src/services/session";
 
 export default function App() {
-  const [currentScreen, setCurrentScreen] = useState<AppScreen>("login");
   const [session, setSession] = useState<AppSession | null>(null);
+  const [checking, setChecking] = useState(true);
 
-  // Restore saved session if available & refresh driver profile silently from backend
-  useEffect(() => {
-    const restoreSession = async () => {
-      try {
-        const saved = await AsyncStorage.getItem(SESSION_STORAGE_KEY);
-        if (saved) {
-          const parsed = JSON.parse(saved) as AppSession;
-          if (parsed.role === "driver" && parsed.driver) {
-            parsed.driver = {
-              ...parsed.driver,
-              lorryId: resolveSafeLorryDocId(
-                parsed.driver.lorryId,
-                parsed.driver.plate,
-                parsed.driver.driverId || parsed.driver.id
-              ),
-            };
-          }
-          setSession(parsed);
-          setCurrentScreen(parsed.role === "admin" ? "admin" : "driver");
-
-          if (parsed.role === "driver" && parsed.driver) {
-            const lookupKey =
-              parsed.driver.driverId || parsed.driver.id || parsed.driver.plate || "";
-            if (lookupKey) {
-              verifyDriverLogin(lookupKey)
-                .then((fresh) => {
-                  if (fresh && fresh.name) {
-                    const updated: AppSession = { role: "driver", driver: fresh };
-                    setSession(updated);
-                    AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(updated)).catch(
-                      () => {}
-                    );
-                  }
-                })
-                .catch(() => {});
-            }
-          }
+  // Restores a saved sign-in, and returns to the login screen if it is revoked
+  useEffect(
+    () =>
+      onAuthStateChanged(auth, async (user) => {
+        try {
+          setSession(user ? await loadSession() : null);
+        } catch (e) {
+          console.warn("Could not restore the session:", e);
+          setSession(null);
         }
-      } catch (e) {
-        console.warn("Could not restore session:", e);
-      }
-    };
-    restoreSession();
-  }, []);
+        setChecking(false);
+      }),
+    []
+  );
 
-  const handleLoginSuccess = async (newSession: AppSession) => {
-    const normalizedSession: AppSession =
-      newSession.role === "driver" && newSession.driver
-        ? {
-            ...newSession,
-            driver: {
-              ...newSession.driver,
-              lorryId: resolveSafeLorryDocId(
-                newSession.driver.lorryId,
-                newSession.driver.plate,
-                newSession.driver.driverId || newSession.driver.id
-              ),
-            },
-          }
-        : newSession;
-    setSession(normalizedSession);
-    try {
-      await AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(normalizedSession));
-    } catch (e) {
-      console.warn("Could not save session:", e);
-    }
-    setCurrentScreen(normalizedSession.role === "admin" ? "admin" : "driver");
-  };
-
-  const handleLogout = async () => {
-    try {
-      await AsyncStorage.removeItem(SESSION_STORAGE_KEY);
-    } catch (e) {
-      console.warn("Could not clear session:", e);
-    }
+  const handleLogout = () => {
     setSession(null);
-    setCurrentScreen("login");
+    endSession().catch((e) => console.warn("Sign-out failed:", e));
   };
 
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.container}>
         <StatusBar style="dark" />
-
-        {currentScreen === "login" && (
-          <LoginScreen onLoginSuccess={handleLoginSuccess} />
-        )}
-
-        {currentScreen === "admin" && (
+        {checking ? (
+          <ActivityIndicator size="large" color="#26231B" style={styles.loader} />
+        ) : session?.role === "admin" ? (
           <AdminDashboard onLogout={handleLogout} />
-        )}
-
-        {currentScreen === "driver" && session?.driver && (
+        ) : session?.driver ? (
           <DriverInterface driver={session.driver} onLogout={handleLogout} />
+        ) : (
+          <LoginScreen onLoginSuccess={setSession} />
         )}
       </SafeAreaView>
     </SafeAreaProvider>
@@ -130,5 +55,8 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: "#FDB813",
+  },
+  loader: {
+    flex: 1,
   },
 });

@@ -2,7 +2,7 @@
  * Server data layer. Firestore is the only store: nothing is written to disk,
  * so every server instance (including on Vercel) sees the same records.
  */
-import { db } from "@/lib/firebase";
+import { db } from "@/lib/fs-server";
 import {
   collection,
   deleteDoc,
@@ -13,7 +13,7 @@ import {
   setDoc,
   updateDoc,
   where,
-} from "firebase/firestore";
+} from "@/lib/fs-server";
 import { normalizePhoneNumber, phonesMatch, getCanonicalCustomerId } from "@/lib/phone-utils";
 import { createWithSequentialId } from "@/lib/sequence";
 import { allocateDriverId } from "@/lib/driver-ids";

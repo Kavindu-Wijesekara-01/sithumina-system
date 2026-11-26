@@ -306,7 +306,11 @@ export async function uploadPaymentSlipToDb(params: {
   // Clean up any pre-existing slip records for this booking so DB doesn't accumulate duplicates
   try {
     const oldSnap = await getDocs(
-      query(collection(db, SLIPS_COL), where("bookingId", "==", params.bookingId))
+      query(
+        collection(db, SLIPS_COL),
+        where("bookingId", "==", params.bookingId),
+        where("customerPhone", "==", params.customerPhone)
+      )
     );
     await Promise.all(oldSnap.docs.map((d) => deleteSlipDocAndChunks(d.id)));
   } catch {

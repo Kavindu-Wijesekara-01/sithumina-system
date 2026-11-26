@@ -1,7 +1,8 @@
+import { authorize, deniedResponse, driverOwnsBooking, driverOwnsVehicle, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { NextResponse } from "next/server";
 import { getAllStoredDrivers } from "@/lib/server-store";
-import { db } from "@/lib/firebase";
-import { collection, getDocs, doc, setDoc } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { collection, getDocs, doc, setDoc } from "@/lib/fs-server";
 
 function resolveDriverLorryId(rawLorryId: unknown, plate: unknown, driverId: unknown): string {
   const cleanLorry = String(rawLorryId || "").trim().toLowerCase().replace(/\//g, "-");
@@ -28,6 +29,11 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await authorize("admin", "driver");
+  if (!auth.ok) return deniedResponse(auth.denied);
+  if (auth.session.role === "driver" && (await params).id.toUpperCase() !== auth.session.driverId) {
+    return deniedResponse(FORBIDDEN);
+  }
   const { id } = await params;
   const cleanId = decodeURIComponent(id || "").trim().toUpperCase();
   if (!cleanId) {
@@ -79,6 +85,8 @@ export async function PUT(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await authorize("admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const { id } = await params;
     const cleanId = decodeURIComponent(id || "").trim().toUpperCase().replace(/\//g, "-");

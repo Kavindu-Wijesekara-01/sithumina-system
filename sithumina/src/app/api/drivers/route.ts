@@ -1,12 +1,13 @@
+import { authorize, deniedResponse, driverOwnsBooking, driverOwnsVehicle, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { NextResponse } from "next/server";
 import {
   getAllStoredDrivers,
   registerDriverInStore,
   deleteDriverFromStore,
 } from "@/lib/server-store";
-import { db } from "@/lib/firebase";
+import { db } from "@/lib/fs-server";
 import { allocateDriverId } from "@/lib/driver-ids";
-import { collection, getDocs, doc, setDoc, deleteDoc } from "firebase/firestore";
+import { collection, getDocs, doc, setDoc, deleteDoc } from "@/lib/fs-server";
 
 function resolveDriverLorryId(rawLorryId: unknown, plate: unknown, driverId: unknown): string {
   const cleanLorry = String(rawLorryId || "").trim().toLowerCase().replace(/\//g, "-");
@@ -20,6 +21,8 @@ function resolveDriverLorryId(rawLorryId: unknown, plate: unknown, driverId: unk
 }
 
 export async function GET() {
+  const auth = await authorize("admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const snap = await getDocs(collection(db, "drivers"));
     const drivers = snap.docs.map((d) => {
@@ -50,6 +53,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const auth = await authorize("admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const body = await request.json();
     const { name, phone, plate, vehicleNumber, vehicleType, route, driverId, nic, active } = body;
@@ -109,6 +114,8 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  const auth = await authorize("admin");
+  if (!auth.ok) return deniedResponse(auth.denied);
   try {
     const { searchParams } = new URL(request.url);
     let id = searchParams.get("id");

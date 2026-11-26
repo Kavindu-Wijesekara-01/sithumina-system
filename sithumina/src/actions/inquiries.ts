@@ -1,5 +1,6 @@
 "use server";
 
+import { authorize } from "@/lib/auth/server";
 import { revalidatePath } from "next/cache";
 import {
   addInquiryInStore,
@@ -8,8 +9,8 @@ import {
   StoredInquiry,
 } from "@/lib/server-store";
 import { ActionResult, InquiryActionInput } from "./types";
-import { db } from "@/lib/firebase";
-import { collection, doc, getDocs, setDoc } from "firebase/firestore";
+import { db } from "@/lib/fs-server";
+import { collection, doc, getDocs, setDoc } from "@/lib/fs-server";
 
 /**
  * Server Action for sending an inquiry or requesting a rate quote.
@@ -90,6 +91,8 @@ export async function submitInquiryAction(
  * Server Action to fetch all inquiries.
  */
 export async function getAllInquiriesAction(): Promise<ActionResult<StoredInquiry[]>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     try {
       const snap = await getDocs(collection(db, "inquiries"));
@@ -129,6 +132,8 @@ export async function updateInquiryStatusAction(
   id: string,
   status: "unread" | "resolved"
 ): Promise<ActionResult<StoredInquiry>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
   try {
     if (!id) {
       return { success: false, error: "Inquiry ID is required." };
