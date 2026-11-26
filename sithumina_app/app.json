@@ -2,7 +2,7 @@
   "expo": {
     "name": "sithumina driver",
     "slug": "sithumina-driver",
-    "owner": "sithuminadrivers-team",
+    "owner": "sithuminaapps-team",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/app-icon.png",
@@ -33,7 +33,16 @@
         "FOREGROUND_SERVICE",
         "FOREGROUND_SERVICE_LOCATION",
         "POST_NOTIFICATIONS",
-        "VIBRATE"
+        "VIBRATE",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_LOCATION",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
       ],
       "predictiveBackGestureEnabled": false
     },
@@ -79,7 +88,7 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "9fdcd0c9-3dff-400a-8530-d33b3aabc114"
+        "projectId": "73c0b7d5-e711-4d7b-a9b4-54bee86b328a"
       }
     }
   }
