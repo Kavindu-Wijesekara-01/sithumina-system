@@ -35,6 +35,7 @@ export function normalizeVehicleKey(plate?: string | null): string {
 }
 
 export type TripStage =
+  | "scheduled"
   | "awaiting_driver"
   | "declined"
   | "accepted"
@@ -54,12 +55,16 @@ export function tripStage(b: TripLike): TripStage {
     return "in_transit";
   }
   if (b.driverTripStatus === "declined") return "declined";
-  if (status === "assigned") return "awaiting_driver";
+  if (["accepted", "assigned", "booked"].includes(status)) {
+    if (b.driverTripStatus === "pending_acceptance") return "awaiting_driver";
+    if (b.driverTripStatus === "scheduled" || status === "assigned") return "scheduled";
+  }
   return "not_dispatched";
 }
 
 export const TRIP_STAGE_LABEL: Record<TripStage, { en: string; si: string }> = {
-  awaiting_driver: { en: "Waiting for driver to accept", si: "රියදුරුගේ පිළිගැනීම අපේක්ෂාවෙන්" },
+  scheduled: { en: "Scheduled – driver not rung yet", si: "වේලාවට සැලසුම් කර ඇත" },
+  awaiting_driver: { en: "Ringing – waiting for driver to accept", si: "රියදුරුගේ පිළිගැනීම අපේක්ෂාවෙන්" },
   declined: { en: "Declined by driver", si: "රියදුරු ප්‍රතික්ෂේප කළා" },
   accepted: { en: "Accepted – heading to pickup", si: "පිළිගත්තා – බඩු ගන්නා තැනට යමින්" },
   loaded: { en: "Loaded – goods in transit", si: "බඩු පටවා ඇත – ප්‍රවාහනය වෙමින්" },
@@ -78,6 +83,9 @@ export function tripFields(data: Record<string, any>) {
       | undefined,
     parentBookingId: data.parentBookingId ? String(data.parentBookingId) : undefined,
     driverTripStatus: data.driverTripStatus || undefined,
+    ringAt: num(data.ringAt),
+    declineReason: data.declineReason ? String(data.declineReason) : undefined,
+    declinedByName: data.declinedByName ? String(data.declinedByName) : undefined,
     acceptedAt: num(data.acceptedAt),
     rideStartedAt: num(data.rideStartedAt),
     loadedAt: num(data.loadedAt),

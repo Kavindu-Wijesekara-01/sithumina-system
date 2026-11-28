@@ -10,6 +10,7 @@ export interface SchedulableBooking {
   endTime?: string;
   status?: string;
   bookingType?: string;
+  driverTripStatus?: string;
   assignedPlate?: string;
   selectedVehiclePlate?: string;
   assignedLorryId?: string;
@@ -399,7 +400,7 @@ export function findBookingScheduleConflict(
     );
 
     const lorryClash = sameLorry(candidate, existing);
-    const riderClash = sameRider(candidate, existing);
+    const riderClash = existing.driverTripStatus !== "declined" && sameRider(candidate, existing);
     if (!lorryClash && !riderClash) continue;
 
     // Check if the existing booking is actively ongoing on the road right now

@@ -52,6 +52,24 @@ export default function AssignModal({ admin }: { admin: Admin }) {
               bookings
             )
             : null;
+        /** The booking that already holds this rider or lorry for the chosen time. */
+        const busyWith = (target: { assignedPlate?: string; assignedDriverId?: string }) => {
+          if (!modalTimeCheck?.valid) return "";
+          const clash = findBookingScheduleConflict(
+            {
+              excludeBookingId: assignModal.booking.id,
+              date: modalTimeCheck.startDate,
+              dates: modalTimeCheck.dates,
+              startTime: modalTimeCheck.startTime,
+              endTime: modalTimeCheck.endTime,
+              bookingType: "individual_vehicle",
+              ...target,
+            },
+            bookings
+          );
+          return clash.hasConflict ? clash.conflictingBookingId || "another booking" : "";
+        };
+
         return (
           <div
             className="fixed inset-0 z-[99999] bg-black/60 flex items-center justify-center p-4 backdrop-blur-xs overflow-y-auto"
@@ -217,9 +235,11 @@ export default function AssignModal({ admin }: { admin: Admin }) {
                     <option value="">Select Lorry</option>
                     {fleetVehicles.map((v) => {
                       const isOut = (v as any).isOutsideLorry || (v as any).ownershipType === "outside";
+                      const busy = busyWith({ assignedPlate: v.plate });
                       return (
                         <option key={v.id || v.plate} value={v.plate}>
                           {v.plate} — {v.vehicleType} {isOut ? "(Outside Partner)" : "(Company)"}
+                          {busy ? ` · busy: ${busy}` : ""}
                         </option>
                       );
                     })}
@@ -296,9 +316,15 @@ export default function AssignModal({ admin }: { admin: Admin }) {
                         className="w-full px-3 py-2 rounded-xl border border-[#E5E7EB] bg-[#F9FAFB] text-xs text-[#111827]"
                       >
                         <option value="">Select Rider</option>
-                        {drivers.map((d) => (
-                          <option key={d.driverId} value={d.name}>{d.name} ({d.driverId}) - {d.phone}</option>
-                        ))}
+                        {drivers.map((d) => {
+                          const busy = busyWith({ assignedDriverId: d.driverId });
+                          return (
+                            <option key={d.driverId} value={d.name}>
+                              {d.name} ({d.driverId}) - {d.phone}
+                              {busy ? ` · busy: ${busy}` : ""}
+                            </option>
+                          );
+                        })}
                       </select>
                     </div>
                     <div>
@@ -331,12 +357,10 @@ export default function AssignModal({ admin }: { admin: Admin }) {
                       : `${modalTimeCheck.startDate} · ${formatTimeDurationLabel(modalTimeCheck.startTime, modalTimeCheck.endTime)}`}
                   </div>
                 )}
-                {assignModal.booking.bookingType === "individual_vehicle" && (
-                  <p className="text-xs text-[#111827] bg-emerald-50 px-3 py-2 rounded-xl border border-emerald-200 font-semibold">
-                    Dispatched directly to the assigned Rider mobile app with live audio chime notification.
-                  </p>
-                )}
-                <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#E5E7EB] mt-2">
+                <p className="text-xs text-[#111827] bg-emerald-50 px-3 py-2 rounded-xl border border-emerald-200 font-semibold">
+                  Saving adds this to the rider&apos;s Upcoming Trips. The phone rings only when you choose to ring.
+                </p>
+                <div className="flex flex-wrap items-center justify-end gap-2 pt-3 border-t border-[#E5E7EB] mt-2">
                   <button
                     type="button"
                     onClick={() => setAssignModal(null)}
@@ -347,7 +371,15 @@ export default function AssignModal({ admin }: { admin: Admin }) {
                   <button
                     type="button"
                     disabled={Boolean(modalConflict?.hasConflict)}
-                    onClick={confirmAssign}
+                    onClick={() => void confirmAssign(true)}
+                    className="px-4 py-2 rounded-xl border border-amber-500 bg-amber-50 text-amber-950 hover:bg-amber-100 text-xs font-semibold cursor-pointer disabled:opacity-50"
+                  >
+                    Save &amp; Ring Driver
+                  </button>
+                  <button
+                    type="button"
+                    disabled={Boolean(modalConflict?.hasConflict)}
+                    onClick={() => void confirmAssign()}
                     className="px-5 py-2 rounded-xl bg-[#111827] text-white hover:bg-[#FFC20E] hover:text-[#111827] text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50"
                   >
                     Confirm Assignment

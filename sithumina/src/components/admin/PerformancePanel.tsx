@@ -6,7 +6,7 @@ import { collection, onSnapshot, query, where } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { BankTable, PeriodPicker, Stat, TotalsGrid, type PeriodValue } from "./ui";
 import TripGroupList from "./TripGroupList";
-import { formatRs, REGISTRATION_DEPOSIT } from "@/lib/commission";
+import { formatRs } from "@/lib/commission";
 import { bookingsForDriver, bookingsForVehicle, isTripFinished, periodRange, summarise, withExternalOwners, type LedgerContext } from "@/lib/ledger";
 import { useBookingQuery } from "./useBookingQuery";
 import { fetchBookingsForDriver, fetchBookingsForPeriod, fetchBookingsForVehicle } from "@/lib/booking-feed";
@@ -57,9 +57,9 @@ function Wallet({ owner }: { owner: StoredOutsideEmployee }) {
   const deposited =
     entries
       .filter((e) => e.type === "initial_deposit" || e.type === "topup")
-      .reduce((s, e) => s + (Number(e.amount) || 0), 0) || REGISTRATION_DEPOSIT;
+      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
   const used = owner.totalCommissionDeducted || 0;
-  const percent = Math.min(100, Math.round((used / deposited) * 100));
+  const percent = deposited > 0 ? Math.min(100, Math.round((used / deposited) * 100)) : 0;
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4 flex flex-col gap-3">

@@ -2,7 +2,6 @@
 
 import { authorize, driverOwnsBooking, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { revalidatePath } from "next/cache";
-import { after } from "next/server";
 import { findVehicleDocs, isOutsideRecord } from "@/lib/vehicle-docs";
 import { ensureDriverRecord } from "@/lib/riders";
 import {
@@ -193,17 +192,15 @@ async function syncBookingDispatchDoc(
   status: string,
   extra?: { driverId?: string; driverName?: string; driverPhone?: string; lorryId?: string; plate?: string },
   options: {
-    /** Editing details must not re-offer a job the driver declined. */
-    keepDeclined?: boolean;
-    /** Offer the job again whatever its previous state. */
-    reoffer?: boolean;
+    /** The office pressed Ring Driver (or Start Ride): offer the job now. */
+    ring?: boolean;
   } = {}
 ): Promise<void> {
   const dispatchDocId = `dispatch-${booking.id}`;
 
   const isLive = booking.bookingType === "live_lorry";
   const isDispatchable = [
-    ...(isLive ? ["accepted"] : []),
+    "accepted",
     "assigned",
     "booked",
     "goods_collected",
@@ -247,21 +244,27 @@ async function syncBookingDispatchDoc(
       ((newDriverId && existing.driverId && String(existing.driverId).toUpperCase() !== newDriverId) ||
         (plate && existing.assignedPlate && normalizePlate(existing.assignedPlate) !== plateNorm))
   );
-  let targetDispatchStatus = "pending_acceptance";
+  // An approved booking waits silently in the driver's Upcoming Trips. It only
+  // rings after the office asks, and stays declined until someone else takes it.
+  let targetDispatchStatus = "scheduled";
   if (status === "goods_collected") {
     targetDispatchStatus = "goods_collected";
   } else if (status === "in_transit") {
     targetDispatchStatus = existing?.status === "goods_collected" ? "goods_collected" : "in_transit";
-  } else if (!reassigned && ["accepted", "goods_collected", "in_transit"].includes(existing?.status)) {
+  } else if (options.ring) {
+    targetDispatchStatus = "pending_acceptance";
+  } else if (
+    !reassigned &&
+    ["pending_acceptance", "declined", "accepted", "goods_collected", "in_transit"].includes(existing?.status)
+  ) {
     targetDispatchStatus = existing!.status;
   }
-  if (options.keepDeclined && !reassigned && existing?.status === "declined") targetDispatchStatus = "declined";
-  if (options.reoffer) targetDispatchStatus = "pending_acceptance";
+  const isWaiting = ["scheduled", "pending_acceptance", "declined"].includes(targetDispatchStatus);
 
   // Tell the driver up front whether this attaches to a running trip
   let tripRole: "primary" | "return" = booking.tripRole || "primary";
   let parentBookingId = booking.parentBookingId || "";
-  if (targetDispatchStatus === "pending_acceptance") {
+  if (isWaiting) {
     try {
       const planned = await planTrip({ ...booking, assignedPlate: plate, assignedDriverId: newDriverId });
       tripRole = planned.role;
@@ -318,8 +321,14 @@ async function syncBookingDispatchDoc(
       date: booking.date,
       dates: booking.dates || (booking.date ? [booking.date] : []),
       daysNeeded: booking.daysNeeded || 1,
+      startTime: booking.startTime || "",
+      endTime: booking.endTime || "",
+      cargoWeight: booking.cargoWeight || "",
       helpersCount: booking.helpersCount ?? "0",
       status: targetDispatchStatus,
+      ringActive: targetDispatchStatus === "pending_acceptance",
+      ...(options.ring ? { ringAt: Date.now() } : {}),
+      ...(targetDispatchStatus === "declined" ? {} : { declineReason: "" }),
       bookingType: booking.bookingType || "individual_vehicle",
       hasPaymentSlip: hasSlip,
       paymentSlipStatus: booking.paymentSlipStatus || "",
@@ -338,25 +347,24 @@ async function syncBookingDispatchDoc(
 
     await setDoc(doc(db, "dispatches", dispatchDocId), dispatchPayload, { merge: true });
 
-    const isNewJob =
-      targetDispatchStatus === "pending_acceptance" &&
-      (reassigned || existing?.status !== "pending_acceptance");
-    if (isNewJob) {
-      // Sent after the response, so the Admin never waits on the push service
-      after(() =>
-        sendDispatchPush({
-          id: dispatchDocId,
-          driverId: newDriverId,
-          assignedPlate: plate,
-          pickupCity: booking.pickupCity,
-          deliveryCity: booking.deliveryCity,
-          tripRole,
-        }).catch((e) => console.warn("Dispatch push notification failed:", e))
+    if (isWaiting) {
+      await setDoc(
+        doc(db, "bookings", booking.id),
+        {
+          driverTripStatus: targetDispatchStatus,
+          ...(options.ring ? { ringAt: Date.now() } : {}),
+          ...(targetDispatchStatus === "declined" ? {} : { declineReason: "", declinedAt: 0, declinedByName: "" }),
+        },
+        { merge: true }
       );
     }
-  } else if (existing?.status === "pending_acceptance") {
+  } else if (["scheduled", "pending_acceptance"].includes(existing?.status)) {
     // No driver any more: take the offer back
-    await updateDoc(doc(db, "dispatches", dispatchDocId), { status: "withdrawn", updatedAt: Date.now() });
+    await updateDoc(doc(db, "dispatches", dispatchDocId), {
+      status: "withdrawn",
+      ringActive: false,
+      updatedAt: Date.now(),
+    });
   }
 
   // Sync any pre-existing dispatch docs referencing this bookingId (e.g. legacy auto-ID dispatches)
@@ -1319,11 +1327,6 @@ export async function updateBookingStatusAction(
       if (["delivered", "completed"].includes(status) && !existingBooking?.rideEndedAt) {
         updateFields.rideEndedAt = Date.now();
       }
-      // A new assignment must be accepted afresh, so clear an old "declined" mark
-      if (status === "assigned" && existingBooking?.driverTripStatus === "declined") {
-        updateFields.driverTripStatus = "pending_acceptance";
-      }
-
       const docRef = doc(db, "bookings", id);
       await setDoc(docRef, updateFields, { merge: true });
       firestoreOk = true;
@@ -1494,18 +1497,18 @@ export async function editBookingAction(
       (changes.assignedDriverId && changes.assignedDriverId !== before.assignedDriverId) ||
       (targetPlate && normalizePlate(targetPlate) !== normalizePlate(before.assignedPlate))
     );
-    // A different driver or vehicle has to accept the job afresh
-    if (driverChanged && ["accepted", "assigned", "booked"].includes(before.status) && before.driverTripStatus) {
-      changes.driverTripStatus = "pending_acceptance";
-    }
     if (targetPlate && (outsideEmp || before.externalOwnerId)) changes.externalOwnerId = outsideEmp?.id || "";
 
+    const next = { ...before, ...mapFirestoreBooking(cleanId, { ...before, ...changes }) };
+    const clash = await findClash(driverChanged ? { ...next, driverTripStatus: undefined } : next);
+    if (clash) return { success: false, error: clash };
+
     await setDoc(doc(db, "bookings", cleanId), changes, { merge: true });
-    const updated = { ...before, ...mapFirestoreBooking(cleanId, { ...before, ...changes }) };
+    const updated = next;
 
     await Promise.all([
       // The driver's job shows the new route, vehicle, driver and fare at once
-      syncBookingDispatchDoc(updated, updated.status, undefined, { keepDeclined: true })
+      syncBookingDispatchDoc(updated, updated.status)
         .catch((e) => console.warn("Dispatch sync warning:", e)),
       // A changed fare or vehicle posts the commission difference
       settleCommissionSafely(cleanId),
@@ -1528,6 +1531,102 @@ export async function editBookingAction(
   }
 }
 
+/** Who would drive this booking, checked against the current records. */
+async function resolveJob(
+  current: StoredBooking
+): Promise<{ error: string } | { booking: StoredBooking; driverId: string; plate: string }> {
+  const plate = (current.assignedPlate || "").trim().toUpperCase();
+  const owner = plate ? await findOutsideOwnerByPlate(plate) : null;
+  let driverId = String(owner?.driverId || owner?.id || current.assignedDriverId || "").toUpperCase();
+  if (!driverId && plate) {
+    driverId = String((await resolveDriverMetadataForDispatch(current.assignedLorryId, plate)).driverId || "").toUpperCase();
+  }
+  if (!driverId || !plate) return { error: "Assign a rider and vehicle first." };
+  const driver = await ensureDriverRecord(driverId);
+  if (!driver) return { error: "The assigned rider no longer exists. Assign another rider." };
+  if (driver.active === false) return { error: `Rider ${driverId} is inactive. Assign another rider.` };
+  return { booking: { ...current, assignedDriverId: driverId, assignedPlate: plate }, driverId, plate };
+}
+
+/**
+ * The reason this booking would double-book its rider or vehicle, if any. Checks
+ * other scheduled bookings and trips on the road for an overlapping time window.
+ */
+async function findClash(booking: StoredBooking): Promise<string> {
+  if (booking.bookingType === "live_lorry") return "";
+  if (!booking.startTime || !booking.endTime) return "";
+  if (["cancelled", "delivered", "completed"].includes(booking.status)) return "";
+  // A rider who declined no longer occupies the slot; the lorry still does
+  const declined = booking.driverTripStatus === "declined";
+  const conflict = findBookingScheduleConflict(
+    {
+      ...booking,
+      ...(declined ? { assignedDriverId: "", assignedDriverName: "", assignedDriverPhone: "" } : {}),
+      excludeBookingId: booking.id,
+    },
+    await loadOpenBookings()
+  );
+  return conflict.hasConflict ? conflict.message || "This rider or vehicle is already booked for that time." : "";
+}
+
+/**
+ * Server Action: ring the assigned driver's phone for an approved booking.
+ */
+export async function ringDriverAction(
+  bookingId: string
+): Promise<ActionResult<{ phoneAlerted: boolean; driverId: string }>> {
+  const auth = await authorize("admin");
+  if (!auth.ok) return auth.denied;
+  try {
+    const cleanId = (bookingId || "").trim();
+    const raw = cleanId ? await getStoredBooking(cleanId) : null;
+    if (!raw) return { success: false, error: "Booking not found." };
+    if (!["accepted", "assigned", "booked"].includes(raw.status)) {
+      return { success: false, error: "Only an approved booking that has not started can be rung." };
+    }
+    const job = await resolveJob({ ...raw, ...mapFirestoreBooking(cleanId, raw) });
+    if ("error" in job) return { success: false, error: job.error };
+    const { booking, driverId, plate } = job;
+
+    const owner = await findOutsideOwnerByPlate(plate);
+    if (owner && owner.isAvailable === false) {
+      return { success: false, error: `Vehicle ${plate} is marked Unavailable by the owner.` };
+    }
+    // Ringing offers the job to this rider again, so their time must be free
+    const clash = await findClash({ ...booking, driverTripStatus: undefined });
+    if (clash) return { success: false, error: clash };
+    // A driver on the road can only be rung for a return load
+    const plan = await planTrip(booking);
+
+    await syncBookingDispatchDoc(booking, booking.status, { driverId, plate }, { ring: true });
+    let phoneAlerted = false;
+    try {
+      phoneAlerted =
+        (await sendDispatchPush({
+          id: `dispatch-${cleanId}`,
+          driverId,
+          assignedPlate: plate,
+          pickupCity: booking.pickupCity,
+          deliveryCity: booking.deliveryCity,
+          tripRole: plan.role,
+        })) > 0;
+    } catch (e) {
+      console.warn("Dispatch push notification failed:", e);
+    }
+
+    try {
+      revalidatePath("/admin");
+      revalidatePath("/login");
+    } catch { }
+
+    return { success: true, data: { phoneAlerted, driverId } };
+  } catch (err: unknown) {
+    if (err instanceof TripError) return { success: false, error: err.message };
+    console.error("ringDriverAction error:", err);
+    return { success: false, error: "Could not ring the driver. Please try again." };
+  }
+}
+
 /**
  * Server Action: Start Ride manually.
  * The office accepts the job on the driver's behalf through the same workflow as
@@ -1547,23 +1646,13 @@ export async function startRideAction(bookingId: string): Promise<ActionResult<S
     }
     const current = { ...raw, ...mapFirestoreBooking(cleanId, raw) };
 
-    const plate = (current.assignedPlate || "").trim().toUpperCase();
-    const owner = plate ? await findOutsideOwnerByPlate(plate) : null;
-    let driverId = String(owner?.driverId || owner?.id || current.assignedDriverId || "").toUpperCase();
-    if (!driverId && plate) {
-      driverId = String((await resolveDriverMetadataForDispatch(current.assignedLorryId, plate)).driverId || "").toUpperCase();
-    }
-    if (!driverId || !plate) {
-      return { success: false, error: "Assign a rider and vehicle before starting the ride." };
-    }
-    if (!(await ensureDriverRecord(driverId))) {
-      return { success: false, error: "The assigned rider no longer exists. Assign another rider." };
-    }
-    const booking = { ...current, assignedDriverId: driverId, assignedPlate: plate };
+    const job = await resolveJob(current);
+    if ("error" in job) return { success: false, error: job.error };
+    const { booking, driverId, plate } = job;
     await planTrip(booking);
 
     const running = isActiveTrip(booking);
-    await syncBookingDispatchDoc(booking, running ? "in_transit" : "assigned", { driverId, plate }, { reoffer: !running });
+    await syncBookingDispatchDoc(booking, running ? "in_transit" : "assigned", { driverId, plate }, { ring: !running });
     let patch: Record<string, any> = {};
     if (!running) {
       patch = (await performTripAction(`dispatch-${cleanId}`, "accept", { driverId })).bookingPatch;
@@ -1676,7 +1765,8 @@ export async function endRideAction(
  */
 export async function driverAcceptBookingAction(
   bookingId: string,
-  accept: boolean
+  accept: boolean,
+  reason?: string
 ): Promise<ActionResult<StoredBooking>> {
   const auth = await authorize("admin", "driver");
   if (!auth.ok) return auth.denied;
@@ -1690,6 +1780,7 @@ export async function driverAcceptBookingAction(
     }
     const result = await performTripAction(dispatchId, accept ? "accept" : "decline", {
       driverId: String(dispatch.driverId),
+      reason,
     });
     const updated = await updateBookingInStore(cleanId, result.bookingPatch);
     try {

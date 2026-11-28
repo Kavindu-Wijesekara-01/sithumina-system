@@ -7,7 +7,7 @@ import { addDaysToYYYYMMDD, cleanRiderName, findBookingScheduleConflict, formatJ
 import { startRideAction, endRideAction } from "@/actions";
 import { todayYmd } from "@/lib/ledger";
 import type { Stage3 } from "../state/useDashboardData";
-import { formatBookingDateTime, getBookingLifecycle, getRouteDistanceKm } from "../shared";
+import { formatBookingDateTime, getBookingLifecycle, getRouteDistanceKm, isAwaitingStart } from "../shared";
 
 export function createRenderBookingDispatchCard(admin: Stage3) {
   const {
@@ -39,6 +39,8 @@ export function createRenderBookingDispatchCard(admin: Stage3) {
     setQuoteInputs,
     showToast,
     toggleDashboardBookingCard,
+    handleRingDriver,
+    openAssignModal,
     updateBooking,
     updateScheduleDraft,
   } = admin;
@@ -198,12 +200,67 @@ export function createRenderBookingDispatchCard(admin: Stage3) {
         {/* Start Ride Banner for Scheduled Non-ongoing Bookings */}
         {!lifecycle.isOngoing && !lifecycle.isCompleted && cardContext !== "completed" && cardContext !== "pending_payment" && b.status !== "cancelled" && b.status !== "delivered" && (
           <div className="bg-blue-50 px-3.5 py-2 sm:px-4 border-b border-blue-200 flex flex-wrap items-center justify-between gap-2 text-xs text-blue-950 font-medium">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-blue-600"></span>
               <span className="font-bold">Scheduled Ride:</span>
               <span className="font-mono">{b.date} ({formatTimeDurationLabel(b.startTime, b.endTime)})</span>
+              {isAwaitingStart(b) && (
+                <>
+                  <span className="font-semibold">
+                    {b.assignedDriverId || b.assignedDriverName
+                      ? `${b.assignedDriverName || b.assignedDriverId} · ${b.assignedPlate || "no vehicle"}`
+                      : "No rider assigned"}
+                  </span>
+                  <span
+                    className={`rounded border px-1.5 py-0.5 font-bold ${b.driverTripStatus === "declined"
+                      ? "border-red-300 bg-red-100 text-red-900"
+                      : b.driverTripStatus === "pending_acceptance"
+                        ? "border-amber-300 bg-amber-100 text-amber-900"
+                        : "border-blue-300 bg-white text-blue-900"
+                      }`}
+                  >
+                    {b.driverTripStatus === "declined"
+                      ? "Declined by driver"
+                      : b.driverTripStatus === "pending_acceptance"
+                        ? "Ringing"
+                        : "Not rung yet"}
+                  </span>
+                  {lifecycle.startTimestamp !== null && clockTick >= lifecycle.startTimestamp && (
+                    <span className="rounded border border-red-300 bg-red-100 px-1.5 py-0.5 font-bold text-red-900">Overdue</span>
+                  )}
+                </>
+              )}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {isAwaitingStart(b) && (
+                <>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openAssignModal(b);
+                    }}
+                    className="px-3 py-1.5 rounded-lg border border-blue-300 bg-white hover:bg-blue-100 text-blue-950 font-bold cursor-pointer text-xs"
+                  >
+                    Change rider / lorry
+                  </button>
+                  <button
+                    type="button"
+                    disabled={actionLoading === b.id || !(b.assignedDriverId || b.assignedDriverName) || !b.assignedPlate}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleRingDriver(b);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-gray-950 font-bold cursor-pointer text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+                      <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+                    </svg>
+                    <span>{b.driverTripStatus === "pending_acceptance" ? "Ring Again" : "Ring Driver"}</span>
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 disabled={actionLoading === b.id}

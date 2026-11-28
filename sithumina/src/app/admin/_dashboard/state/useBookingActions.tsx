@@ -9,7 +9,7 @@ import { db } from "@/lib/firebase";
 import { doc, deleteDoc } from "firebase/firestore";
 import { addRiderAction, deleteRiderAction, setRiderActiveAction, saveFleetVehicleAction, deleteFleetVehicleAction } from "@/actions/riders";
 import { Lorry } from "@/lib/mock-lorries";
-import { createBookingAction, updateBookingStatusAction, updateRegistrationStatusAction, approveRegistrationAndAddToFleetAction, updateInquiryStatusAction, registerCustomerAction, deleteCustomerAction, approveTopupSlipAction, deleteTopupSlipAction, TopupSlipRecord } from "@/actions";
+import { createBookingAction, updateBookingStatusAction, ringDriverAction, updateRegistrationStatusAction, approveRegistrationAndAddToFleetAction, updateInquiryStatusAction, registerCustomerAction, deleteCustomerAction, approveTopupSlipAction, deleteTopupSlipAction, TopupSlipRecord } from "@/actions";
 import { periodRange, revenueLines, summarise, todayYmd, withExternalOwners } from "@/lib/ledger";
 import { useLedger } from "@/components/admin/useLedger";
 import { useBookingQuery } from "@/components/admin/useBookingQuery";
@@ -613,6 +613,36 @@ export function useStage2(previous: Stage1) {
     }
   };
   // ---- Assign Modal Handlers ----
+  /** The only thing that makes a driver's phone ring. */
+  const handleRingDriver = async (booking: StoredBooking, options: { skipConfirm?: boolean } = {}) => {
+    const tripDate = booking.date || booking.dates?.[0] || "";
+    if (!options.skipConfirm && tripDate && tripDate > todayYmd()) {
+      if (!confirm(`${booking.id} is scheduled for ${tripDate}. Ring the driver now?`)) return;
+    }
+    setActionLoading(booking.id);
+    try {
+      const res = await ringDriverAction(booking.id);
+      if (!res.success) {
+        showToast(res.error, "error");
+        return;
+      }
+      setBookings((prev) =>
+        prev.map((b) =>
+          b.id === booking.id ? { ...b, driverTripStatus: "pending_acceptance", ringAt: Date.now(), declineReason: "" } : b
+        )
+      );
+      showToast(
+        res.data.phoneAlerted
+          ? `Ringing ${res.data.driverId}. Waiting for the driver to accept.`
+          : `Job sent to ${res.data.driverId}, but no phone notification went out. It rings only while the app is open.`,
+        res.data.phoneAlerted ? "success" : "error"
+      );
+    } catch {
+      showToast("Could not ring the driver. Check your connection.", "error");
+    } finally {
+      setActionLoading(null);
+    }
+  };
   const openAssignModal = (booking: StoredBooking) => {
     const draft = getScheduleDraft(booking);
     const bPlateNorm = normalizePlate(draft.plate || booking.assignedPlate);
@@ -654,9 +684,11 @@ export function useStage2(previous: Stage1) {
       distanceKm: draft.distanceKm || (booking.distanceKm ? String(booking.distanceKm) : ""),
     });
   };
-  const confirmAssign = async () => {
+  const confirmAssign = async (ringAfter = false) => {
     if (!assignModal) return;
     const b = assignModal.booking;
+    // The booking as it will be once saved, for ringing straight away
+    const assigned = { ...b, date: assignModal.date || b.date };
     if (b.bookingType !== "live_lorry") {
       const check = validateIndividualScheduleOrToast(b.id, {
         date: assignModal.date,
@@ -706,6 +738,7 @@ export function useStage2(previous: Stage1) {
         }));
         setManualStageDraft((prev) => ({ ...prev, [b.id]: "assigned" }));
         setAssignModal(null);
+        if (ringAfter) await handleRingDriver(assigned, { skipConfirm: true });
       }
       return;
     }
@@ -733,6 +766,7 @@ export function useStage2(previous: Stage1) {
     if (ok) {
       setManualStageDraft((prev) => ({ ...prev, [b.id]: "assigned" }));
       setAssignModal(null);
+      if (ringAfter) await handleRingDriver(assigned, { skipConfirm: true });
     }
   };
   // ---- Manual Booking Client Lookup & Registration ----
@@ -1646,6 +1680,7 @@ export function useStage2(previous: Stage1) {
     formatInquiryDate,
     formatWhatsAppUrl,
     handleApproveRegistration,
+    handleRingDriver,
     handleApproveSlipPayment,
     handleApproveTopupSlip,
     handleConfirmDeleteCustomer,

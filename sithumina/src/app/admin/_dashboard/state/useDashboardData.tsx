@@ -6,7 +6,7 @@ import { StoredBooking } from "@/lib/server-store";
 import { normalizePhoneNumber } from "@/lib/phone-utils";
 import { paymentEntries, summarise, todayYmd } from "@/lib/ledger";
 import type { Stage2 } from "./useBookingActions";
-import { CustomerMetric, getBookingLifecycle } from "../shared";
+import { CustomerMetric, getBookingLifecycle, isAwaitingStart } from "../shared";
 
 /** Dashboard state and actions, part 3 of 3. */
 export function useStage3(previous: Stage2) {
@@ -120,7 +120,7 @@ export function useStage3(previous: Stage2) {
         if (b.status === "cancelled") return false;
         const lifecycle = getBookingLifecycle(b, clockTick);
         if (!lifecycle.isUpcoming) return false;
-        if (lifecycle.startPlus15 !== null && clockTick >= lifecycle.startPlus15) return false;
+        if (!isAwaitingStart(b) && lifecycle.startPlus15 !== null && clockTick >= lifecycle.startPlus15) return false;
         return true;
       })
       .sort((a, b) => {
@@ -316,7 +316,7 @@ export function useStage3(previous: Stage2) {
         if (dashboardFilterMode === "upcoming") {
           // Upcoming dispatches: must be upcoming and have NOT passed departure start time + 15 mins
           if (!lifecycle.isUpcoming || isOngoingRide || isCompletedRide) return false;
-          if (lifecycle.startPlus15 !== null && clockTick >= lifecycle.startPlus15) return false;
+          if (!isAwaitingStart(b) && lifecycle.startPlus15 !== null && clockTick >= lifecycle.startPlus15) return false;
         } else if (dashboardFilterMode === "ongoing") {
           if (!isOngoingRide || isCompletedRide) return false;
         } else if (dashboardFilterMode === "completed") {

@@ -30,7 +30,7 @@ export async function closeDispatchesForBooking(bookingId: string, bookingStatus
   for (const [id, current] of targets) {
     if (current === nextStatus) continue;
     // Only pull back a job the driver has not accepted yet; never interrupt a trip in progress
-    if (isWithdrawn && current !== "pending_acceptance") continue;
-    await updateDoc(doc(db, "dispatches", id), { status: nextStatus, updatedAt: Date.now() });
+    if (isWithdrawn && !["scheduled", "pending_acceptance", "declined"].includes(current)) continue;
+    await updateDoc(doc(db, "dispatches", id), { status: nextStatus, ringActive: false, updatedAt: Date.now() });
   }
 }

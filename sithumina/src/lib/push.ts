@@ -14,7 +14,7 @@ export async function sendDispatchPush(dispatch: {
   pickupCity?: string;
   deliveryCity?: string;
   tripRole?: string;
-}): Promise<void> {
+}): Promise<number> {
   const tokens = new Set<string>();
   const driverId = String(dispatch.driverId || "").toUpperCase();
   const plate = String(dispatch.assignedPlate || "").trim().toUpperCase();
@@ -30,7 +30,7 @@ export async function sendDispatchPush(dispatch: {
     targets = snap.docs.map((d) => d.data());
   }
   for (const d of targets) if (d.expoPushToken) tokens.add(String(d.expoPushToken));
-  if (tokens.size === 0) return;
+  if (tokens.size === 0) return 0;
 
   const isReturn = dispatch.tripRole === "return";
   const response = await fetch(EXPO_PUSH_URL, {
@@ -51,4 +51,12 @@ export async function sendDispatchPush(dispatch: {
     signal: AbortSignal.timeout(5000),
   });
   if (!response.ok) throw new Error(`Expo push failed with HTTP ${response.status}`);
+  // Expo answers 200 even when a ticket is refused (for example a missing FCM key)
+  const result = await response.json().catch(() => null);
+  const tickets: Array<{ status?: string; message?: string }> = Array.isArray(result?.data) ? result.data : [];
+  const accepted = tickets.filter((ticket) => ticket.status === "ok").length;
+  for (const ticket of tickets) {
+    if (ticket.status !== "ok") console.warn("Expo push ticket refused:", ticket.message);
+  }
+  return accepted;
 }

@@ -1,6 +1,6 @@
 "use client";
 
-/** Prominent, live notice whenever a driver declines an assigned job. */
+/** Prominent, live notice whenever a driver declines a ringing or upcoming job. */
 import { useEffect, useRef } from "react";
 import type { StoredBooking } from "@/lib/server-store";
 
@@ -50,8 +50,9 @@ export default function DeclineAlerts({
         {declined.map((b) => (
           <li key={b.id} className="flex flex-wrap items-center justify-between gap-3 py-2 text-sm text-red-900">
             <span>
-              <span className="font-mono font-semibold">{b.id}</span> · {b.pickupCity} to {b.deliveryCity} ·{" "}
-              {b.assignedDriverName || "Driver"} ({b.assignedPlate || "no vehicle"})
+              <span className="font-mono font-semibold">{b.id}</span> · {b.date} {b.startTime} · {b.pickupCity} to{" "}
+              {b.deliveryCity} · {b.declinedByName || b.assignedDriverName || "Driver"} ({b.assignedPlate || "no vehicle"})
+              {b.declineReason ? <span className="block font-semibold">Reason: {b.declineReason}</span> : null}
             </span>
             <button
               type="button"

@@ -127,11 +127,14 @@ export interface StoredBooking {
   travelRoute?: string;
   rideStartedAt?: number;
   rideEndedAt?: number;
-  driverTripStatus?: "pending_acceptance" | "accepted" | "loaded" | "declined" | "in_transit" | "completed" | "empty_return";
+  driverTripStatus?: "scheduled" | "pending_acceptance" | "accepted" | "loaded" | "declined" | "in_transit" | "completed" | "empty_return";
   isEmptyReturnActive?: boolean;
   externalOwnerId?: string;
   tripRole?: "primary" | "return";
   parentBookingId?: string;
+  ringAt?: number;
+  declineReason?: string;
+  declinedByName?: string;
   acceptedAt?: number;
   loadedAt?: number;
   pickupPinned?: boolean;
@@ -635,7 +638,7 @@ export async function createBookingInStore(
   paymentSlipDeletedAt?: number;
   waypoints?: Array<{ name: string; lat: number; lng: number }>;
   travelRoute?: string;
-  driverTripStatus?: "pending_acceptance" | "accepted" | "loaded" | "declined" | "in_transit" | "completed" | "empty_return";
+  driverTripStatus?: "scheduled" | "pending_acceptance" | "accepted" | "loaded" | "declined" | "in_transit" | "completed" | "empty_return";
   rideStartedAt?: number;
   rideEndedAt?: number;
   actualDistanceKm?: number;
@@ -706,7 +709,7 @@ export async function updateBookingStatusInStore(
     waypoints?: Array<{ name: string; lat: number; lng: number }>;
     rideStartedAt?: number;
     rideEndedAt?: number;
-    driverTripStatus?: "pending_acceptance" | "accepted" | "loaded" | "declined" | "in_transit" | "completed" | "empty_return";
+    driverTripStatus?: "scheduled" | "pending_acceptance" | "accepted" | "loaded" | "declined" | "in_transit" | "completed" | "empty_return";
     isEmptyReturnActive?: boolean;
   externalOwnerId?: string;
   tripRole?: "primary" | "return";

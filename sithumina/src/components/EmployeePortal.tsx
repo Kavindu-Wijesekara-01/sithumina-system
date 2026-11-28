@@ -16,7 +16,7 @@ import {
   driverToggleEmptyReturnAction,
   updateBookingStatusAction,
 } from "@/actions";
-import { formatRs, REGISTRATION_DEPOSIT } from "@/lib/commission";
+import { formatRs } from "@/lib/commission";
 import {
   StoredOutsideEmployee,
   StoredCommissionTransaction,
@@ -35,6 +35,12 @@ import {
 interface EmployeePortalProps {
   locale: string;
 }
+
+const APPROVED = ["accepted", "assigned", "booked"];
+/** The office is ringing for this job now. */
+const isRinging = (b: StoredBooking) => APPROVED.includes(b.status) && b.driverTripStatus === "pending_acceptance";
+/** Approved and waiting for its day. */
+const isUpcomingTrip = (b: StoredBooking) => APPROVED.includes(b.status) && b.driverTripStatus === "scheduled";
 
 const LOCAL_STORAGE_EMP_KEY = "sithumina_outside_employee_session";
 
@@ -531,9 +537,9 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
   const totalDeposited =
     transactions
       .filter((tx) => tx.type === "initial_deposit" || tx.type === "topup")
-      .reduce((sum, tx) => sum + (Number(tx.amount) || 0), 0) || REGISTRATION_DEPOSIT;
+      .reduce((sum, tx) => sum + (Number(tx.amount) || 0), 0);
   const commissionUsed = employee.totalCommissionDeducted || 0;
-  const usedPercent = Math.min(100, Math.round((commissionUsed / totalDeposited) * 100));
+  const usedPercent = totalDeposited > 0 ? Math.min(100, Math.round((commissionUsed / totalDeposited) * 100)) : 0;
 
   return (
     <div className="flex flex-col gap-6">
@@ -639,24 +645,10 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
           }`}
         >
           <span>{locale === "en" ? "Driver App & Trips" : "ඩ්‍රයිවර් ඇප් සහ ගමන්වාර"}</span>
-          {driverBookings.filter(
-            (b) =>
-              b.driverTripStatus !== "accepted" &&
-              b.driverTripStatus !== "declined" &&
-              b.status !== "delivered" &&
-              b.status !== "completed" &&
-              b.status !== "cancelled"
-          ).length > 0 && (
+          {driverBookings.filter(isRinging).length > 0 && (
             <span className="px-2 py-0.5 rounded-full bg-red-600 text-white font-mono text-xs font-semibold">
               {
-                driverBookings.filter(
-                  (b) =>
-                    b.driverTripStatus !== "accepted" &&
-                    b.driverTripStatus !== "declined" &&
-                    b.status !== "delivered" &&
-                    b.status !== "completed" &&
-                    b.status !== "cancelled"
-                ).length
+                driverBookings.filter(isRinging).length
               }{" "}
               New
             </span>
@@ -686,16 +678,49 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
        * ============================================================ */}
       {activeMainTab === "driver_app" && (
         <div className="flex flex-col gap-6">
+          {driverBookings.some(isUpcomingTrip) && (
+            <div className="p-6 rounded-xl bg-[var(--card)] border border-[var(--line)] flex flex-col gap-3">
+              <h3 className="text-base font-semibold text-[var(--ink)]">
+                {locale === "en" ? "Upcoming Trips" : "ඉදිරි ගමන්වාර"}
+              </h3>
+              <ul className="divide-y divide-[var(--line)]">
+                {driverBookings
+                  .filter(isUpcomingTrip)
+                  .sort((a, b) => `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`))
+                  .map((b) => (
+                    <li key={b.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-xs text-[var(--ink)]">
+                      <span>
+                        <span className="font-mono font-semibold">{b.id}</span> · {b.date}
+                        {b.startTime ? ` ${b.startTime}–${b.endTime}` : ""}
+                        <span className="block text-sm font-semibold">
+                          {b.pickupCity} ➔ {b.deliveryCity}
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        disabled={actionLoadingId === b.id}
+                        onClick={async () => {
+                          const reason = window.prompt("Why can you not do this trip?")?.trim();
+                          if (!reason) return;
+                          setActionLoadingId(b.id);
+                          const res = await driverAcceptBookingAction(b.id, false, reason);
+                          setActionLoadingId(null);
+                          if (!res.success) window.alert(res.error);
+                          void loadDriverBookings(employee.driverId || employee.id);
+                        }}
+                        className="px-3 py-2 rounded-xl border border-gray-300 hover:bg-rose-50 text-rose-700 font-bold cursor-pointer disabled:opacity-50"
+                      >
+                        {locale === "en" ? "Cannot do this trip" : "මෙම ගමන කළ නොහැක"}
+                      </button>
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          )}
+
           {/* Section A: New Assigned Booking Requests */}
           {(() => {
-            const pendingRequests = driverBookings.filter(
-              (b) =>
-                b.driverTripStatus !== "accepted" &&
-                b.driverTripStatus !== "declined" &&
-                b.status !== "delivered" &&
-                b.status !== "completed" &&
-                b.status !== "cancelled"
-            );
+            const pendingRequests = driverBookings.filter(isRinging);
 
             return (
               <div className="p-6 sm:p-7 rounded-xl bg-[var(--card)] border border-[var(--line)] flex flex-col gap-4">

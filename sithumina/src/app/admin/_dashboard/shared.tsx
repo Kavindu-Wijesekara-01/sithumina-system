@@ -325,4 +325,12 @@ export function getBookingLifecycle(b: StoredBooking, nowMs: number = Date.now()
     endPlus5,
   };
 }
+/**
+ * Approved and not yet started. These stay on the Dispatch Schedule even after
+ * their start time, until a driver accepts or the booking is changed.
+ */
+export function isAwaitingStart(b: StoredBooking): boolean {
+  return ["accepted", "assigned", "booked"].includes(b.status) && !b.rideStartedAt;
+}
+
 export type RevenueTimeFilter = "today" | "yesterday" | "pick_date" | "days_count" | "this_month" | "last_month" | "all_time" | "custom";
