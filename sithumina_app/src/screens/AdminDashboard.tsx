@@ -17,8 +17,7 @@ import * as ImagePicker from "expo-image-picker";
 import {
   subscribeAdminLorries,
   LorryRecord,
-  registerNewDriver,
-  registerCustomRider,
+  registerRider,
   subscribeAdminDrivers,
   subscribeAdminVehicles,
   saveAdminVehicle,
@@ -482,7 +481,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   const [riderName, setRiderName] = useState("");
   const [riderPhone, setRiderPhone] = useState("");
   const [riderNic, setRiderNic] = useState("");
-  const [riderId, setRiderId] = useState("");
   const [riderVehicle, setRiderVehicle] = useState("");
   const [editingRiderId, setEditingRiderId] = useState("");
   const [editRiderModal, setEditRiderModal] = useState(false);
@@ -694,51 +692,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     setRiderName("");
     setRiderPhone("");
     setRiderNic("");
-    setRiderId(`R-${1001 + riders.length}`);
     setRiderVehicle("");
     setAddRiderModal(true);
   };
 
   const handleSaveRider = async () => {
-    if (!riderName.trim() || !riderPhone.trim() || !riderId.trim()) {
-      showToast("Please enter Name, Phone and Rider ID");
+    if (!riderName.trim() || !riderPhone.trim()) {
+      showToast("Please enter Name and Phone");
       return;
     }
-    const cleanRiderId = riderId.trim().toUpperCase();
-    if (riders.some((r) => r.id.toUpperCase() === cleanRiderId)) {
-      showToast("Rider ID already exists");
+    const result = await registerRider({
+      name: riderName.trim(),
+      phone: riderPhone.trim(),
+      nic: riderNic.trim(),
+    });
+    if (!result.driverId) {
+      Alert.alert("Rider Not Added", result.error || "Please try again.");
       return;
     }
-
-    try {
-      // Register rider profile without lorry number (assigned upon live trip start)
-      await registerCustomRider({
-        driverId: cleanRiderId,
-        name: riderName.trim(),
-        phone: riderPhone.trim(),
-        nic: riderNic.trim(),
-      });
-
-      const newR: LocalRider = {
-        name: riderName.trim(),
-        id: cleanRiderId,
-        phone: riderPhone.trim(),
-        vehicle: "—",
-        status: 1,
-      };
-      const updated = [newR, ...riders.filter((r) => r.id !== cleanRiderId)];
-      setRiders(updated);
-      await AsyncStorage.setItem(RIDERS_STORAGE_KEY, JSON.stringify(updated));
-      setAddRiderModal(false);
-      setRiderName("");
-      setRiderPhone("");
-      setRiderNic("");
-      setRiderId("");
-      setRiderVehicle("");
-      showToast(`Rider ${cleanRiderId} added! Can log in now.`);
-    } catch {
-      showToast("Registration failed. Please try again.");
-    }
+    // The live rider list picks up the new record
+    setAddRiderModal(false);
+    setRiderName("");
+    setRiderPhone("");
+    setRiderNic("");
+    setRiderVehicle("");
+    Alert.alert(
+      "Rider Added",
+      `${result.driverId} was registered. Set their sign-in password on the web Admin Dashboard before they log in.`
+    );
   };
 
   const handleOpenEditRider = (r: LocalRider) => {
@@ -784,10 +765,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
       "Delete Rider",
       `Are you sure you want to delete rider "${name}" (${id})?`,
       async () => {
+        const result = await deleteDriverFromDb(id);
+        if (!result.success) {
+          Alert.alert("Rider Not Deleted", result.error || "Check your connection and try again.");
+          return;
+        }
         const updated = riders.filter((r) => r.id !== id);
         setRiders(updated);
         await AsyncStorage.setItem(RIDERS_STORAGE_KEY, JSON.stringify(updated));
-        deleteDriverFromDb(id);
         showToast(`Rider ${id} deleted`);
       }
     );
@@ -1075,7 +1060,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
             onPress={() => setActiveTab("complaints")}
           >
             <Text style={[styles.navText, activeTab === "complaints" && styles.navTextActive]}>
-              Complaints & Deletions
+              Cancellations & Deletions
             </Text>
             {!loadingComplaints && complaints.length > 0 && (
               <View style={[styles.badgeCount, { backgroundColor: "#DC2626" }]}>
@@ -1202,15 +1187,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flex: 1 }}>
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontSize: 13, fontWeight: "800", color: "#1F1E19" }}>
-                    Complaints & Deletion Audit Log
+                    Cancelled & Deleted Bookings
                   </Text>
                   <Text style={{ fontSize: 11, color: complaints.length > 0 ? "#DC2626" : "#6F6A5A", marginTop: 2 }}>
                     {loadingComplaints
                       ? "Syncing audit records..."
                       : complaints.length > 0
-                        ? `${complaints.length} deleted booking records with mandatory reasons`
-                        : "No active complaints or deletions"}
+                        ? `${complaints.length} records with the office reason`
+                        : "No cancellations or deletions"}
                   </Text>
+                  {complaints.slice(0, 3).map((item) => (
+                    <View key={item.id} style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: "#FECACA" }}>
+                      <Text style={{ fontSize: 12, fontWeight: "700", color: "#1F1E19" }}>
+                        {item.bookingId} · {item.type === "cancelled" ? "Cancelled" : "Deleted"}
+                      </Text>
+                      <Text style={{ fontSize: 12, color: "#7F1D1D", marginTop: 2 }}>{item.reason}</Text>
+                    </View>
+                  ))}
                 </View>
               </View>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
@@ -2188,13 +2181,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
           <View style={styles.tabSection}>
             {/* Header KPI Card */}
             <View style={styles.kpiCard}>
-              <Text style={styles.kpiLabel}>Complaints & Deletions</Text>
+              <Text style={styles.kpiLabel}>Cancellations & Deletions</Text>
               <Text style={styles.kpiValue}>
                 {complaints.length}{" "}
                 <Text style={{ fontSize: 16, color: "#DC2626" }}>Records</Text>
               </Text>
               <Text style={styles.kpiDelta}>
-                Audit log of cancelled and deleted bookings with mandatory reasons
+                Cancelled and deleted bookings with the reason the office gave
               </Text>
             </View>
 
@@ -2253,6 +2246,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                           #{item.bookingId || item.id}
                         </Text>
                       </View>
+                      <View style={{ backgroundColor: item.type === "cancelled" ? "#FFEDD5" : "#E5E7EB", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                        <Text style={{ fontSize: 11, fontWeight: "800", color: "#1F1E19" }}>
+                          {item.type === "cancelled" ? "Cancelled" : "Deleted"}
+                        </Text>
+                      </View>
                       {item.vehicleType ? (
                         <View style={{ backgroundColor: "#FEF3C7", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
                           <Text style={{ fontSize: 11, fontWeight: "700", color: "#92400E" }}>
@@ -2297,11 +2295,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                   {/* Deletion Reason Alert Callout */}
                   <View style={{ backgroundColor: "#FEF2F2", borderWidth: 1, borderColor: "#FECACA", borderRadius: 8, padding: 10, marginVertical: 6 }}>
                     <Text style={{ fontSize: 11, fontWeight: "800", color: "#991B1B", textTransform: "uppercase", letterSpacing: 0.5 }}>
-                      Deletion / Complaint Reason:
+                      {item.type === "cancelled" ? "Cancellation Reason:" : "Deletion Reason:"}
                     </Text>
                     <Text style={{ fontSize: 13, color: "#7F1D1D", fontWeight: "600", marginTop: 3, lineHeight: 18 }}>
                       {item.reason}
                     </Text>
+                    {item.assignedDriverName || item.assignedPlate ? (
+                      <Text style={{ fontSize: 11, color: "#54524B", marginTop: 4 }}>
+                        Was assigned to: {[item.assignedDriverName, item.assignedPlate].filter(Boolean).join(" · ")}
+                      </Text>
+                    ) : null}
                     {item.deletedBy ? (
                       <Text style={{ fontSize: 10.5, color: "#991B1B", marginTop: 4, fontStyle: "italic" }}>
                         Logged by: {item.deletedBy}
@@ -2351,15 +2354,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                 onChangeText={setRiderNic}
               />
 
-              <Text style={styles.inputLabel}>Rider ID</Text>
-              <TextInput
-                style={styles.formInput}
-                
-                placeholderTextColor="#8C877A"
-                autoCapitalize="characters"
-                value={riderId}
-                onChangeText={setRiderId}
-              />
+              <Text style={styles.inputLabel}>The Rider ID is assigned automatically.</Text>
 
               <TouchableOpacity style={styles.saveBtn} onPress={handleSaveRider}>
                 <Text style={styles.saveBtnText}>Save Rider</Text>

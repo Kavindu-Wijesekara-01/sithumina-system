@@ -1,9 +1,10 @@
 /**
  * Approved trips waiting for their day. Nothing here rings: the office rings the
- * driver when it is time. A driver who cannot make a trip says why.
+ * driver when it is time. A driver who cannot make a trip declines it with one
+ * confirmation.
  */
-import React, { useState } from "react";
-import { Linking, Modal, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import React from "react";
+import { Alert, Linking, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
 export interface UpcomingTrip {
   id: string;
@@ -30,8 +31,6 @@ export interface UpcomingTrip {
   externalFare?: boolean;
   tripRole?: "primary" | "return";
 }
-
-const REASONS = ["Not available on that date", "Vehicle breakdown", "Health reason"];
 
 const money = (amount?: number) => `Rs. ${(amount || 0).toLocaleString()}`;
 
@@ -60,21 +59,13 @@ export function UpcomingTrips({
 }: {
   trips: UpcomingTrip[];
   busy: boolean;
-  /** Resolves true once the office has been told. */
-  onDecline: (trip: UpcomingTrip, reason: string) => Promise<boolean>;
+  onDecline: (trip: UpcomingTrip) => void;
 }) {
-  const [declining, setDeclining] = useState<UpcomingTrip | null>(null);
-  const [reason, setReason] = useState("");
-  const canSend = reason.trim().length >= 3 && !busy;
-
-  const close = () => {
-    setDeclining(null);
-    setReason("");
-  };
-
-  const send = async () => {
-    if (declining && (await onDecline(declining, reason.trim()))) close();
-  };
+  const confirmDecline = (trip: UpcomingTrip) =>
+    Alert.alert("Decline Trip", `Decline ${trip.bookingId}? The office will give it to another rider.`, [
+      { text: "Keep Trip", style: "cancel" },
+      { text: "Decline", style: "destructive", onPress: () => onDecline(trip) },
+    ]);
 
   return (
     <View style={styles.section}>
@@ -135,7 +126,7 @@ export function UpcomingTrips({
                 <TouchableOpacity
                   style={styles.declineBtn}
                   disabled={busy}
-                  onPress={() => setDeclining(trip)}
+                  onPress={() => confirmDecline(trip)}
                   activeOpacity={0.8}
                 >
                   <Text style={styles.declineText}>Cannot do this trip</Text>
@@ -145,49 +136,6 @@ export function UpcomingTrips({
           );
         })
       )}
-
-      <Modal visible={Boolean(declining)} transparent animationType="fade" onRequestClose={close}>
-        <View style={styles.backdrop}>
-          <View style={styles.dialog}>
-            <Text style={styles.dialogTitle}>Decline {declining?.bookingId}</Text>
-            <Text style={styles.dialogText}>
-              The office is told at once and will give this trip to another rider.
-            </Text>
-            {REASONS.map((option) => (
-              <TouchableOpacity
-                key={option}
-                style={[styles.reason, reason === option && styles.reasonSelected]}
-                onPress={() => setReason(option)}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.reasonText}>{option}</Text>
-              </TouchableOpacity>
-            ))}
-            <TextInput
-              style={styles.input}
-              value={reason}
-              onChangeText={setReason}
-              placeholder="Or type your reason"
-              placeholderTextColor="#6B7280"
-              maxLength={300}
-              multiline
-            />
-            <View style={styles.actions}>
-              <TouchableOpacity style={styles.callBtn} onPress={close} activeOpacity={0.8}>
-                <Text style={styles.callText}>Keep Trip</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.sendBtn, !canSend && styles.disabled]}
-                disabled={!canSend}
-                onPress={send}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.sendText}>{busy ? "Sending..." : "Send and Decline"}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 }
@@ -211,15 +159,4 @@ const styles = StyleSheet.create({
   callText: { fontSize: 13, fontWeight: "700", color: "#111827" },
   declineBtn: { borderWidth: 1, borderColor: "#FCA5A5", backgroundColor: "#FEF2F2", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10 },
   declineText: { fontSize: 13, fontWeight: "700", color: "#B91C1C" },
-  backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", padding: 20 },
-  dialog: { backgroundColor: "#FFFFFF", borderRadius: 16, padding: 18 },
-  dialogTitle: { fontSize: 16, fontWeight: "700", color: "#111827" },
-  dialogText: { fontSize: 13, color: "#4B5563", marginTop: 4, marginBottom: 12 },
-  reason: { borderWidth: 1, borderColor: "#D1D5DB", borderRadius: 10, padding: 11, marginBottom: 8 },
-  reasonSelected: { borderColor: "#111827", backgroundColor: "#F3F4F6" },
-  reasonText: { fontSize: 13, color: "#111827" },
-  input: { borderWidth: 1, borderColor: "#D1D5DB", borderRadius: 10, padding: 11, minHeight: 64, fontSize: 13, color: "#111827", textAlignVertical: "top" },
-  sendBtn: { backgroundColor: "#B91C1C", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10 },
-  sendText: { fontSize: 13, fontWeight: "700", color: "#FFFFFF" },
-  disabled: { opacity: 0.5 },
 });

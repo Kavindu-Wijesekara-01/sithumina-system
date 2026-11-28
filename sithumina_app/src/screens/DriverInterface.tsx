@@ -465,8 +465,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
 
   const runTripAction = async (
     dispatch: DispatchRecord,
-    action: "accept" | "decline" | "loaded" | "collect_cash" | "complete",
-    reason?: string
+    action: "accept" | "decline" | "loaded" | "collect_cash" | "complete"
   ): Promise<boolean> => {
     if (busyDispatchId) return false;
     setBusyDispatchId(dispatch.id);
@@ -481,7 +480,6 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
             action,
             driverId: identity.driverId,
             plate: resolvePlateForDispatch(dispatch),
-            reason,
           }),
         },
         20000
@@ -598,12 +596,12 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     await runTripAction(dispatch, "decline");
   };
 
-  const handleDeclineUpcoming = async (trip: UpcomingTrip, reason: string) => {
+  const handleDeclineUpcoming = async (trip: UpcomingTrip) => {
     const dispatch = jobs.find((d) => d.id === trip.id);
-    if (!dispatch) return true; // Already taken back by the office
-    const sent = await runTripAction(dispatch, "decline", reason);
-    if (sent) Alert.alert("Office Notified", `${trip.bookingId} will be given to another rider.`);
-    return sent;
+    if (!dispatch) return; // Already taken back by the office
+    if (await runTripAction(dispatch, "decline")) {
+      Alert.alert("Office Notified", `${trip.bookingId} will be given to another rider.`);
+    }
   };
 
   // Ring for as long as any new job is waiting for an answer

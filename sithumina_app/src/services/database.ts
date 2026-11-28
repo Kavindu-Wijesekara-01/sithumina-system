@@ -322,190 +322,21 @@ export interface RegisterDriverInput {
  * Generate a unique, professional Driver ID
  * Format: ST-DRV-XXXX (e.g. ST-DRV-4921)
  */
-/** Reserve the next Driver ID (D-10, D-11 ...) using the same counter as the web. */
-export async function generateUniqueDriverId(): Promise<string> {
-  const counterRef = doc(db, "counters", "driver_ids");
-  let highest = 9;
-  // Only needed before the counter exists
-  if (!(await getDoc(counterRef)).exists()) {
-    const existing = await getDocs(collection(db, "drivers"));
-    existing.forEach((d) => {
-      const match = d.id.match(/^D-(\d+)$/i);
-      if (match) highest = Math.max(highest, Number(match[1]));
-    });
-  }
-  return runTransaction(db, async (tx) => {
-    let next = Math.max(Number((await tx.get(counterRef)).data()?.last) || 0, highest) + 1;
-    while (
-      (await tx.get(doc(db, "drivers", `D-${next}`))).exists() ||
-      (await tx.get(doc(db, "outside_employees", `D-${next}`))).exists()
-    ) {
-      next += 1;
-    }
-    tx.set(counterRef, { last: next, updatedAt: Date.now() }, { merge: true });
-    return `D-${next}`;
-  });
-}
-
-
-
-
 /**
- * Register a new Driver (Admin action)
- * Guaranteed NEVER to buffer indefinitely.
- * 1. Generates unique ID immediately.
- * 2. Caches locally so login works instantly.
- * 3. Syncs with central web backend API and Firestore in parallel with timeout protection.
+ * Register a company rider through the web server, which issues the next Rider
+ * ID and refuses a phone number or NIC that is already registered.
  */
-export async function registerNewDriver(
-  input: RegisterDriverInput
-): Promise<{ driverId: string; lorryId: string }> {
-  const driverId = await generateUniqueDriverId();
-  const cleanPlate = input.plate.trim().toUpperCase();
-  const lorryId = `lorry-${cleanPlate.replace(/[^A-Z0-9]/gi, "").toLowerCase() || driverId.toLowerCase()}`;
-
-  const driverData: DriverRecord = {
-    driverId,
-    name: input.name.trim(),
-    phone: input.phone.trim(),
-    plate: cleanPlate,
-    vehicleType: input.vehicleType.trim(),
-    route: input.route.trim() || "Colombo – Island-wide",
-    lorryId,
-    active: true,
-    createdAt: Date.now(),
-  };
-
-  // 1. Immediately cache locally on device (0ms latency, zero buffering)
-  await saveCachedDriver(driverData);
-
-  // 2. Sync to central Web Backend API (/api/drivers)
-  apiFetch("/api/drivers", {
-    method: "POST",
-    body: JSON.stringify({
-      ...driverData,
-      driverId,
-    }),
-  }).catch((e) => console.warn("API register driver sync notice:", e));
-
-  // 3. Attempt Firestore in parallel with non-blocking timeout
-  (async () => {
-    try {
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Timeout")), 1800)
-      );
-      const firestoreDriverPromise = setDoc(doc(db, "drivers", driverId), driverData);
-      const firestoreLorryPromise = setDoc(
-        doc(db, "lorries", lorryId),
-        {
-          id: lorryId,
-          plate: cleanPlate,
-          route: driverData.route,
-          driverName: driverData.name,
-          driverId,
-          vehicleType: driverData.vehicleType,
-          lat: 6.9271,
-          lng: 79.8612,
-          heading: 0,
-          speedKmH: 0,
-          status: "empty",
-          lastUpdated: "Just registered",
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      );
-      await Promise.race([
-        Promise.all([firestoreDriverPromise, firestoreLorryPromise]),
-        timeoutPromise,
-      ]);
-    } catch {
-      // Ignored - API and local storage handle persistence
-    }
-  })();
-
-  return { driverId, lorryId };
-}
-
-/**
- * Register a Rider with a custom/specified Rider ID (Admin action)
- * Automatically syncs with local storage and Firestore so the rider can log in immediately.
- */
-export async function registerCustomRider(input: {
-  driverId: string;
+export async function registerRider(input: {
   name: string;
   phone: string;
   nic?: string;
-  vehicle?: string;
-  plate?: string;
-}): Promise<DriverRecord> {
-  const cleanId = input.driverId.trim().toUpperCase();
-  const cleanPlate = (input.plate || input.vehicle || "").trim().toUpperCase();
-  const lorryId = `lorry-${cleanId.toLowerCase().replace(/[^a-z0-9]/g, "")}`;
-
-  const driverData: DriverRecord = {
-    driverId: cleanId,
-    name: input.name.trim(),
-    phone: input.phone.trim(),
-    plate: cleanPlate,
-    vehicleType: "Lorry Fleet",
-    route: "Island-wide Fleet",
-    lorryId,
-    active: true,
-    createdAt: Date.now(),
-  };
-
-  // 1. Immediately cache locally on device (0ms latency, login works immediately)
-  await saveCachedDriver(driverData);
-
-  // 2. Also sync to central API and Firestore with timeout
-  apiFetch("/api/drivers", {
+}): Promise<{ driverId?: string; error?: string }> {
+  const res = await apiFetch<{ driver: { driverId: string } }>("/api/drivers", {
     method: "POST",
-    body: JSON.stringify({
-      ...driverData,
-      driverId: cleanId,
-    }),
-  }).catch(() => {});
-
-  (async () => {
-    try {
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Timeout")), 1800)
-      );
-      const firestoreDriverPromise = setDoc(
-        doc(db, "drivers", cleanId),
-        driverData,
-        { merge: true }
-      );
-      const firestoreLorryPromise = setDoc(
-        doc(db, "lorries", lorryId),
-        {
-          id: lorryId,
-          plate: cleanPlate,
-          route: driverData.route,
-          driverName: driverData.name,
-          driverPhone: driverData.phone,
-          driverId: cleanId,
-          vehicleType: driverData.vehicleType,
-          lat: 6.9271,
-          lng: 79.8612,
-          heading: 0,
-          speedKmH: 0,
-          status: "empty",
-          lastUpdated: "Just registered",
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      );
-      await Promise.race([
-        Promise.all([firestoreDriverPromise, firestoreLorryPromise]),
-        timeoutPromise,
-      ]);
-    } catch {
-      // Ignored
-    }
-  })();
-
-  return driverData;
+    body: JSON.stringify(input),
+  });
+  const driverId = res.data?.driver?.driverId;
+  return driverId ? { driverId } : { error: res.error || "Could not register the rider." };
 }
 
 /**
@@ -560,41 +391,22 @@ export async function updateDriverInDb(
 }
 
 /**
- * Delete a driver from local cache, Firestore, and central API
+ * Remove a rider. The server also deletes their sign-in and frees their lorry.
  */
-export async function deleteDriverFromDb(driverId: string): Promise<boolean> {
+export async function deleteDriverFromDb(driverId: string): Promise<{ success: boolean; error?: string }> {
   const cleanId = driverId.trim().toUpperCase();
-
-  // 1. Remove from local cache
+  const res = await apiFetch(`/api/drivers?id=${encodeURIComponent(cleanId)}`, { method: "DELETE" });
+  if (!res.success) return { success: false, error: res.error };
   try {
     const drivers = await getCachedDrivers();
-    const filtered = drivers.filter((d) => d.driverId.toUpperCase() !== cleanId);
-    await AsyncStorage.setItem(LOCAL_DRIVERS_KEY, JSON.stringify(filtered));
+    await AsyncStorage.setItem(
+      LOCAL_DRIVERS_KEY,
+      JSON.stringify(drivers.filter((d) => d.driverId.toUpperCase() !== cleanId))
+    );
   } catch (err) {
     console.warn("Could not remove driver from local cache:", err);
   }
-
-  // 2. Remove from Firestore drivers collection
-  try {
-    await deleteDoc(doc(db, "drivers", cleanId));
-  } catch (err) {
-    console.warn("Could not delete driver from Firestore:", err);
-  }
-
-  // 3. Remove associated lorry document if exists
-  try {
-    const lorryId = `lorry-${cleanId.toLowerCase().replace(/[^a-z0-9]/g, "")}`;
-    await deleteDoc(doc(db, "lorries", lorryId));
-  } catch {}
-
-  // 4. Central API
-  try {
-    await apiFetch(`/api/drivers?id=${encodeURIComponent(cleanId)}`, {
-      method: "DELETE",
-    });
-  } catch {}
-
-  return true;
+  return { success: true };
 }
 
 
@@ -1974,6 +1786,9 @@ export async function toggleAdminBanner(id: string): Promise<void> {
 export interface ComplaintRecord {
   id: string;
   bookingId: string;
+  type: "cancelled" | "deleted";
+  assignedDriverName?: string;
+  assignedPlate?: string;
   customerName: string;
   customerPhone: string;
   customerIdNumber?: string;
@@ -2016,7 +1831,16 @@ export function subscribeAdminComplaints(
               vehicleType: String(data.vehicleType || "Lorry"),
               quotedAmount: typeof data.quotedAmount === "number" ? data.quotedAmount : (Number(data.quotedAmount || data.amount) || undefined),
               distanceKm: typeof data.distanceKm === "number" ? data.distanceKm : (Number(data.distanceKm) || undefined),
-              reason: String(data.reason || "Booking deleted by admin"),
+              // Older cancellations were stored as "Cancelled: reason" with no type
+              type:
+                data.type === "cancelled" || data.type === "deleted"
+                  ? data.type
+                  : String(data.reason || "").startsWith("Cancelled:")
+                    ? "cancelled"
+                    : "deleted",
+              assignedDriverName: data.assignedDriverName ? String(data.assignedDriverName) : undefined,
+              assignedPlate: data.assignedPlate ? String(data.assignedPlate) : undefined,
+              reason: String(data.reason || "No reason recorded").replace(/^Cancelled:\s*/, ""),
               deletedAt: Number(data.deletedAt) || (data.deletedAt ? new Date(data.deletedAt).getTime() : Date.now()),
               deletedBy: data.deletedBy ? String(data.deletedBy) : undefined,
             });
