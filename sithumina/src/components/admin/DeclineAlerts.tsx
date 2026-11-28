@@ -52,7 +52,6 @@ export default function DeclineAlerts({
             <span>
               <span className="font-mono font-semibold">{b.id}</span> · {b.date} {b.startTime} · {b.pickupCity} to{" "}
               {b.deliveryCity} · {b.declinedByName || b.assignedDriverName || "Driver"} ({b.assignedPlate || "no vehicle"})
-              {b.declineReason ? <span className="block font-semibold">Reason: {b.declineReason}</span> : null}
             </span>
             <button
               type="button"

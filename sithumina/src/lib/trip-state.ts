@@ -84,7 +84,7 @@ export function tripFields(data: Record<string, any>) {
     parentBookingId: data.parentBookingId ? String(data.parentBookingId) : undefined,
     driverTripStatus: data.driverTripStatus || undefined,
     ringAt: num(data.ringAt),
-    declineReason: data.declineReason ? String(data.declineReason) : undefined,
+    cancelReason: data.cancelReason ? String(data.cancelReason) : undefined,
     declinedByName: data.declinedByName ? String(data.declinedByName) : undefined,
     acceptedAt: num(data.acceptedAt),
     rideStartedAt: num(data.rideStartedAt),

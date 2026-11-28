@@ -9,6 +9,7 @@ import { cookies, headers } from "next/headers";
 import { NextResponse } from "next/server";
 import { adminAuth } from "@/lib/firebase-admin";
 import { db, doc, getDoc } from "@/lib/fs-server";
+import { findVehicleDocs } from "@/lib/vehicle-docs";
 import type { Role } from "./identity";
 
 export const SESSION_COOKIE = "__session";
@@ -88,4 +89,24 @@ export async function driverOwnsVehicle(session: Session, vehicle: string): Prom
   return Boolean(
     driver && [driver.plate, driver.lorryId, session.driverId].some((own) => vehicleKey(own) === key)
   );
+}
+
+/**
+ * The vehicle details a driver may publish: their own ID, and never a plate or
+ * lorry that the office has given to somebody else. Null when refused.
+ */
+export async function driverVehiclePayload<T extends Record<string, any>>(
+  session: Session,
+  body: T
+): Promise<(T & { driverId?: string }) | null> {
+  if (session.role !== "driver") return body;
+  for (const claimed of [body.plate, body.lorryId, body.id]) {
+    if (!claimed || (await driverOwnsVehicle(session, String(claimed)))) continue;
+    const records = await findVehicleDocs("lorries_registry", String(claimed).replace(/^lorry-/i, ""));
+    const taken = records.some(
+      (v) => v.data.driverId && String(v.data.driverId).toUpperCase() !== session.driverId.toUpperCase()
+    );
+    if (taken) return null;
+  }
+  return { ...body, driverId: session.driverId };
 }

@@ -21,7 +21,7 @@ export default function DeleteBookingModal({ admin }: { admin: Admin }) {
                 <span className="w-3 h-3 rounded-full bg-white"></span>
                 <div>
                   <h3 className="text-base font-bold">Delete Booking Record</h3>
-                  <p className="text-xs text-red-100">Deletion reason is mandatory and will be logged in Complaints.</p>
+                  <p className="text-xs text-red-100">A reason is required. It is logged in Complaints and shown to the customer.</p>
                 </div>
               </div>
               <button
@@ -121,7 +121,7 @@ export default function DeleteBookingModal({ admin }: { admin: Admin }) {
               </button>
               <button
                 type="button"
-                disabled={deletingBookingLoading || !deleteBookingModal.reason.trim()}
+                disabled={deletingBookingLoading || deleteBookingModal.reason.trim().length < 3}
                 onClick={handleConfirmDeleteBookingWithReason}
                 className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-red-600 hover:bg-red-700 transition-all cursor-pointer disabled:opacity-40"
               >

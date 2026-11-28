@@ -202,7 +202,7 @@ export function createRenderBookingDispatchCard(admin: Stage3) {
           <div className="bg-blue-50 px-3.5 py-2 sm:px-4 border-b border-blue-200 flex flex-wrap items-center justify-between gap-2 text-xs text-blue-950 font-medium">
             <div className="flex flex-wrap items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-blue-600"></span>
-              <span className="font-bold">Scheduled Ride:</span>
+              <span className="font-bold">{isAwaitingStart(b) ? "Scheduled Ride:" : "Requested date:"}</span>
               <span className="font-mono">{b.date} ({formatTimeDurationLabel(b.startTime, b.endTime)})</span>
               {isAwaitingStart(b) && (
                 <>
@@ -261,7 +261,7 @@ export function createRenderBookingDispatchCard(admin: Stage3) {
                   </button>
                 </>
               )}
-              <button
+              {isAwaitingStart(b) && <button
                 type="button"
                 disabled={actionLoading === b.id}
                 onClick={async (e) => {
@@ -294,7 +294,7 @@ export function createRenderBookingDispatchCard(admin: Stage3) {
                 title="Admin manual action: Start Ride"
               >
                 <span>Start Ride</span>
-              </button>
+              </button>}
             </div>
           </div>
         )}

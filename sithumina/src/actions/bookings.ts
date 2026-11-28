@@ -4,6 +4,7 @@ import { authorize, driverOwnsBooking, getSession, FORBIDDEN } from "@/lib/auth/
 import { revalidatePath } from "next/cache";
 import { findVehicleDocs, isOutsideRecord } from "@/lib/vehicle-docs";
 import { ensureDriverRecord } from "@/lib/riders";
+import { clearCancellation, listCustomerNotices, recordCancellation, type BookingNotice } from "@/lib/cancellations";
 import {
   createBookingInStore,
   getStoredBooking,
@@ -11,7 +12,6 @@ import {
   upsertBookingInStore,
   deleteBookingFromStore,
   getAllStoredComplaints,
-  recordComplaintInStore,
   updateBookingInStore,
   updateLorryGpsInStore,
   updateLorryStatusInStore,
@@ -328,7 +328,6 @@ async function syncBookingDispatchDoc(
       status: targetDispatchStatus,
       ringActive: targetDispatchStatus === "pending_acceptance",
       ...(options.ring ? { ringAt: Date.now() } : {}),
-      ...(targetDispatchStatus === "declined" ? {} : { declineReason: "" }),
       bookingType: booking.bookingType || "individual_vehicle",
       hasPaymentSlip: hasSlip,
       paymentSlipStatus: booking.paymentSlipStatus || "",
@@ -353,7 +352,7 @@ async function syncBookingDispatchDoc(
         {
           driverTripStatus: targetDispatchStatus,
           ...(options.ring ? { ringAt: Date.now() } : {}),
-          ...(targetDispatchStatus === "declined" ? {} : { declineReason: "", declinedAt: 0, declinedByName: "" }),
+          ...(targetDispatchStatus === "declined" ? {} : { declinedAt: 0, declinedByName: "" }),
         },
         { merge: true }
       );
@@ -801,6 +800,24 @@ export async function getCustomerBookingsAction(
 }
 
 /**
+ * Server Action: why the office cancelled or deleted this customer's bookings.
+ */
+export async function getMyBookingNoticesAction(
+  customerPhone?: string
+): Promise<ActionResult<BookingNotice[]>> {
+  const auth = await authorize("admin", "customer");
+  if (!auth.ok) return auth.denied;
+  try {
+    // Customers can only ever see their own
+    const phone = auth.session.role === "customer" ? auth.session.customerPhone : customerPhone || "";
+    return { success: true, data: await listCustomerNotices(phone) };
+  } catch (err) {
+    console.error("getMyBookingNoticesAction error:", err);
+    return { success: false, error: "Could not load booking notices." };
+  }
+}
+
+/**
  * Server Action to retrieve all bookings (for dispatch / admin).
  */
 export async function getAllBookingsAction(
@@ -1138,7 +1155,7 @@ export async function updateBookingStatusAction(
     if (isNewCancellation && existingBooking) {
       await recordReversal(existingBooking, cancelReason);
     } else if (existingBooking?.status === "cancelled" && status !== "cancelled") {
-      await voidReversals(id);
+      await Promise.all([voidReversals(id), clearCancellation(id)]);
     }
 
     // What the booking will look like, used to resolve the driver before the single write
@@ -1365,23 +1382,10 @@ export async function updateBookingStatusAction(
     }
 
     if (isNewCancellation) {
-      const record: StoredComplaint = {
-        id: `complaint-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
-        bookingId: id,
-        customerName: existingBooking?.customerName || "Customer",
-        customerPhone: existingBooking?.customerPhone || "",
-        customerIdNumber: existingBooking?.customerIdNumber || "",
-        pickupCity: existingBooking?.pickupCity || "",
-        deliveryCity: existingBooking?.deliveryCity || "",
-        date: existingBooking?.date || "",
-        vehicleType: existingBooking?.vehicleType || "",
-        quotedAmount: existingBooking?.quotedAmount ?? 0,
-        distanceKm: existingBooking?.distanceKm ?? 0,
-        reason: `Cancelled: ${cancelReason}`,
-        deletedAt: Date.now(),
-        deletedBy: "Admin",
-      };
-      await recordComplaintInStore(record);
+      await Promise.all([
+        setDoc(doc(db, "bookings", id), { cancelReason, cancelledAt: Date.now() }, { merge: true }),
+        recordCancellation("cancelled", id, existingBooking, cancelReason),
+      ]);
     }
 
     // Independent follow-ups run together
@@ -1645,6 +1649,9 @@ export async function startRideAction(bookingId: string): Promise<ActionResult<S
       return { success: false, error: `This booking is already ${raw.status}.` };
     }
     const current = { ...raw, ...mapFirestoreBooking(cleanId, raw) };
+    if (!isActiveTrip(current) && !["accepted", "assigned", "booked"].includes(current.status)) {
+      return { success: false, error: "Approve the booking before starting the ride." };
+    }
 
     const job = await resolveJob(current);
     if ("error" in job) return { success: false, error: job.error };
@@ -1765,8 +1772,7 @@ export async function endRideAction(
  */
 export async function driverAcceptBookingAction(
   bookingId: string,
-  accept: boolean,
-  reason?: string
+  accept: boolean
 ): Promise<ActionResult<StoredBooking>> {
   const auth = await authorize("admin", "driver");
   if (!auth.ok) return auth.denied;
@@ -1780,7 +1786,6 @@ export async function driverAcceptBookingAction(
     }
     const result = await performTripAction(dispatchId, accept ? "accept" : "decline", {
       driverId: String(dispatch.driverId),
-      reason,
     });
     const updated = await updateBookingInStore(cleanId, result.bookingPatch);
     try {
@@ -2022,7 +2027,7 @@ export async function deleteBookingAction(
       return { success: false, error: "Booking ID is required." };
     }
     const cleanReason = (reason || "").trim();
-    if (!cleanReason) {
+    if (cleanReason.length < 3) {
       return {
         success: false,
         error: "Booking එක delete කිරීම සඳහා හේතුවක් (Reason) ඇතුළත් කිරීම අනිවාර්ය වේ.",
@@ -2042,27 +2047,14 @@ export async function deleteBookingAction(
       }
     }
 
-    // 2. Create and persist complaint record
-    const complaintId = `complaint-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
-    const complaint: StoredComplaint = {
-      id: complaintId,
-      bookingId: cleanId,
-      customerName: targetBooking?.customerName || "Customer",
-      customerPhone: targetBooking?.customerPhone || requesterPhone || "",
-      customerIdNumber: targetBooking?.customerIdNumber || "",
-      pickupCity: targetBooking?.pickupCity || "",
-      deliveryCity: targetBooking?.deliveryCity || "",
-      date: targetBooking?.date || todayYmd(),
-      vehicleType: targetBooking?.vehicleType || "",
-      quotedAmount: targetBooking?.quotedAmount,
-      distanceKm: targetBooking?.distanceKm,
-      reason: cleanReason,
-      deletedAt: Date.now(),
-      deletedBy: deletedBy || "Admin",
-    };
-
-    // If the audit record cannot be saved, the booking is not deleted
-    await recordComplaintInStore(complaint);
+    // 2. If the audit record cannot be saved, the booking is not deleted
+    const complaintId = await recordCancellation(
+      "deleted",
+      cleanId,
+      { ...targetBooking, customerPhone: targetBooking?.customerPhone || requesterPhone || "" },
+      cleanReason,
+      deletedBy || "Admin"
+    );
 
     if (targetBooking) {
       // Money already received and commission already charged are reversed on record

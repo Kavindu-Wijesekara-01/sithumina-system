@@ -110,8 +110,6 @@ export interface TripActor {
   driverId: string;
   /** Vehicle the driver says they are using, if the job has none. */
   plate?: string;
-  /** Why the driver cannot do the job. Required for an upcoming trip. */
-  reason?: string;
 }
 
 export interface TripResult {
@@ -226,13 +224,10 @@ export async function performTripAction(
       if (!upcoming && dispatch.status !== "pending_acceptance") {
         throw new TripError("Only a job that has not started can be declined.");
       }
-      const reason = String(actor.reason || "").trim().slice(0, 300);
-      if (upcoming && reason.length < 3) throw new TripError("Give a reason so the office can reassign the trip.");
       dispatchStatus = "declined";
       holdsLock = false;
       bookingPatch = {
         driverTripStatus: "declined",
-        declineReason: reason,
         declinedAt: now,
         declinedByName: `${driver.name || "Driver"} (${driverId})`,
       };
@@ -293,7 +288,7 @@ export async function performTripAction(
       {
         status: dispatchStatus,
         ringActive: false,
-        ...(action === "decline" ? { declineReason: bookingPatch.declineReason, declinedAt: now } : {}),
+        ...(action === "decline" ? { declinedAt: now } : {}),
         ...(bookingPatch.driverTripStatus ? { driverTripStatus: bookingPatch.driverTripStatus } : {}),
         ...(action === "collect_cash" ? { cashDue: 0 } : {}),
         tripRole: role,

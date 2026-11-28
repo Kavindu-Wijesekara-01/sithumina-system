@@ -5,37 +5,11 @@ import type { Admin } from "../state/useAdminDashboard";
 export default function SidebarView({ admin }: { admin: Admin }) {
   const {
     activeNav,
-    completedBookings,
-    customersWithMetrics,
-    companyDrivers,
-    companyVehicles,
     handleOpenManualModal,
     handleSignOut,
-    inquiries,
-    loadingBookings,
-    loadingDrivers,
-    loadingFleet,
-    loadingInquiries,
-    loadingOutsideEmployees,
-    loadingRegistrations,
-    loadingTopupSlips,
-    loadingUsers,
-    ongoingBookings,
-    outsideEmployees,
-    pendingIndividualCount,
-    pendingOnlineCount,
-    pendingPaymentBookings,
-    pendingRegistrationsCount,
-    pendingTopupSlipsCount,
-    registrations,
-    revenueData,
     setActiveNav,
     setSidebarOpen,
     sidebarOpen,
-    storedSlips,
-    topupSlips,
-    totalPendingCount,
-    unreadInquiriesCount,
   } = admin;
 
   return (
@@ -85,12 +59,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>Dashboard Overview</span>
             </div>
-            {!loadingBookings && totalPendingCount > 0 && (
-              <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono font-bold ${activeNav === "overview" ? "bg-[#111827] text-[#FFC20E]" : "bg-amber-400 text-[#111827]"
-                }`}>
-                {totalPendingCount}
-              </span>
-            )}
           </button>
           {/* All Bookings (Ongoing Rides & Completed Bookings) */}
           <button
@@ -113,37 +81,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>All Bookings</span>
             </div>
-            <div className="flex items-center gap-1.5">
-              {ongoingBookings.length > 0 && (
-                <span
-                  className={`px-1.5 py-0.5 rounded-full text-xs font-mono font-bold flex items-center gap-1 ${activeNav === "all_bookings"
-                    ? "bg-[#111827] text-emerald-400"
-                    : "bg-emerald-500 text-white"
-                    }`}
-                  title={`${ongoingBookings.length} Ongoing Rides`}
-                >
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                  {ongoingBookings.length}
-                </span>
-              )}
-              {pendingPaymentBookings.length > 0 && (
-                <span
-                  className={`px-1.5 py-0.5 rounded-full text-xs font-mono font-bold ${activeNav === "all_bookings"
-                    ? "bg-[#111827] text-amber-400"
-                    : "bg-amber-500 text-white"
-                    }`}
-                  title={`${pendingPaymentBookings.length} Pending Payments`}
-                >
-                  {pendingPaymentBookings.length}
-                </span>
-              )}
-              {!loadingBookings && (
-                <span className={`px-2 py-0.5 rounded-full text-xs font-mono font-bold ${activeNav === "all_bookings" ? "bg-[#111827] text-[#FFC20E]" : "bg-white/15 text-white/70"
-                  }`}>
-                  {ongoingBookings.length + pendingPaymentBookings.length + completedBookings.length}
-                </span>
-              )}
-            </div>
           </button>
           {/* Individual Bookings */}
           <button
@@ -165,12 +102,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>Individual Bookings</span>
             </div>
-            {!loadingBookings && pendingIndividualCount > 0 && (
-              <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono font-bold ${activeNav === "individual_bookings" ? "bg-[#111827] text-[#FFC20E]" : "bg-amber-400 text-[#111827]"
-                }`}>
-                {pendingIndividualCount}
-              </span>
-            )}
           </button>
           {/* Online / Live Lorry Bookings */}
           <button
@@ -193,12 +124,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>Online / Live Bookings</span>
             </div>
-            {!loadingBookings && pendingOnlineCount > 0 && (
-              <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono font-bold ${activeNav === "online_bookings" ? "bg-[#111827] text-[#FFC20E]" : "bg-amber-400 text-[#111827]"
-                }`}>
-                {pendingOnlineCount}
-              </span>
-            )}
           </button>
           {/* Customers */}
           <button
@@ -220,10 +145,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>Customers</span>
             </div>
-            <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono ${activeNav === "customers" ? "bg-[#111827] text-white" : "bg-white/15 text-white/80"
-              }`}>
-              {loadingUsers ? "..." : customersWithMetrics.length}
-            </span>
           </button>
           {/* Revenue & Financials */}
           <button
@@ -243,12 +164,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>Revenue &amp; Financials</span>
             </div>
-            {!loadingBookings && revenueData.todayRevenue > 0 && (
-              <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono font-bold ${activeNav === "revenue" ? "bg-[#111827] text-[#FFC20E]" : "bg-emerald-500/20 text-emerald-300"
-                }`}>
-                Rs
-              </span>
-            )}
           </button>
           {/* Vehicle Partner Registrations */}
           <button
@@ -269,17 +184,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>Vehicle Registrations</span>
             </div>
-            {!loadingRegistrations && pendingRegistrationsCount > 0 ? (
-              <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono font-bold ${activeNav === "vehicle_registrations" ? "bg-[#111827] text-[#FFC20E]" : "bg-amber-400 text-[#111827]"
-                }`}>
-                {pendingRegistrationsCount}
-              </span>
-            ) : (
-              <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono ${activeNav === "vehicle_registrations" ? "bg-[#111827] text-white" : "bg-white/15 text-white/80"
-                }`}>
-                {loadingRegistrations ? "..." : registrations.length}
-              </span>
-            )}
           </button>
           {/* Outside Employees / Partners */}
           <button
@@ -301,10 +205,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>Outside Employees</span>
             </div>
-            <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono ${activeNav === "outside_employees" ? "bg-[#111827] text-white" : "bg-white/15 text-white/80"
-              }`}>
-              {loadingOutsideEmployees ? "..." : outsideEmployees.length}
-            </span>
           </button>
           {/* Top-up Slips */}
           <button
@@ -325,17 +225,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>Top-up Slips</span>
             </div>
-            {!loadingTopupSlips && pendingTopupSlipsCount > 0 ? (
-              <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono font-bold ${activeNav === "topup_slips" ? "bg-[#111827] text-[#FFC20E]" : "bg-amber-400 text-[#111827]"
-                }`}>
-                {pendingTopupSlipsCount}
-              </span>
-            ) : (
-              <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono ${activeNav === "topup_slips" ? "bg-[#111827] text-white" : "bg-white/15 text-white/80"
-                }`}>
-                {loadingTopupSlips ? "..." : topupSlips.length}
-              </span>
-            )}
           </button>
           {/* Contact Inquiries */}
           <button
@@ -354,17 +243,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>Contact Inquiries</span>
             </div>
-            {!loadingInquiries && unreadInquiriesCount > 0 ? (
-              <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono font-bold ${activeNav === "contact_submissions" ? "bg-[#111827] text-[#FFC20E]" : "bg-amber-400 text-[#111827]"
-                }`}>
-                {unreadInquiriesCount}
-              </span>
-            ) : (
-              <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono ${activeNav === "contact_submissions" ? "bg-[#111827] text-white" : "bg-white/15 text-white/80"
-                }`}>
-                {loadingInquiries ? "..." : inquiries.length}
-              </span>
-            )}
           </button>
           {/* Fleet Lorries */}
           <button
@@ -387,10 +265,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>Fleet Lorries</span>
             </div>
-            <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono ${activeNav === "fleet" ? "bg-[#111827] text-white" : "bg-white/15 text-white/80"
-              }`}>
-              {loadingFleet ? "..." : companyVehicles.length}
-            </span>
           </button>
           {/* Riders & Drivers */}
           <button
@@ -412,10 +286,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>Riders</span>
             </div>
-            <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono ${activeNav === "riders" ? "bg-[#111827] text-white" : "bg-white/15 text-white/80"
-              }`}>
-              {loadingDrivers ? "..." : companyDrivers.length}
-            </span>
           </button>
           {/* Settings */}
           <button
@@ -435,12 +305,6 @@ export default function SidebarView({ admin }: { admin: Admin }) {
               </svg>
               <span>Settings</span>
             </div>
-            {storedSlips.length > 0 && (
-              <span className={`px-1.5 py-0.2 rounded-full text-xs font-mono ${activeNav === "settings" ? "bg-[#111827] text-[#FFC20E]" : "bg-white/15 text-white/80"
-                }`}>
-                {storedSlips.length}
-              </span>
-            )}
           </button>
         </nav>
         {/* Sidebar Footer Controls */}

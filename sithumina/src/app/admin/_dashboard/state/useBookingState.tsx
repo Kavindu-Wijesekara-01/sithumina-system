@@ -1212,7 +1212,7 @@ export function useStage1() {
       }
     ): Promise<boolean> => {
       if (status === "cancelled") {
-        const reason = window.prompt("Reason for cancelling this booking (required):")?.trim() || "";
+        const reason = window.prompt("Reason for cancelling this booking (required). The customer will see it:")?.trim() || "";
         if (reason.length < 3) {
           showToast("The booking was not cancelled. A reason is required.", "error");
           return false;

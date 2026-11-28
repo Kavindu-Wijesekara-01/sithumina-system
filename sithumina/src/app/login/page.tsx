@@ -1,6 +1,7 @@
 "use client";
 
 import SignInForm from "@/components/auth/SignInForm";
+import RemovedBookings from "@/components/RemovedBookings";
 import { todayYmd } from "@/lib/ledger";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
@@ -402,10 +403,10 @@ export default function CustomerPortalPage() {
         pending += 1;
         if (b.status === "awaiting_payment") awaitingPay += 1;
       } else if (
-        ["accepted", "booked", "confirmed", "assigned", "in_transit"].includes(b.status)
+        ["accepted", "booked", "confirmed", "assigned", "goods_collected", "in_transit"].includes(b.status)
       ) {
         approved += 1;
-      } else if (b.status === "delivered") {
+      } else if (["delivered", "completed"].includes(b.status)) {
         completed += 1;
       } else if (b.status === "cancelled") {
         cancelled += 1;
@@ -430,11 +431,11 @@ export default function CustomerPortalPage() {
     }
     if (statusFilter === "approved") {
       return myBookings.filter((b) =>
-        ["accepted", "booked", "confirmed", "assigned", "in_transit"].includes(b.status)
+        ["accepted", "booked", "confirmed", "assigned", "goods_collected", "in_transit"].includes(b.status)
       );
     }
     if (statusFilter === "completed") {
-      return myBookings.filter((b) => b.status === "delivered");
+      return myBookings.filter((b) => ["delivered", "completed"].includes(b.status));
     }
     return myBookings.filter((b) => b.status === "cancelled");
   }, [myBookings, statusFilter]);
@@ -1194,6 +1195,13 @@ export default function CustomerPortalPage() {
                 )}
               </form>
             )}
+
+            <RemovedBookings
+              signedIn={profile?.role === "customer"}
+              refreshKey={myBookings.map((b) => `${b.id}:${b.status}`).join()}
+              show={statusFilter === "all" || statusFilter === "cancelled"}
+              locale={locale}
+            />
 
             {/* Filter Pills */}
             {!isBookingsLoading && myBookings.length > 0 && (
@@ -2002,6 +2010,12 @@ export default function CustomerPortalPage() {
                                   {locale === "en"
                                     ? "This booking request was cancelled/declined and the calendar date(s) have been released."
                                     : "මෙම වෙන්කිරීම අවලංගු කර ඇති අතර එම දිනය(න්) නැවත නිදහස් කර ඇත."}
+                                  {b.cancelReason ? (
+                                    <span className="mt-1 block">
+                                      {locale === "en" ? "Reason: " : "හේතුව: "}
+                                      {b.cancelReason}
+                                    </span>
+                                  ) : null}
                                 </span>
                                 <Link
                                   href="/book-vehicle"

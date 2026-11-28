@@ -19,7 +19,6 @@ export async function POST(request: Request) {
       // A driver acts only as themselves, whatever the request says
       driverId: auth.session.role === "driver" ? auth.session.driverId : String(body.driverId || ""),
       plate: body.plate ? String(body.plate) : undefined,
-      reason: body.reason ? String(body.reason) : undefined,
     });
 
     try {

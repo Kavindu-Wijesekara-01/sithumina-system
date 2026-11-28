@@ -100,7 +100,7 @@ export default function SignInForm({ role }: { role: Role }) {
       </label>
       {register && needsProof && (
         <label className="flex flex-col gap-1 text-sm text-gray-700">
-          NIC used on your bookings, or a booking ID
+          NIC used on your bookings (or a booking ID if you never gave one)
           <input className={field} value={proof} onChange={(e) => setProof(e.target.value)} required />
         </label>
       )}

@@ -700,10 +700,9 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                         type="button"
                         disabled={actionLoadingId === b.id}
                         onClick={async () => {
-                          const reason = window.prompt("Why can you not do this trip?")?.trim();
-                          if (!reason) return;
+                          if (!window.confirm(`Decline trip ${b.id}? The office will give it to someone else.`)) return;
                           setActionLoadingId(b.id);
-                          const res = await driverAcceptBookingAction(b.id, false, reason);
+                          const res = await driverAcceptBookingAction(b.id, false);
                           setActionLoadingId(null);
                           if (!res.success) window.alert(res.error);
                           void loadDriverBookings(employee.driverId || employee.id);
@@ -827,9 +826,11 @@ export default function EmployeePortal({ locale }: EmployeePortalProps) {
                             type="button"
                             disabled={actionLoadingId === b.id}
                             onClick={async () => {
+                              if (!window.confirm(`Decline booking ${b.id}?`)) return;
                               setActionLoadingId(b.id);
-                              await driverAcceptBookingAction(b.id, false);
+                              const res = await driverAcceptBookingAction(b.id, false);
                               setActionLoadingId(null);
+                              if (!res.success) window.alert(res.error);
                               void loadDriverBookings(employee.driverId || employee.id);
                             }}
                             className="px-4 py-2 rounded-xl border border-gray-300 hover:bg-rose-50 text-rose-700 font-bold text-xs cursor-pointer transition-colors"

@@ -1,4 +1,4 @@
-import { authorize, deniedResponse, driverOwnsBooking, driverOwnsVehicle, getSession, FORBIDDEN } from "@/lib/auth/server";
+import { authorize, deniedResponse, driverOwnsBooking, driverOwnsVehicle, driverVehiclePayload, getSession, FORBIDDEN } from "@/lib/auth/server";
 import { NextResponse } from "next/server";
 import { upsertLorryTripInStore } from "@/lib/server-store";
 import { db } from "@/lib/fs-server";
@@ -15,7 +15,8 @@ export async function POST(
   }
   try {
     const { id } = await params;
-    const body = await request.json();
+    const body = await driverVehiclePayload(auth.session, await request.json());
+    if (!body) return deniedResponse(FORBIDDEN);
 
     const lorry = await upsertLorryTripInStore({
       ...body,

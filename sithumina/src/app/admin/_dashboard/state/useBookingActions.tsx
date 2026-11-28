@@ -628,7 +628,7 @@ export function useStage2(previous: Stage1) {
       }
       setBookings((prev) =>
         prev.map((b) =>
-          b.id === booking.id ? { ...b, driverTripStatus: "pending_acceptance", ringAt: Date.now(), declineReason: "" } : b
+          b.id === booking.id ? { ...b, driverTripStatus: "pending_acceptance", ringAt: Date.now() } : b
         )
       );
       showToast(

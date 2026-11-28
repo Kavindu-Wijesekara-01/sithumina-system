@@ -133,7 +133,8 @@ export interface StoredBooking {
   tripRole?: "primary" | "return";
   parentBookingId?: string;
   ringAt?: number;
-  declineReason?: string;
+  cancelReason?: string;
+  cancelledAt?: number;
   declinedByName?: string;
   acceptedAt?: number;
   loadedAt?: number;
@@ -288,6 +289,9 @@ export interface StoredReview {
 export interface StoredComplaint {
   id: string;
   bookingId: string;
+  type?: "cancelled" | "deleted";
+  assignedDriverName?: string;
+  assignedPlate?: string;
   customerName: string;
   customerPhone: string;
   customerIdNumber?: string;

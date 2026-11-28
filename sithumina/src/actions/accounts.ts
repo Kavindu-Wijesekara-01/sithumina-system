@@ -17,7 +17,8 @@ function failure(context: string, err: unknown): { success: false; error: string
 /**
  * Customer self-registration. Without SMS we cannot prove who holds a number, so
  * a number that already has bookings can only be claimed by someone who knows
- * the NIC or a booking ID on those bookings.
+ * the NIC used on them. Booking numbers are sequential and can be guessed, so one
+ * is accepted only when none of the bookings has a NIC.
  */
 export async function registerCustomerAccountAction(input: {
   phone: string;
@@ -34,13 +35,14 @@ export async function registerCustomerAccountAction(input: {
     const history = await getBookingsByCustomerPhone(phone);
     if (history.length > 0) {
       const proof = (input.proof || "").trim().toUpperCase();
-      const matches = history.some(
-        (b) => b.id.toUpperCase() === proof || (b.customerIdNumber || "").toUpperCase() === proof
-      );
+      const nics = history.map((b) => String(b.customerIdNumber || "").trim().toUpperCase()).filter(Boolean);
+      const matches = nics.length > 0 ? nics.includes(proof) : history.some((b) => b.id.toUpperCase() === proof);
       if (!proof || !matches) {
         return {
           success: false,
-          error: "This number already has bookings. Enter the NIC used on them, or one of the booking IDs.",
+          error: nics.length > 0
+            ? "This number already has bookings. Enter the NIC used on them, or ask the office for help."
+            : "This number already has bookings. Enter one of the booking IDs.",
           code: "PROOF_REQUIRED",
         };
       }
