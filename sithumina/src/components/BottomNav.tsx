@@ -13,7 +13,7 @@ export const BottomNav: React.FC = () => {
   const hotline = siteConfig.phoneNumbers[0]?.link || "tel:0112984984";
 
   const isHomeActive = pathname === "/";
-  const isLorriesActive = pathname === "/find-empty-lorry";
+  const isVehiclesActive = pathname === "/book-vehicle";
   const isAccountActive = pathname === "/login";
   const isCallActive = pathname === "/contact";
 
@@ -65,14 +65,14 @@ export const BottomNav: React.FC = () => {
 
         {/* 2. Vehicles */}
         <Link
-          href="/find-empty-lorry"
+          href="/book-vehicle"
           className="flex flex-col items-center justify-center group no-underline transition-transform active:scale-95"
           aria-label={locale === "si" ? "වාහන" : "Vehicles"}
-          aria-current={isLorriesActive ? "page" : undefined}
+          aria-current={isVehiclesActive ? "page" : undefined}
         >
           <div
             className={`flex items-center justify-center w-14 h-8 rounded-full transition-all duration-200 ${
-              isLorriesActive
+              isVehiclesActive
                 ? "bg-[#FFC20E] text-[#26231B] shadow-xs"
                 : "text-[#6F6A5A] group-hover:text-[#26231B] group-hover:bg-[#F7F5EE]"
             }`}
@@ -82,7 +82,7 @@ export const BottomNav: React.FC = () => {
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
-              strokeWidth={isLorriesActive ? "2.6" : "2.2"}
+              strokeWidth={isVehiclesActive ? "2.6" : "2.2"}
               strokeLinecap="round"
               strokeLinejoin="round"
             >
@@ -93,7 +93,7 @@ export const BottomNav: React.FC = () => {
           </div>
           <span
             className={`text-[11px] sm:text-xs mt-1 leading-tight tracking-tight ${
-              isLorriesActive
+              isVehiclesActive
                 ? "font-extrabold text-[#26231B]"
                 : "font-semibold text-[#6F6A5A] group-hover:text-[#26231B]"
             }`}
