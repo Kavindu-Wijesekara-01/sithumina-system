@@ -51,6 +51,7 @@ import {
 import { apiFetch } from "../config/api";
 import { SriLankaMapViewer, MapLorryItem } from "../components/SriLankaMapViewer";
 import CityAutocomplete from "../components/CityAutocomplete";
+import { UpcomingTrips, type UpcomingTrip } from "../components/UpcomingTrips";
 import { CityEntry } from "../data/sri-lanka-cities";
 
 interface DriverInterfaceProps {
@@ -211,8 +212,18 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
     travelRoute?: string;
     createdAt: number;
     updatedAt?: number;
+    startTime?: string;
+    endTime?: string;
+    cargoNature?: string;
+    cargoWeight?: string;
+    helpersCount?: string;
   }
-  const [pendingDispatches, setPendingDispatches] = useState<DispatchRecord[]>([]);
+  const [jobs, setJobs] = useState<DispatchRecord[]>([]);
+  // "scheduled" jobs wait quietly under Upcoming Trips; everything else is live
+  const pendingDispatches = jobs.filter((d) => d.status !== "scheduled");
+  const upcomingTrips = jobs
+    .filter((d) => d.status === "scheduled")
+    .sort((a, b) => `${a.date} ${a.startTime || ""}`.localeCompare(`${b.date} ${b.startTime || ""}`));
 
   const normalizePlateKey = (plate?: string): string =>
     String(plate || "")
@@ -261,6 +272,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
         );
         const st = String(data.status || "pending_acceptance").toLowerCase();
         if (
+          st !== "scheduled" &&
           st !== "pending_acceptance" &&
           st !== "accepted" &&
           st !== "goods_collected" &&
@@ -327,6 +339,11 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
           distanceKm: typeof data.distanceKm === "number" ? data.distanceKm : (Number(data.distanceKm) || undefined),
           waypoints: Array.isArray(data.waypoints) ? data.waypoints : undefined,
           travelRoute: data.travelRoute || "",
+          startTime: data.startTime || "",
+          endTime: data.endTime || "",
+          cargoNature: data.cargoNature || "",
+          cargoWeight: data.cargoWeight || "",
+          helpersCount: String(data.helpersCount ?? ""),
           createdAt: Number(data.createdAt) || Date.now(),
           updatedAt: Number(data.updatedAt) || Number(data.createdAt) || 0,
         };
@@ -350,7 +367,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
         if (a.tripRole !== b.tripRole) return a.tripRole === "return" ? 1 : -1;
         return b.createdAt - a.createdAt;
       });
-      setPendingDispatches(items);
+      setJobs(items);
 
     };
 
@@ -448,7 +465,8 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
 
   const runTripAction = async (
     dispatch: DispatchRecord,
-    action: "accept" | "decline" | "loaded" | "collect_cash" | "complete"
+    action: "accept" | "decline" | "loaded" | "collect_cash" | "complete",
+    reason?: string
   ): Promise<boolean> => {
     if (busyDispatchId) return false;
     setBusyDispatchId(dispatch.id);
@@ -463,6 +481,7 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
             action,
             driverId: identity.driverId,
             plate: resolvePlateForDispatch(dispatch),
+            reason,
           }),
         },
         20000
@@ -577,6 +596,14 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
 
   const handleDeclineDispatch = async (dispatch: DispatchRecord) => {
     await runTripAction(dispatch, "decline");
+  };
+
+  const handleDeclineUpcoming = async (trip: UpcomingTrip, reason: string) => {
+    const dispatch = jobs.find((d) => d.id === trip.id);
+    if (!dispatch) return true; // Already taken back by the office
+    const sent = await runTripAction(dispatch, "decline", reason);
+    if (sent) Alert.alert("Office Notified", `${trip.bookingId} will be given to another rider.`);
+    return sent;
   };
 
   // Ring for as long as any new job is waiting for an answer
@@ -1473,6 +1500,12 @@ export const DriverInterface: React.FC<DriverInterfaceProps> = ({
             </View>
           );
         })}
+
+        <UpcomingTrips
+          trips={upcomingTrips}
+          busy={Boolean(busyDispatchId)}
+          onDecline={handleDeclineUpcoming}
+        />
 
         {/* 2. REAL SRI LANKA MAP VIEW (Showing rider's real GPS location) */}
         <View style={styles.mapCard}>
