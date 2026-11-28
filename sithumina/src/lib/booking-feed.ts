@@ -117,7 +117,3 @@ export async function fetchBookingsForPeriod(from: number, to: number) {
   );
   return Array.from(new Map(lists.flat().map((b) => [b.id, b])).values());
 }
-
-export const fetchBookingsForDriver = (driverId: string) => rows(where("assignedDriverId", "==", driverId));
-export const fetchBookingsForVehicle = (plate: string) =>
-  rows(where("assignedPlate", "==", plate.trim().toUpperCase()));

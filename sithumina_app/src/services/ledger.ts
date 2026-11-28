@@ -143,6 +143,16 @@ export function paymentEntries(b: LedgerBooking): PaymentEntry[] {
 
 export const isTripFinished = (b: LedgerBooking) => b.status === "delivered" || b.status === "completed";
 
+/**
+ * When a finished trip counts. Records without an end time use their scheduled
+ * day, never the last edit, so changing an old booking cannot move it to today.
+ */
+export function tripFinishedAt(b: LedgerBooking): number {
+  if (b.rideEndedAt) return b.rideEndedAt;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(b.date || "")) return dayStart(b.date as string);
+  return b.createdAt || b.updatedAt || 0;
+}
+
 /** What a customer still owes the company. */
 export function outstandingAmount(b: LedgerBooking): number {
   if (b.status === "cancelled" || isExternalBooking(b)) return 0;
@@ -228,7 +238,7 @@ export function summarise(
     refunds: 0, cash: 0, bank: 0, unrecorded: 0, outstanding: 0, banks: [],
   };
   for (const b of bookings) {
-    const finishedAt = b.rideEndedAt || b.updatedAt || b.createdAt || 0;
+    const finishedAt = tripFinishedAt(b);
     if (!isTripFinished(b) || finishedAt < from || finishedAt >= to) continue;
     t.trips += 1;
     if (b.tripRole === "return") t.returnTrips += 1;

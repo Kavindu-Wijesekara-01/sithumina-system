@@ -1,6 +1,6 @@
 /** Small shared building blocks for the admin finance and trip views. */
 import { formatRs } from "@/lib/commission";
-import type { Period, Totals } from "@/lib/ledger";
+import { periodRange, todayYmd, type Period, type Totals } from "@/lib/ledger";
 
 export function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
@@ -71,10 +71,23 @@ export interface PeriodValue {
   to: string;
 }
 
-export function PeriodPicker({ value, onChange }: { value: PeriodValue; onChange: (v: PeriodValue) => void }) {
+export function PeriodPicker({
+  value,
+  onChange,
+  showDates = false,
+}: {
+  value: PeriodValue;
+  onChange: (v: PeriodValue) => void;
+  /** Always show From and To; editing either switches to a custom range. */
+  showDates?: boolean;
+}) {
+  // While a preset is active the boxes show the days it covers
+  const preset = value.period === "today" || value.period === "month" ? periodRange(value.period) : null;
+  const from = value.period === "custom" ? value.from : preset ? todayYmd(preset[0]) : "";
+  const to = value.period === "custom" ? value.to : preset ? todayYmd(preset[1] - 1) : "";
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {PERIODS.map(([id, label]) => (
+      {PERIODS.filter(([id]) => !(showDates && id === "custom")).map(([id, label]) => (
         <button
           key={id}
           type="button"
@@ -87,21 +100,22 @@ export function PeriodPicker({ value, onChange }: { value: PeriodValue; onChange
           {label}
         </button>
       ))}
-      {value.period === "custom" && (
+      {(showDates || value.period === "custom") && (
         <>
+          {showDates && <span className="text-sm text-gray-500">From</span>}
           <input
             type="date"
             aria-label="From date"
-            value={value.from}
-            onChange={(e) => onChange({ ...value, from: e.target.value })}
+            value={from}
+            onChange={(e) => onChange({ period: "custom", from: e.target.value, to })}
             className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
           />
           <span className="text-sm text-gray-500">to</span>
           <input
             type="date"
             aria-label="To date"
-            value={value.to}
-            onChange={(e) => onChange({ ...value, to: e.target.value })}
+            value={to}
+            onChange={(e) => onChange({ period: "custom", from, to: e.target.value })}
             className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
           />
         </>
